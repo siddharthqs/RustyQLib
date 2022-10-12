@@ -6,8 +6,6 @@ use std::{thread,io};
 use super::utils::{N, dN};
 use super::vanila_option::{OptionType, EquityOption,Transection};
 
-
-//mod dis;
 impl EquityOption{
     pub fn pv(&self)->f64 {
         assert!(self.volatility>=0.0);
@@ -62,8 +60,28 @@ impl EquityOption{
         let vega = self.current_price* dN(self.d1())*self.time_to_maturity.sqrt();
         return vega;
     }
-    //ToDO
-    //theta
+
+    pub fn theta(&self) -> f64 {
+
+        let mut theta = 0.0;
+        if self.option_type==OptionType::Call {
+             //-(St * dN(d1) * sigma / (2 * math.sqrt(T - t)) + r * K * math.exp(-r * (T - t)) * N(d2))
+            let t1 = -self.current_price*dN(self.d1())*self.volatility/(2.0*self.time_to_maturity.sqrt());
+            let t2 = (self.risk_free_rate-self.dividend_yield)*self.strike_price*exp(-(self.risk_free_rate-self.dividend_yield)
+                * self.time_to_maturity)* N(self.d2());
+            theta = t1+t2;
+        }
+        else if self.option_type==OptionType::Put {
+             //-(St * dN(d1) * sigma / (2 * math.sqrt(T - t)) - r * K * math.exp(-r * (T - t)) * N(d2))
+            let t1 = -self.current_price*dN(self.d1())*self.volatility/(2.0*self.time_to_maturity.sqrt());
+            let t2 = (self.risk_free_rate-self.dividend_yield)*self.strike_price*exp(-(self.risk_free_rate-self.dividend_yield)
+                * self.time_to_maturity)* N(self.d2());
+            theta = t1-t2;
+        }
+
+        return theta ;
+    }
+
     pub fn rho(&self) -> f64 {
         //rho K * (T - t) * math.exp(-r * (T - t)) * N(d2)
         let mut rho = 0.0;
@@ -115,24 +133,24 @@ pub fn option_pricing() {
         _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
     }
 
-    println!("(Step 3/7) What's the stike price you want?");
+    println!("Stike price:");
     let mut strike = String::new();
     io::stdin().read_line(&mut strike).expect("Failed to read line");
 
-    println!("(Step 4/7) What's the expected annualized volatility in %?");
+    println!("Expected annualized volatility in %:");
     println!("E.g.: Enter 50% chance as 0.50 ");
     let mut vol = String::new();
     io::stdin().read_line(&mut vol).expect("Failed to read line");
 
-    println!("(Step 5/7) What's the risk-free rate in %?");
+    println!("Risk-free rate in %:");
     let mut rf = String::new();
     io::stdin().read_line(&mut rf).expect("Failed to read line");
 
-    println!("(Step 6/7) In how many years do you want the expiry to be?");
+    println!("Time to maturity in years");
     let mut expiry = String::new();
     io::stdin().read_line(&mut expiry).expect("Failed to read line");
 
-    println!("(Step 7/7) What is the dividend yield on this stock?");
+    println!("Dividend yield on this stock:");
     let mut div = String::new();
     io::stdin().read_line(&mut div).expect("Failed to read line");
 
@@ -147,8 +165,13 @@ pub fn option_pricing() {
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         transection_price: 0.0
     };
-    println!("This option is currently worth ${}!", option.pv());
-
+    println!("Theoretical Price ${}", option.pv());
+    println!("Premium at risk ${}", option.get_premium_at_risk());
+    println!("Delata {}", option.delta());
+    println!("Gamma {}", option.gamma());
+    println!("Vega {}", option.vega()*0.01);
+    println!("Theta {}", option.theta()*(1.0/365.0));
+    println!("Rho {}", option.rho()*0.01);
     let mut div1 = String::new();
     io::stdin().read_line(&mut div).expect("Failed to read line");
 }
