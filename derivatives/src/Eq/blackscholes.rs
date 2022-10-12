@@ -71,3 +71,58 @@ impl EquityOption{
     }
 
 }
+pub fn option_pricing() {
+
+    println!("Welcome to the Black-Scholes Option pricer.");
+    println!("(Step 1/7) What is the current price of the underlying asset?");
+    let mut curr_price = String::new();
+    io::stdin().read_line(&mut curr_price).expect("Failed to read line");
+
+    println!("(Step 2/7) Do you want a call option ('C') or a put option ('P') ?");
+    let mut side_input = String::new();
+    io::stdin().read_line(&mut side_input).expect("Failed to read line");
+
+    let side: OptionType;
+    match side_input.trim() {
+        "C" | "c" | "Call" | "call" => side = OptionType::Call,
+        "P" | "p" | "Put" | "put" => side = OptionType::Put,
+        _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
+    }
+
+    println!("(Step 3/7) What's the stike price you want?");
+    let mut strike = String::new();
+    io::stdin().read_line(&mut strike).expect("Failed to read line");
+
+    println!("(Step 4/7) What's the expected annualized volatility in %?");
+    println!("E.g.: Enter 50% chance as 0.50 ");
+    let mut vol = String::new();
+    io::stdin().read_line(&mut vol).expect("Failed to read line");
+
+    println!("(Step 5/7) What's the risk-free rate in %?");
+    let mut rf = String::new();
+    io::stdin().read_line(&mut rf).expect("Failed to read line");
+
+    println!("(Step 6/7) In how many years do you want the expiry to be?");
+    let mut expiry = String::new();
+    io::stdin().read_line(&mut expiry).expect("Failed to read line");
+
+    println!("(Step 7/7) What is the dividend yield on this stock?");
+    let mut div = String::new();
+    io::stdin().read_line(&mut div).expect("Failed to read line");
+
+    let option = EquityOption {
+        option_type: side,
+        transection: Transection::Buy,
+        current_price: curr_price.trim().parse::<f64>().unwrap(),
+        strike_price: strike.trim().parse::<f64>().unwrap(),
+        volatility: vol.trim().parse::<f64>().unwrap(),
+        time_to_maturity: expiry.trim().parse::<f64>().unwrap(),
+        risk_free_rate: rf.trim().parse::<f64>().unwrap(),
+        dividend_yield: div.trim().parse::<f64>().unwrap(),
+        transection_price: 0.0
+    };
+    println!("This option is currently worth ${}!", option.value_BSM());
+
+    let mut div1 = String::new();
+    io::stdin().read_line(&mut div).expect("Failed to read line");
+}
