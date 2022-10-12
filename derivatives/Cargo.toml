@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 rand = "0.8.4"
 probability = "0.18.0"
+libm = "0.2.1"
