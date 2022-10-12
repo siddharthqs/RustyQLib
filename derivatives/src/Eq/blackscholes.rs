@@ -1,13 +1,18 @@
 use std::f64::consts::{PI, SQRT_2};
 use libm::{log, exp};
-use Eq::utils::{N,dN};
-use Eq::vanila_option::{EquityOption,OptionType};
+use std::{thread,io};
+//use utils::{N,dN};
+//use vanila_option::{EquityOption,OptionType};
+use super::utils::{N, dN};
+use super::vanila_option::{OptionType, EquityOption,Transection};
 
+
+//mod dis;
 impl EquityOption{
     pub fn pv(&self)->f64 {
-        asset!(self.volatility>=0);
-        asset!(self.time_to_maturity>=0);
-        asset!(self.current_price>=0);
+        assert!(self.volatility>=0.0);
+        assert!(self.time_to_maturity>=0.0);
+        assert!(self.current_price>=0.0);
         if self.option_type == OptionType::Call {
             let option_price = self.current_price * N(self.d1()) * exp(-self.dividend_yield * self.time_to_maturity)
                 - self.strike_price * exp(-self.risk_free_rate * self.time_to_maturity) * N(self.d2());
@@ -42,7 +47,7 @@ impl EquityOption{
             delta = delta*exp(-self.dividend_yield * self.time_to_maturity);
         }
         else if self.option_type==OptionType::Put {
-             delta = delta -1;
+             delta = delta -1.0;
         }
         return delta;
     }
@@ -121,7 +126,7 @@ pub fn option_pricing() {
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         transection_price: 0.0
     };
-    println!("This option is currently worth ${}!", option.value_BSM());
+    println!("This option is currently worth ${}!", option.pv());
 
     let mut div1 = String::new();
     io::stdin().read_line(&mut div).expect("Failed to read line");
