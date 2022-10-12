@@ -52,15 +52,36 @@ impl EquityOption{
         return delta;
     }
     pub fn gamma(&self) -> f64 {
-        let mut gamma = dN(self.d1());
+        let gamma = dN(self.d1());
         //(St * sigma * math.sqrt(T - t))
         let var_sqrt = self.volatility*(self.time_to_maturity.sqrt());
-        gamma = gamma/(self.current_price*var_sqrt);
-        return gamma;
+        return gamma/(self.current_price*var_sqrt);
+    }
+    pub fn vega(&self) -> f64 {
+        //St * dN(d1) * math.sqrt(T - t)
+        let vega = self.current_price* dN(self.d1())*self.time_to_maturity.sqrt();
+        return vega;
     }
     //ToDO
     //theta
-    //rho
+    pub fn rho(&self) -> f64 {
+        //rho K * (T - t) * math.exp(-r * (T - t)) * N(d2)
+        let mut rho = 0.0;
+        if self.option_type==OptionType::Call {
+            rho = self.strike_price*self.time_to_maturity*
+                exp(-(self.risk_free_rate-self.dividend_yield) * self.time_to_maturity)*
+            N(self.d2());
+        }
+        else if self.option_type==OptionType::Put {
+            //put_rho = -K * (T - t) * math.exp(-r * (T - t)) * N(-d2)
+            rho = -self.strike_price * self.time_to_maturity*
+                exp(-(self.risk_free_rate-self.dividend_yield) * self.time_to_maturity)*
+            N(-self.d2());
+        }
+
+        return rho;
+    }
+
     pub fn d1(&self) -> f64 {
         //Black-Scholes-Merton d1 function Parameters
         let tmp1 = (self.current_price/self.strike_price).ln()+
