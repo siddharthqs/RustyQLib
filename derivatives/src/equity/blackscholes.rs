@@ -13,9 +13,9 @@ impl EquityOption {
     pub fn pv(&self) -> f64 {
         assert!(self.volatility >= 0.0);
         assert!(self.time_to_maturity >= 0.0);
-        assert!(self.current_price >= 0.0);
+        assert!(self.current_price.value >= 0.0);
         if self.option_type == OptionType::Call {
-            let option_price = self.current_price.value();
+            let option_price = self.current_price.value()
                 * N(self.d1())
                 * exp(-self.dividend_yield * self.time_to_maturity)
                 - self.strike_price
@@ -179,7 +179,7 @@ pub fn option_pricing() {
         date: vec![0.0],
         rates: vec![0.0]
     };
-    let curr_quote = Quote(curr_price.trim().parse::<f64>().unwrap());
+    let curr_quote = Quote{value: curr_price.trim().parse::<f64>().unwrap()};
     let option = EquityOption {
         option_type: side,
         transection: Transection::Buy,
