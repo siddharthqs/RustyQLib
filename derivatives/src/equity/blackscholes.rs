@@ -7,10 +7,10 @@ use crate::core::quotes::Quote;
 use super::utils::{dN, N};
 use super::vanila_option::{EquityOption, OptionType, Transection};
 use super::super::core::yc_term_structure::YieldTermStructure;
+use super::super::core::traits::Instrument;
 
-
-impl EquityOption {
-    pub fn pv(&self) -> f64 {
+impl Instrument for EquityOption{
+    fn npv(&self) -> f64 {
         assert!(self.volatility >= 0.0);
         assert!(self.time_to_maturity >= 0.0);
         assert!(self.current_price.value >= 0.0);
@@ -19,21 +19,23 @@ impl EquityOption {
                 * N(self.d1())
                 * exp(-self.dividend_yield * self.time_to_maturity)
                 - self.strike_price
-                    * exp(-self.risk_free_rate * self.time_to_maturity)
-                    * N(self.d2());
+                * exp(-self.risk_free_rate * self.time_to_maturity)
+                * N(self.d2());
             return option_price;
         } else {
             let option_price = -self.current_price.value()
                 * N(-self.d1())
                 * exp(-self.dividend_yield * self.time_to_maturity)
                 + self.strike_price
-                    * exp(-self.risk_free_rate * self.time_to_maturity)
-                    * N(-self.d2());
+                * exp(-self.risk_free_rate * self.time_to_maturity)
+                * N(-self.d2());
             return option_price;
         }
     }
+}
+impl EquityOption {
     pub fn get_premium_at_risk(&self) -> f64 {
-        let value = self.pv();
+        let value = self.npv();
         let mut pay_off = 0.0;
         if self.option_type == OptionType::Call {
             pay_off = self.current_price.value() - self.strike_price;
@@ -192,7 +194,7 @@ pub fn option_pricing() {
         transection_price: 0.0,
         term_structure: ts
     };
-    println!("Theoretical Price ${}", option.pv());
+    println!("Theoretical Price ${}", option.npv());
     println!("Premium at risk ${}", option.get_premium_at_risk());
     println!("Delata {}", option.delta());
     println!("Gamma {}", option.gamma());
