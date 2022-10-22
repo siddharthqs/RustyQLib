@@ -8,7 +8,7 @@ use super::utils::{dN, N};
 use super::vanila_option::{EquityOption, OptionType, Transection};
 use super::super::core::yc_term_structure::YieldTermStructure;
 use super::super::core::traits::Instrument;
-
+use super::super::core::interpolation;
 impl Instrument for EquityOption{
     fn npv(&self) -> f64 {
         assert!(self.volatility >= 0.0);
@@ -34,6 +34,11 @@ impl Instrument for EquityOption{
     }
 }
 impl EquityOption {
+    pub fn set_risk_free_rate(&mut self){
+        let model = interpolation::CubicSpline::new(&self.term_structure.date, &self.term_structure.rates);
+        let r = model.interpolation(self.time_to_maturity);
+        self.risk_free_rate = r;
+    }
     pub fn get_premium_at_risk(&self) -> f64 {
         let value = self.npv();
         let mut pay_off = 0.0;
@@ -178,11 +183,11 @@ pub fn option_pricing() {
         .expect("Failed to read line");
 
     let ts = YieldTermStructure{
-        date: vec![0.0],
-        rates: vec![0.0]
+        date: vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0],
+        rates: vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12]
     };
     let curr_quote = Quote{value: curr_price.trim().parse::<f64>().unwrap()};
-    let option = EquityOption {
+    let mut option = EquityOption {
         option_type: side,
         transection: Transection::Buy,
         current_price: curr_quote,
@@ -194,6 +199,7 @@ pub fn option_pricing() {
         transection_price: 0.0,
         term_structure: ts
     };
+    option.set_risk_free_rate();
     println!("Theoretical Price ${}", option.npv());
     println!("Premium at risk ${}", option.get_premium_at_risk());
     println!("Delata {}", option.delta());

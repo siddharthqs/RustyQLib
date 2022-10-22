@@ -25,38 +25,38 @@ impl CubicSpline<'_> {
         let mut c = vec![0.0; n+1];
         let mut b = vec![0.0; n];
         let mut d = vec![0.0; n];
-        let mut h = Vec::new();
+        let mut dx = Vec::new();
         for i in 0..n {
-            h.push(x[i+1]-x[i]);
-        }
-        println!("h: {:?}", h);
-        let mut nu = Vec::new();
-        for i in 0..n {
-            nu.push(y[i+1]-y[i]);
+            dx.push(x[i+1]-x[i]);
         }
 
-        println!("nu: {:?}", nu);
+        let mut dy = Vec::new();
+        for i in 0..n {
+            dy.push(y[i+1]-y[i]);
+        }
+
+
         let mut alpha = vec![0.0];
         for i in 1..n {
-            alpha.push(3.0*(nu[i]/h[i] - nu[i-1]/h[i-1]));
+            alpha.push(3.0*(dy[i]/dx[i] - dy[i-1]/dx[i-1]));
         }
-        println!("alpha: {:?}", alpha);
+
         let mut l = vec![0.0; n+1];
         let mut mu = vec![0.0; n+1];
         let mut z = vec![0.0; n+1];
         l[0] = 1.0;
         for i in 1..n{
-            l[i] = 2.0*(x[i+1]-x[i-1]) - h[i-1]*mu[i-1];
-            mu[i] = h[i]/l[i];
-            z[i] = (alpha[i]-h[i-1]*z[i-1])/l[i];
+            l[i] = 2.0*(x[i+1]-x[i-1]) - dx[i-1]*mu[i-1];
+            mu[i] = dx[i]/l[i];
+            z[i] = (alpha[i]-dx[i-1]*z[i-1])/l[i];
         }
         l[n] = 1.0;
         z[n] = 0.0;
         //c[n] = 0;
         for j in (0..n).rev(){
             c[j] = z[j] - mu[j] * c[j+1];
-            b[j] = (a[j+1]-a[j])/h[j]-h[j]*(c[j+1]+2.0*c[j])/3.0;
-            d[j] = (c[j+1]-c[j])/(3.0*h[j]);
+            b[j] = (a[j+1]-a[j])/dx[j]-dx[j]*(c[j+1]+2.0*c[j])/3.0;
+            d[j] = (c[j+1]-c[j])/(3.0*dx[j]);
 
         }
         let mut output = Vec::new();
@@ -81,13 +81,7 @@ impl CubicSpline<'_> {
         let n = self.x_vec.len();
         for i in 0..n {
             if x<=self.x_vec[i] {
-                println!("for");
                 let diff = self.x_vec[i] - x;
-                println!("{}",diff);
-                println!("{}",self.spline_set[i].a);
-                println!("{}",self.spline_set[i].b);
-                println!("{}",self.spline_set[i].c);
-                println!("{}",self.spline_set[i].d);
                 return self.spline_set[i].a +
                 self.spline_set[i].b * diff +
                 self.spline_set[i].c * diff * diff +
