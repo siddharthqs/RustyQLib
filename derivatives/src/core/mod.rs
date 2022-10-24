@@ -1,5 +1,5 @@
 pub mod interpolation;
-pub mod yc_term_structure;
+pub mod termstructure;
 pub mod quotes;
 pub mod traits;
 

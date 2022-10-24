@@ -6,9 +6,10 @@ use crate::core::quotes::Quote;
 //use vanila_option::{EquityOption,OptionType};
 use super::utils::{dN, N};
 use super::vanila_option::{EquityOption, OptionType, Transection};
-use super::super::core::yc_term_structure::YieldTermStructure;
-use super::super::core::traits::Instrument;
+use super::super::core::termstructure::YieldTermStructure;
+use super::super::core::traits::{Instrument,Greeks};
 use super::super::core::interpolation;
+
 impl Instrument for EquityOption{
     fn npv(&self) -> f64 {
         assert!(self.volatility >= 0.0);
@@ -33,27 +34,9 @@ impl Instrument for EquityOption{
         }
     }
 }
-impl EquityOption {
-    pub fn set_risk_free_rate(&mut self){
-        let model = interpolation::CubicSpline::new(&self.term_structure.date, &self.term_structure.rates);
-        let r = model.interpolation(self.time_to_maturity);
-        self.risk_free_rate = r;
-    }
-    pub fn get_premium_at_risk(&self) -> f64 {
-        let value = self.npv();
-        let mut pay_off = 0.0;
-        if self.option_type == OptionType::Call {
-            pay_off = self.current_price.value() - self.strike_price;
-        } else if self.option_type == OptionType::Put {
-            pay_off = self.strike_price - self.current_price.value();
-        }
-        if pay_off > 0.0 {
-            return value - pay_off;
-        } else {
-            return value;
-        }
-    }
-    pub fn delta(&self) -> f64 {
+
+impl Greeks for EquityOption{
+    fn delta(&self) -> f64 {
         let mut delta = N(self.d1());
         if self.option_type == OptionType::Call {
             delta = delta * exp(-self.dividend_yield * self.time_to_maturity);
@@ -62,19 +45,18 @@ impl EquityOption {
         }
         return delta;
     }
-    pub fn gamma(&self) -> f64 {
+    fn gamma(&self) -> f64 {
         let gamma = dN(self.d1());
         //(St * sigma * math.sqrt(T - t))
         let var_sqrt = self.volatility * (self.time_to_maturity.sqrt());
         return gamma / (self.current_price.value() * var_sqrt);
     }
-    pub fn vega(&self) -> f64 {
+    fn vega(&self) -> f64 {
         //St * dN(d1) * math.sqrt(T - t)
         let vega = self.current_price.value() * dN(self.d1()) * self.time_to_maturity.sqrt();
         return vega;
     }
-
-    pub fn theta(&self) -> f64 {
+    fn theta(&self) -> f64 {
         let mut theta = 0.0;
         if self.option_type == OptionType::Call {
             //-(St * dN(d1) * sigma / (2 * math.sqrt(T - t)) + r * K * math.exp(-r * (T - t)) * N(d2))
@@ -98,8 +80,7 @@ impl EquityOption {
 
         return theta;
     }
-
-    pub fn rho(&self) -> f64 {
+    fn rho(&self) -> f64 {
         //rho K * (T - t) * math.exp(-r * (T - t)) * N(d2)
         let mut rho = 0.0;
         if self.option_type == OptionType::Call {
@@ -117,7 +98,28 @@ impl EquityOption {
 
         return rho;
     }
+}
 
+impl EquityOption {
+    pub fn set_risk_free_rate(&mut self){
+        let model = interpolation::CubicSpline::new(&self.term_structure.date, &self.term_structure.rates);
+        let r = model.interpolation(self.time_to_maturity);
+        self.risk_free_rate = r;
+    }
+    pub fn get_premium_at_risk(&self) -> f64 {
+        let value = self.npv();
+        let mut pay_off = 0.0;
+        if self.option_type == OptionType::Call {
+            pay_off = self.current_price.value() - self.strike_price;
+        } else if self.option_type == OptionType::Put {
+            pay_off = self.strike_price - self.current_price.value();
+        }
+        if pay_off > 0.0 {
+            return value - pay_off;
+        } else {
+            return value;
+        }
+    }
     pub fn d1(&self) -> f64 {
         //Black-Scholes-Merton d1 function Parameters
         let tmp1 = (self.current_price.value() / self.strike_price).ln()

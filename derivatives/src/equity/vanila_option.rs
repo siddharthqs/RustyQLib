@@ -1,4 +1,4 @@
-use super::super::core::yc_term_structure::YieldTermStructure;
+use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::quotes::Quote;
 
 #[derive(PartialEq, Debug)]

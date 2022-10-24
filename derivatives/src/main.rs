@@ -2,6 +2,7 @@ extern crate probability;
 use chrono::{Local,DateTime,NaiveDate,NaiveTime};
 mod equity;
 mod core;
+mod utils;
 
 use std::{io, thread};
 use std::collections::HashMap;
