@@ -7,7 +7,10 @@ edition = "2021"
 
 [dependencies]
 rand = "0.8.4"
+rand_distr = "0.4.3"
 probability = "0.18.0"
 libm = "0.2.1"
 chrono = "0.4.22"
 csv = "1.1"
+rand_chacha = "0.3.1"
+rand_pcg = " 0.3.1"

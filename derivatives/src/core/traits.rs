@@ -10,3 +10,12 @@ pub trait Greeks{
     fn rho(&self) -> f64;
 
 }
+
+pub trait Observer{
+    fn update(&mut self);
+    fn reset(&mut self);
+}
+pub trait Observable{
+    fn update(&mut self);
+    fn reset(&mut self);
+}

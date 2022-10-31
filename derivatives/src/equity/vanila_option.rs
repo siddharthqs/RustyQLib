@@ -1,5 +1,8 @@
+use crate::equity::montecarlo;
 use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::quotes::Quote;
+use super::super::core::traits::{Instrument,Greeks};
+use super::blackscholes;
 
 #[derive(PartialEq, Debug)]
 pub enum OptionType {
@@ -12,6 +15,34 @@ pub enum Transection {
     Sell,
 }
 
+pub enum Engine{
+    BlackScholes,
+    MonteCarlo
+}
+impl Instrument for EquityOption  {
+    fn npv(&self) -> f64 {
+        match self.engine{
+            Engine::BlackScholes => {
+                println!("BlackScholes");
+                 let value = blackscholes::npv(&self);
+                value
+            }
+            Engine::MonteCarlo => {
+                println!("BlackScholes");
+                let value = blackscholes::npv(&self);
+                println!("{}", value);
+
+                println!("MonteCarlo processing");
+                let value = montecarlo::npv(&self);
+                println!("{}", value);
+                value
+            }
+            _ => {
+                0.0
+            }
+        }
+    }
+}
 pub struct EquityOption {
     pub option_type: OptionType,
     pub transection: Transection,
@@ -23,4 +54,5 @@ pub struct EquityOption {
     pub term_structure: YieldTermStructure<f64>,
     pub risk_free_rate: f64,
     pub transection_price: f64,
+    pub engine: Engine
 }

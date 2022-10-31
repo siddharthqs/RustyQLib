@@ -5,33 +5,32 @@ use crate::core::quotes::Quote;
 //use utils::{N,dN};
 //use vanila_option::{EquityOption,OptionType};
 use super::utils::{dN, N};
-use super::vanila_option::{EquityOption, OptionType, Transection};
+use super::vanila_option::{EquityOption, OptionType, Transection,Engine};
 use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::traits::{Instrument,Greeks};
 use super::super::core::interpolation;
 
-impl Instrument for EquityOption{
-    fn npv(&self) -> f64 {
-        assert!(self.volatility >= 0.0);
-        assert!(self.time_to_maturity >= 0.0);
-        assert!(self.current_price.value >= 0.0);
-        if self.option_type == OptionType::Call {
-            let option_price = self.current_price.value()
-                * N(self.d1())
-                * exp(-self.dividend_yield * self.time_to_maturity)
-                - self.strike_price
-                * exp(-self.risk_free_rate * self.time_to_maturity)
-                * N(self.d2());
-            return option_price;
-        } else {
-            let option_price = -self.current_price.value()
-                * N(-self.d1())
-                * exp(-self.dividend_yield * self.time_to_maturity)
-                + self.strike_price
-                * exp(-self.risk_free_rate * self.time_to_maturity)
-                * N(-self.d2());
-            return option_price;
-        }
+
+pub fn npv(bsd_option: &&EquityOption) -> f64 {
+    assert!(bsd_option.volatility >= 0.0);
+    assert!(bsd_option.time_to_maturity >= 0.0);
+    assert!(bsd_option.current_price.value >= 0.0);
+    if bsd_option.option_type == OptionType::Call {
+        let option_price = bsd_option.current_price.value()
+            * N(bsd_option.d1())
+            * exp(-bsd_option.dividend_yield * bsd_option.time_to_maturity)
+            - bsd_option.strike_price
+            * exp(-bsd_option.risk_free_rate * bsd_option.time_to_maturity)
+            * N(bsd_option.d2());
+        return option_price;
+    } else {
+        let option_price = -bsd_option.current_price.value()
+            * N(-bsd_option.d1())
+            * exp(-bsd_option.dividend_yield * bsd_option.time_to_maturity)
+            + bsd_option.strike_price
+            * exp(-bsd_option.risk_free_rate * bsd_option.time_to_maturity)
+            * N(-bsd_option.d2());
+        return option_price;
     }
 }
 
@@ -184,10 +183,13 @@ pub fn option_pricing() {
         .read_line(&mut div)
         .expect("Failed to read line");
 
-    let ts = YieldTermStructure{
-        date: vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0],
-        rates: vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12]
-    };
+    //let ts = YieldTermStructure{
+    //    date: vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0],
+    //    rates: vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12]
+    //};
+    let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
+    let rates = vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12];
+    let ts = YieldTermStructure::new(date,rates);
     let curr_quote = Quote{value: curr_price.trim().parse::<f64>().unwrap()};
     let mut option = EquityOption {
         option_type: side,
@@ -199,16 +201,17 @@ pub fn option_pricing() {
         risk_free_rate: rf.trim().parse::<f64>().unwrap(),
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         transection_price: 0.0,
-        term_structure: ts
+        term_structure: ts,
+        engine: Engine::BlackScholes,
     };
     option.set_risk_free_rate();
     println!("Theoretical Price ${}", option.npv());
-    println!("Premium at risk ${}", option.get_premium_at_risk());
-    println!("Delata {}", option.delta());
-    println!("Gamma {}", option.gamma());
-    println!("Vega {}", option.vega() * 0.01);
-    println!("Theta {}", option.theta() * (1.0 / 365.0));
-    println!("Rho {}", option.rho() * 0.01);
+    // println!("Premium at risk ${}", option.get_premium_at_risk());
+    // println!("Delata {}", option.delta());
+    // println!("Gamma {}", option.gamma());
+    // println!("Vega {}", option.vega() * 0.01);
+    // println!("Theta {}", option.theta() * (1.0 / 365.0));
+    // println!("Rho {}", option.rho() * 0.01);
     let mut div1 = String::new();
     io::stdin()
         .read_line(&mut div)
