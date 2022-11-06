@@ -19,16 +19,33 @@ use crate::core::termstructure::YieldTermStructure;
 use crate::core::traits::Instrument;
 
 pub fn simulate_market(option: &&EquityOption) -> Vec<f64>{
-
     let path = RNG::get_vector_standard_normal(10000);
-    let mut val_maturity:Vec<f64> = Vec::new();
+    let mut market_at_maturity:Vec<f64> = Vec::new();
     for z in &path{
         let sim_value = option.current_price.value()
             *exp(((option.risk_free_rate - option.dividend_yield - 0.5 * option.volatility.powi(2))
             * option.time_to_maturity)+option.volatility * option.time_to_maturity.sqrt()*z);
-        val_maturity.push(sim_value);
+        market_at_maturity.push(sim_value);
     }
-    val_maturity
+    market_at_maturity
+}
+
+pub fn simulate_market_path_wise(option: &&EquityOption) -> Vec<f64>{
+    let M = 1000;
+    let N = 10000;
+    let dt = option.time_to_maturity/1000.0;
+    let path = RNG::get_matrix_standard_normal(N,M);
+    let mut market_at_maturity:Vec<f64> = Vec::new();
+    for ipath in &path{
+        let mut st = option.current_price.value();
+        for z in ipath{
+            st = st
+                *exp(((option.risk_free_rate - option.dividend_yield - 0.5 * option.volatility.powi(2))
+                * dt)+option.volatility * dt.sqrt()*z);
+        }
+        market_at_maturity.push(st);
+    }
+    market_at_maturity
 }
 
 pub fn payoff(market: &Vec<f64>,
@@ -54,15 +71,22 @@ pub fn payoff(market: &Vec<f64>,
 }
 
 
-pub fn npv(option: &&EquityOption) -> f64 {
+pub fn npv(option: &&EquityOption,path_size: bool) -> f64 {
     assert!(option.volatility >= 0.0);
     assert!(option.time_to_maturity >= 0.0);
     assert!(option.current_price.value >= 0.0);
-    let st  = simulate_market(&option);
+    let mut st = vec![];
+    if path_size {
+        st  = simulate_market_path_wise(&option);
+    }
+    else {
+        st  = simulate_market(&option);
+    }
+
     let payoff = payoff(&st,&option.strike_price,&option.option_type);
     let sum_pay:f64 = payoff.iter().sum();
     let num_of_simulations = st.len() as f64;
-    let c0:f64 = (sum_pay / num_of_simulations)*exp((option.risk_free_rate - option.dividend_yield)*option.time_to_maturity);
+    let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.risk_free_rate - option.dividend_yield)*option.time_to_maturity);
     c0
     }
 
