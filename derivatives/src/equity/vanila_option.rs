@@ -23,7 +23,6 @@ impl Instrument for EquityOption  {
     fn npv(&self) -> f64 {
         match self.engine{
             Engine::BlackScholes => {
-                println!("BlackScholes");
                  let value = blackscholes::npv(&self);
                 value
             }

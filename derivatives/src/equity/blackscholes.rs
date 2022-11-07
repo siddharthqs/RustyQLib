@@ -132,6 +132,13 @@ impl EquityOption {
         let d2 = self.d1() - self.volatility * self.time_to_maturity.powf(0.5);
         return d2;
     }
+    pub fn imp_vol(&mut self,option_price:f64) -> f64 {
+        for i in 0..100{
+            let d_sigma = (self.npv()-option_price)/self.vega();
+            self.volatility -= d_sigma
+        }
+        self.volatility
+    }
 }
 pub fn option_pricing() {
     println!("Welcome to the Black-Scholes Option pricer.");
@@ -206,6 +213,89 @@ pub fn option_pricing() {
     };
     option.set_risk_free_rate();
     println!("Theoretical Price ${}", option.npv());
+    // println!("Premium at risk ${}", option.get_premium_at_risk());
+    // println!("Delata {}", option.delta());
+    // println!("Gamma {}", option.gamma());
+    // println!("Vega {}", option.vega() * 0.01);
+    // println!("Theta {}", option.theta() * (1.0 / 365.0));
+    // println!("Rho {}", option.rho() * 0.01);
+    let mut div1 = String::new();
+    io::stdin()
+        .read_line(&mut div)
+        .expect("Failed to read line");
+}
+pub fn implied_volatility() {
+    println!("Welcome to the Black-Scholes Option pricer.");
+    println!("(Step 1/7) What is the current price of the underlying asset?");
+    let mut curr_price = String::new();
+    io::stdin()
+        .read_line(&mut curr_price)
+        .expect("Failed to read line");
+
+    println!("(Step 2/7) Do you want a call option ('C') or a put option ('P') ?");
+    let mut side_input = String::new();
+    io::stdin()
+        .read_line(&mut side_input)
+        .expect("Failed to read line");
+
+    let side: OptionType;
+    match side_input.trim() {
+        "C" | "c" | "Call" | "call" => side = OptionType::Call,
+        "P" | "p" | "Put" | "put" => side = OptionType::Put,
+        _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
+    }
+
+    println!("Stike price:");
+    let mut strike = String::new();
+    io::stdin()
+        .read_line(&mut strike)
+        .expect("Failed to read line");
+
+    println!("What is option price:");
+    let mut option_price = String::new();
+    io::stdin()
+        .read_line(&mut option_price)
+        .expect("Failed to read line");
+
+    println!("Risk-free rate in %:");
+    let mut rf = String::new();
+    io::stdin().read_line(&mut rf).expect("Failed to read line");
+
+    println!("Time to maturity in years");
+    let mut expiry = String::new();
+    io::stdin()
+        .read_line(&mut expiry)
+        .expect("Failed to read line");
+
+    println!("Dividend yield on this stock:");
+    let mut div = String::new();
+    io::stdin()
+        .read_line(&mut div)
+        .expect("Failed to read line");
+
+    //let ts = YieldTermStructure{
+    //    date: vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0],
+    //    rates: vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12]
+    //};
+    let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
+    let rates = vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12];
+    let ts = YieldTermStructure::new(date,rates);
+    let curr_quote = Quote{value: curr_price.trim().parse::<f64>().unwrap()};
+    let mut option = EquityOption {
+        option_type: side,
+        transection: Transection::Buy,
+        current_price: curr_quote,
+        strike_price: strike.trim().parse::<f64>().unwrap(),
+        volatility: 0.20,
+        time_to_maturity: expiry.trim().parse::<f64>().unwrap(),
+        risk_free_rate: rf.trim().parse::<f64>().unwrap(),
+        dividend_yield: div.trim().parse::<f64>().unwrap(),
+        transection_price: 0.0,
+        term_structure: ts,
+        engine: Engine::BlackScholes,
+    };
+    option.set_risk_free_rate();
+    println!("Implied Volatility  {}%", 100.0*option.imp_vol(option_price.trim().parse::<f64>().unwrap()));
     // println!("Premium at risk ${}", option.get_premium_at_risk());
     // println!("Delata {}", option.delta());
     // println!("Gamma {}", option.gamma());

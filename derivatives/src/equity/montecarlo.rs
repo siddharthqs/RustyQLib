@@ -18,6 +18,7 @@ use crate::core::quotes::Quote;
 use crate::core::termstructure::YieldTermStructure;
 use crate::core::traits::Instrument;
 
+
 pub fn simulate_market(option: &&EquityOption) -> Vec<f64>{
     let path = RNG::get_vector_standard_normal(10000);
     let mut market_at_maturity:Vec<f64> = Vec::new();
