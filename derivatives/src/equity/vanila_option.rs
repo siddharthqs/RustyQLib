@@ -31,9 +31,9 @@ impl Instrument for EquityOption  {
                 let value = blackscholes::npv(&self);
                 println!("{}", value);
 
-                println!("MonteCarlo Path Wise");
-                let value = montecarlo::npv(&self,true);
-                println!("{}", value);
+                // println!("MonteCarlo Path Wise");
+                // let value = montecarlo::npv(&self,true);
+                // println!("{}", value);
 
                 println!("MonteCarlo ");
                 let value = montecarlo::npv(&self,false);

@@ -20,9 +20,19 @@ use crate::core::traits::Instrument;
 
 
 pub fn simulate_market(option: &&EquityOption) -> Vec<f64>{
-    let path = RNG::get_vector_standard_normal(10000);
+    let mut monte_carlo = RNG::MonteCarloSimulation{
+        antithetic: true,
+        moment_matching: true,
+        dimentation: 1,
+        size: 10000,
+        standard_normal_vector: vec![] as Vec<f64>,
+        standard_normal_matrix: vec![] as Vec<Vec<f64>>
+    };
+    monte_carlo.set_standard_normal_vector();
+    let path = monte_carlo.get_standard_normal_vector();
+
     let mut market_at_maturity:Vec<f64> = Vec::new();
-    for z in &path{
+    for z in path{
         let sim_value = option.current_price.value()
             *exp(((option.risk_free_rate - option.dividend_yield - 0.5 * option.volatility.powi(2))
             * option.time_to_maturity)+option.volatility * option.time_to_maturity.sqrt()*z);
