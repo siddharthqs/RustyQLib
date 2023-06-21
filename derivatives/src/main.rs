@@ -44,7 +44,7 @@ fn main() {
 
 
     let _matches = App::new("qsLib").version("0.1.0").author("Siddharthqs.com")
-        .about("Quant Library for retail traders using Rust").get_matches();
+        .about("Quant Library for retail traders").get_matches();
     println!("Welcome to Option pricing CLI");
     println!(" Do you want to price option (1) or calculate implied volatility (2)?");
 
@@ -79,4 +79,51 @@ fn main() {
 
 
 
+}
+fn main2() {
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+    impl Point {
+        fn in_circles(&self) -> bool {
+            let distance = (self.x.powi(2)   + self.y.powi(2)).sqrt();
+            if distance<=1.0{
+                return true;
+            }
+            else{
+                return false;
+            }
+        }
+    }
+    let mut rng = rand::thread_rng();
+    let mut point = Point{
+        x:0.0, y: 0.0,
+    };
+    let number_of_simulation = 10000000;
+    let mut in_circle_count = 0;
+    for i in 0..number_of_simulation{
+        let x:f64 = Uniform::new(-1.0,1.0).sample(&mut rng);
+        let y:f64 = Uniform::new(-1.0,1.0).sample(&mut rng);
+        point.x = x;
+        point.y = y;
+        if point.in_circles(){
+            in_circle_count+=1;
+        }
+    }
+    let pi = (in_circle_count as f64) / (number_of_simulation as f64)*4.0;
+    println!("{:?}",pi);
+
+
+}
+fn main3() {
+    let mut rng = rand::thread_rng();
+    let number_of_simulation = 100000;
+    let mut sum_of_simulation =0.0;
+    for i in 0..number_of_simulation{
+        let mut x:f64 = Uniform::new(0.0,1.0).sample(&mut rng);
+        sum_of_simulation+=x.powi(2);
+    }
+    let avg = sum_of_simulation / (number_of_simulation as f64);
+    println!("{}",avg);
 }
