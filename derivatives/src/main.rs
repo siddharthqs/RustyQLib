@@ -14,6 +14,7 @@ mod core;
 mod utils;
 use rand::prelude::*;
 use serde::Deserialize;
+
 use std::fs::File;
 use std::io::Read;
 use std::{io, thread};
@@ -29,26 +30,30 @@ use rand::Rng;
 use equity::blackscholes;
 use crate::equity::montecarlo;
 use clap::{App,Arg};
+use std::env;
 
-
+#[derive(Deserialize)]
+struct MyData {
+    field1: String,
+    field2: i32,
+}
 fn main0() {
-    // fn a() -> Result<(), Box<dyn Error>> {
-    //     let mut bytes = [0; 400];
-    //     let x = vec![1.0,2.0,3.0,4.0,5.0];
-    //     LittleEndian::write_f64_into(&x, &mut bytes);
-    //     let path = r"D:\siddh\x1.b";
-    //     let mut file = File::create(path)?;
-    //     file.write_all(&bytes).map_err(|e| e.into())
-    //     //fs::write(r"D:\siddh\x.csv", &bytes);
-    // }
+    let args: Vec<String> = env::args().collect();
+    let num_args = args.len();
+
+    if num_args < 2 {
+        println!("Usage: {} <argument>", args[0]);
+        return;
+    }
+    let argument = &args[1];
+    println!("You provided the argument: {}", argument);
 
 
 
-
-    let _matches = App::new("qsLib").version("0.1.0").author("Siddharthqs.com")
-        .about("Quant Library for retail traders").get_matches();
-    println!("Welcome to Option pricing CLI");
-    println!(" Do you want to price option (1) or calculate implied volatility (2)?");
+    // let _matches = App::new("qsLib").version("0.1.0").author("Siddharthqs.com")
+    //     .about("Quant Library for retail traders").get_matches();
+    // println!("Welcome to Option pricing CLI");
+    // println!(" Do you want to price option (1) or calculate implied volatility (2)?");
 
     let mut input = String::new();
     print!("{}", input);
@@ -130,12 +135,8 @@ fn main3() {
     println!("{}",avg);
 }
 fn main(){
-    #[derive(Debug, Deserialize)]
-    struct MyData {
-        field1: String,
-        field2: i32,
-        // Add more fields as needed
-    }
+
+
     let args: Vec<String> = env::args().collect();
     let num_args = args.len();
 
@@ -145,17 +146,17 @@ fn main(){
     }
     let argument = &args[1];
     println!("You provided the argument: {}", argument);
-    // let mut file = File::open("example.json").expect("Failed to open JSON file");
-    // let mut contents = String::new();
-    // file.read_to_string(&mut contents)
-    //     .expect("Failed to read JSON file");
+    let mut file = File::open(argument).expect("Failed to open JSON file");
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+         .expect("Failed to read JSON file");
     //
     // // Deserialize the JSON into a Rust struct
-    // let data: MyData = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
+    let data: MyData = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
     //
     // // Now you can work with the data
-    // println!("field1: {}", data.field1);
-    // println!("field2: {}", data.field2);
+    println!("field1: {}", data.field1);
+    println!("field2: {}", data.field2);
 }
 
 
