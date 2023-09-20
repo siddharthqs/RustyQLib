@@ -13,7 +13,9 @@ mod equity;
 mod core;
 mod utils;
 use rand::prelude::*;
-
+use serde::Deserialize;
+use std::fs::File;
+use std::io::Read;
 use std::{io, thread};
 use std::collections::HashMap;
 use std::error::Error;
@@ -29,7 +31,7 @@ use crate::equity::montecarlo;
 use clap::{App,Arg};
 
 
-fn main() {
+fn main0() {
     // fn a() -> Result<(), Box<dyn Error>> {
     //     let mut bytes = [0; 400];
     //     let x = vec![1.0,2.0,3.0,4.0,5.0];
@@ -127,3 +129,37 @@ fn main3() {
     let avg = sum_of_simulation / (number_of_simulation as f64);
     println!("{}",avg);
 }
+fn main(){
+    #[derive(Debug, Deserialize)]
+    struct MyData {
+        field1: String,
+        field2: i32,
+        // Add more fields as needed
+    }
+    let args: Vec<String> = env::args().collect();
+    let num_args = args.len();
+
+    if num_args < 2 {
+        println!("Usage: {} <argument>", args[0]);
+        return;
+    }
+    let argument = &args[1];
+    println!("You provided the argument: {}", argument);
+    // let mut file = File::open("example.json").expect("Failed to open JSON file");
+    // let mut contents = String::new();
+    // file.read_to_string(&mut contents)
+    //     .expect("Failed to read JSON file");
+    //
+    // // Deserialize the JSON into a Rust struct
+    // let data: MyData = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
+    //
+    // // Now you can work with the data
+    // println!("field1: {}", data.field1);
+    // println!("field2: {}", data.field2);
+}
+
+
+
+
+
+

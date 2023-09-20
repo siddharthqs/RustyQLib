@@ -195,7 +195,7 @@ pub fn option_pricing() {
     //    rates: vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12]
     //};
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
-    let rates = vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12];
+    let rates = vec![0.05,0.05,0.06,0.07,0.08,0.9,0.9,0.10];
     let ts = YieldTermStructure::new(date,rates);
     let curr_quote = Quote{value: curr_price.trim().parse::<f64>().unwrap()};
     let mut option = EquityOption {
