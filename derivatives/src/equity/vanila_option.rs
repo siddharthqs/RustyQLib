@@ -31,10 +31,6 @@ impl Instrument for EquityOption  {
                 let value = blackscholes::npv(&self);
                 println!("{}", value);
 
-                // println!("MonteCarlo Path Wise");
-                // let value = montecarlo::npv(&self,true);
-                // println!("{}", value);
-
                 println!("MonteCarlo ");
                 let value = montecarlo::npv(&self,false);
                 println!("{}", value);
@@ -57,5 +53,6 @@ pub struct EquityOption {
     pub term_structure: YieldTermStructure<f64>,
     pub risk_free_rate: f64,
     pub transection_price: f64,
-    pub engine: Engine
+    pub engine: Engine,
+    pub simulation:Option<u64>
 }
