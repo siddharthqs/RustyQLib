@@ -1,0 +1,16 @@
+{
+"action":"PV",
+"pricer":"MC",
+"asset":"EQ",
+"market_data":{
+"underlying_price":100,
+"option_type":"C",
+"strike_price":100,
+"volatility":0.4,
+"risk_free_rate":0.06,
+"maturity":"2023-12-31",
+"dividend": 0.01,
+"simulation":100000
+}
+
+}
