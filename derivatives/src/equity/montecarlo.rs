@@ -11,7 +11,7 @@
 
 use std::io;
 use libm::exp;
-use crate::equity::utils::N;
+use crate::core::utils::N;
 use crate::equity::vanila_option::{Engine, EquityOption, OptionType, Transection};
 use super::super::utils::RNG;
 use crate::core::quotes::Quote;

@@ -12,6 +12,9 @@ use rand_distr::StandardNormal;
 mod equity;
 mod core;
 mod utils;
+mod cmdty;
+
+
 use rand::prelude::*;
 use serde::Deserialize;
 

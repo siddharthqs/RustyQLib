@@ -4,7 +4,7 @@ use std::{io, thread};
 use crate::core::quotes::Quote;
 //use utils::{N,dN};
 //use vanila_option::{EquityOption,OptionType};
-use super::utils::{dN, N};
+use crate::core::utils::{dN, N};
 use super::vanila_option::{EquityOption, OptionType, Transection,Engine};
 use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::traits::{Instrument,Greeks};

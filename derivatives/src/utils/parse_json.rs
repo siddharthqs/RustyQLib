@@ -4,7 +4,10 @@ use std::io::Read;
 use chrono::{Local, NaiveDate};
 use crate::core::quotes::Quote;
 use crate::core::termstructure::YieldTermStructure;
-use crate::equity::vanila_option::{Engine, EquityOption, OptionType, Transection};
+use crate::equity::vanila_option::{Engine, EquityOption, OptionType,Transection};
+use crate::cmdty::cmdty_option::{CmdtyOption};
+use crate::core::trade;
+use crate::cmdty::cmdty_option;
 use crate::core::traits::Instrument;
 #[derive(Deserialize)]
 struct MarketData {
@@ -86,6 +89,46 @@ pub fn parse_contract(mut file: &mut File){
             option.set_risk_free_rate();
             println!("Theoretical Price ${}", option.npv());
         }
+
+    }
+    else if data.action=="PV" && data.asset=="CO"{
+        let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
+        let rates = vec![0.05,0.05,0.06,0.07,0.08,0.9,0.9,0.10];
+        let ts = YieldTermStructure::new(date,rates);
+        let curr_quote = Quote{value: data.market_data.underlying_price};
+        let option_type = data.market_data.option_type;
+        let side: trade::OptionType;
+        match option_type.trim() {
+            "C" | "c" | "Call" | "call" => side = trade::OptionType::Call,
+            "P" | "p" | "Put" | "put" => side = trade:: OptionType::Put,
+            _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
+        }
+        let maturity_date = data.market_data.maturity;
+        let today = Local::today();
+        let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
+        let duration = future_date.signed_duration_since(today.naive_utc());
+        let year_fraction = duration.num_days() as f64 / 365.0;
+
+        let sim = data.market_data.simulation;
+        if data.pricer=="BS"{
+            let mut option: CmdtyOption = CmdtyOption {
+                option_type: side,
+                transection: trade::Transection::Buy,
+                current_price: curr_quote,
+                strike_price: data.market_data.strike_price,
+                volatility: data.market_data.volatility,
+                time_to_maturity: year_fraction,
+                transection_price: 0.0,
+                term_structure: ts,
+                engine: cmdty_option::Engine::Black76,
+                simulation: Option::from(sim.unwrap_or(10000)),
+                time_to_future_maturity: None,
+                risk_free_rate: None
+            };
+            //option.set_risk_free_rate();
+            println!("Theoretical Price ${}", option.npv());
+        }
+
 
     }
 
