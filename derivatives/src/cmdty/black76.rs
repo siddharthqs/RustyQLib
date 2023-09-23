@@ -2,6 +2,7 @@ use libm::{exp, log};
 use std::f64::consts::{PI, SQRT_2};
 use crate::core::utils::{dN, N};
 use crate::core::trade;
+
 use super::cmdty_option::{CmdtyOption,Engine};
 use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::traits::{Instrument,Greeks};
@@ -23,17 +24,7 @@ pub fn npv(bsd_option: &&CmdtyOption) -> f64 {
     }
 }
 
-// impl Greeks for CmdtyOption {
-//     fn delta(&self) -> f64 {
-//         let mut delta = N(self.d1());
-//         if self.option_type == OptionType::Call {
-//             delta = delta * exp(-self.dividend_yield * self.time_to_maturity);
-//         } else if self.option_type == OptionType::Put {
-//             delta = delta - 1.0;
-//         }
-//         return delta;
-//     }
-// }
+
 
 impl CmdtyOption {
     pub fn set_risk_free_rate(&mut self){
@@ -75,4 +66,61 @@ impl CmdtyOption {
     //     }
     //     self.volatility
     // }
+}
+impl Greeks for CmdtyOption{
+     fn delta(&self) -> f64 {
+        let mut delta = N(self.d1());
+        if self.option_type == trade::OptionType::Call {
+            delta = delta;
+        } else if self.option_type == trade::OptionType::Put {
+            delta = delta - 1.0;
+        }
+        return delta;
+    }
+    fn gamma(&self) -> f64 {
+        let gamma = dN(self.d1());
+
+        let var_sqrt = self.volatility * (self.time_to_maturity.sqrt());
+        return gamma / (self.current_price.value() * var_sqrt);
+    }
+    fn vega(&self) -> f64 {
+        //St * dN(d1) * math.sqrt(T - t)
+        let vega = self.current_price.value() * dN(self.d1()) * self.time_to_maturity.sqrt();
+        return vega;
+    }
+    fn theta(&self) -> f64 {
+        let mut theta = 0.0;
+        if self.option_type == trade::OptionType::Call {
+            //-(St * dN(d1) * sigma / (2 * math.sqrt(T - t)) + r * K * math.exp(-r * (T - t)) * N(d2))
+            let t1 = -self.current_price.value() * dN(self.d1()) * self.volatility
+                / (2.0 * self.time_to_maturity.sqrt());
+
+            theta = t1;
+        } else if self.option_type == trade::OptionType::Put {
+            //-(St * dN(d1) * sigma / (2 * math.sqrt(T - t)) - r * K * math.exp(-r * (T - t)) * N(d2))
+            let t1 = -self.current_price.value() * dN(self.d1()) * self.volatility
+                / (2.0 * self.time_to_maturity.sqrt());
+
+            theta = t1;
+        }
+
+        return theta;
+    }
+    fn rho(&self) -> f64 {
+        //rho K * (T - t) * math.exp(-r * (T - t)) * N(d2)
+        let mut rho = 0.0;
+        if self.option_type == trade::OptionType::Call {
+            rho = self.strike_price
+                * self.time_to_maturity
+
+                * N(self.d2());
+        } else if self.option_type == trade::OptionType::Put {
+            //put_rho = -K * (T - t) * math.exp(-r * (T - t)) * N(-d2)
+            rho = -self.strike_price
+                * self.time_to_maturity
+                * N(-self.d2());
+        }
+
+        return rho;
+    }
 }

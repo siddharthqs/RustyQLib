@@ -11,7 +11,7 @@ use crate::cmdty::cmdty_option;
 use crate::core::traits::Instrument;
 use crate::core::utils;
 use crate::core::utils::{CombinedContract, ContractOutput};
-
+use crate::core::traits::Greeks;
 use std::io::Write;
 
 pub fn parse_contract(mut file: &mut File,output_filename:&String){
@@ -113,8 +113,9 @@ pub fn parse_contract(mut file: &mut File,output_filename:&String){
             };
             //option.set_risk_free_rate();
             //option.npv();
-            let contract_output = utils::ContractOutput{pv:option.npv()};
+            let contract_output = utils::ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
             println!("Theoretical Price ${}", contract_output.pv);
+            println!("Delta ${}", contract_output.delta);
             let combined_ = utils::CombinedContract{
                 contract: data,
                 output:contract_output
