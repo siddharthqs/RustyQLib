@@ -35,7 +35,7 @@ use crate::equity::montecarlo;
 use clap::{App,Arg};
 use std::env;
 use utils::parse_json;
-
+use std::time::{Instant};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -45,12 +45,23 @@ fn main() {
         println!("Usage: {} <argument>", args[0]);
         return;
     }
-    let argument = &args[1];
-    let output_filename = &args[2];
+    let flag = &args[1];
+    let argument = &args[2];
+    let output_filename = &args[3];
+    let flag = &args[1];
     println!("You provided the argument: {}", argument);
-    let mut file = File::open(argument).expect("Failed to open JSON file");
-
-    parse_json::parse_contract(&mut file,output_filename);
+    match flag.as_str() {
+        "-f" => {
+            let mut file = File::open(argument).expect("Failed to open JSON file");
+            let start_time = Instant::now();
+            parse_json::parse_contract(&mut file,output_filename);
+            let end_time = Instant::now();
+            let elapsed_time = end_time - start_time;
+            println!("Time taken: {:?}", elapsed_time);
+        },
+        "-d" => println!("Found flag -d"),
+        _ => println!("No flag found"),
+    }
 
 }
 
