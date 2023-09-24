@@ -6,7 +6,7 @@ use std::f64::consts::{PI, SQRT_2};
 use serde::Serialize;
 use crate::Deserialize;
 
-#[derive(Deserialize,Serialize)]
+#[derive(Debug,Deserialize,Serialize)]
 pub struct MarketData {
     pub underlying_price:f64,
     pub option_type:String,
@@ -18,7 +18,7 @@ pub struct MarketData {
     pub simulation:Option<u64>
 }
 
-#[derive(Deserialize,Serialize)]
+#[derive(Debug,Deserialize,Serialize)]
 pub struct Contract {
     pub action: String,
     pub pricer: String,
@@ -31,6 +31,14 @@ pub struct CombinedContract{
     pub output: ContractOutput
 }
 
+#[derive(Debug, Deserialize,Serialize)]
+pub struct Contracts {
+    pub contracts: Vec<Contract>,
+}
+#[derive(Debug, Deserialize,Serialize)]
+pub struct OutputJson {
+    pub contracts: Vec<String>,
+}
 #[derive(Deserialize,Serialize)]
 pub struct ContractOutput {
     pub pv: f64,

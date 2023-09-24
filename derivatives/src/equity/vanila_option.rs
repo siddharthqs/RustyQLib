@@ -27,13 +27,10 @@ impl Instrument for EquityOption  {
                 value
             }
             Engine::MonteCarlo => {
-                println!("BlackScholes");
-                let value = blackscholes::npv(&self);
-                println!("{}", value);
 
-                println!("MonteCarlo ");
+                println!("Using MonteCarlo ");
                 let value = montecarlo::npv(&self,false);
-                println!("{}", value);
+
                 value
             }
             _ => {

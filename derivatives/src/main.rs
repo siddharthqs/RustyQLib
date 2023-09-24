@@ -49,6 +49,7 @@ fn main() {
     let output_filename = &args[2];
     println!("You provided the argument: {}", argument);
     let mut file = File::open(argument).expect("Failed to open JSON file");
+
     parse_json::parse_contract(&mut file,output_filename);
 
 }
