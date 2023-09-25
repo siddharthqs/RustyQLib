@@ -11,8 +11,13 @@
 
 use std::io;
 use libm::exp;
-use crate::core::utils::N;
-use crate::equity::vanila_option::{Engine, EquityOption, OptionType, Transection};
+
+//use crate::equity::vanila_option::{Engine, EquityOption, OptionType, Transection};
+use crate::core::utils::{dN, N};
+
+use super::vanila_option::{EquityOption};
+use super::utils::{Engine};
+use crate::core::trade::{OptionType,Transection};
 use super::super::utils::RNG;
 use crate::core::quotes::Quote;
 use crate::core::termstructure::YieldTermStructure;

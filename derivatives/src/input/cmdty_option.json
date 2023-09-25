@@ -1,6 +1,6 @@
 {"contracts" : [{
 "action":"PV",
-"pricer":"BS",
+"pricer":"Analytical",
 "asset":"CO",
 "market_data":{
 	"underlying_price":2.846,
@@ -14,7 +14,7 @@
 },
 {
 "action":"PV",
-"pricer":"BS",
+"pricer":"Analytical",
 "asset":"CO",
 "market_data":{
 	"underlying_price":2.846,

@@ -1,7 +1,7 @@
 {"contracts" : [
 {
 "action":"PV",
-"pricer":"BS",
+"pricer":"Analytical",
 "asset":"EQ",
 "market_data":{
 "underlying_price":100,
@@ -10,13 +10,12 @@
 "volatility":0.4,
 "risk_free_rate":0.06,
 "maturity":"2023-12-31",
-"dividend": 0.01,
-"simulation":100000
+"dividend": 0.01
 }
 },
 {
 "action":"PV",
-"pricer":"MC",
+"pricer":"MonteCarlo",
 "asset":"EQ",
 "market_data":{
 "underlying_price":100,
@@ -27,5 +26,6 @@
 "maturity":"2023-12-31",
 "dividend": 0.01,
 "simulation":100000
-}}]
+}}
+]
 }

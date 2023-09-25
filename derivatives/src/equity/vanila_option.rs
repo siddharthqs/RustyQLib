@@ -3,22 +3,9 @@ use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::{Instrument,Greeks};
 use super::blackscholes;
+use crate::equity::utils::{Engine};
+use crate::core::trade::{OptionType,Transection};
 
-#[derive(PartialEq, Debug)]
-pub enum OptionType {
-    Call,
-    Put,
-    Straddle,
-}
-pub enum Transection {
-    Buy,
-    Sell,
-}
-
-pub enum Engine{
-    BlackScholes,
-    MonteCarlo
-}
 impl Instrument for EquityOption  {
     fn npv(&self) -> f64 {
         match self.engine{

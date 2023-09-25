@@ -6,6 +6,26 @@ use std::f64::consts::{PI, SQRT_2};
 use serde::Serialize;
 use crate::Deserialize;
 
+#[derive(strum_macros::Display)]
+pub enum EngineType {
+    Analytical,
+    MonteCarlo,
+    Binomial,
+    FiniteDifference,
+    FFT,
+}
+impl EngineType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EngineType::Analytical => "Analytical",
+            EngineType::MonteCarlo => "MonteCarlo",
+            EngineType::Binomial => "Binomial",
+            EngineType::FiniteDifference => "FiniteDifference",
+            EngineType::FFT => "FFT",
+        }
+    }
+}
+
 #[derive(Debug,Deserialize,Serialize)]
 pub struct MarketData {
     pub underlying_price:f64,

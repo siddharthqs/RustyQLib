@@ -4,13 +4,16 @@ use std::io::Read;
 use chrono::{Local, NaiveDate};
 use crate::core::quotes::Quote;
 use crate::core::termstructure::YieldTermStructure;
-use crate::equity::vanila_option::{Engine, EquityOption, OptionType,Transection};
+use crate::equity::vanila_option::{EquityOption};
+use crate::core::utils::{dN, N};
+//use super::vanila_option::{EquityOption};
+use crate::equity::utils::{Engine};
 use crate::cmdty::cmdty_option::{CmdtyOption};
 use crate::core::trade;
 use crate::cmdty::cmdty_option;
 use crate::core::traits::Instrument;
 use crate::core::utils;
-use crate::core::utils::{CombinedContract, ContractOutput, Contracts, OutputJson};
+use crate::core::utils::{CombinedContract, ContractOutput, Contracts, OutputJson,EngineType};
 use crate::core::traits::Greeks;
 use std::io::Write;
 use crate::read_csv::read_ts;
@@ -44,10 +47,10 @@ pub fn process_contract(data: utils::Contract) -> String {
 
         let curr_quote = Quote{value: data.market_data.underlying_price};
         let option_type = &data.market_data.option_type;
-        let side: OptionType;
+        let side: trade::OptionType;
         match option_type.trim() {
-            "C" | "c" | "Call" | "call" => side = OptionType::Call,
-            "P" | "p" | "Put" | "put" => side = OptionType::Put,
+            "C" | "c" | "Call" | "call" => side = trade::OptionType::Call,
+            "P" | "p" | "Put" | "put" => side = trade::OptionType::Put,
             _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
         }
         let maturity_date = &data.market_data.maturity;
@@ -60,7 +63,7 @@ pub fn process_contract(data: utils::Contract) -> String {
         let sim = data.market_data.simulation;
         let mut option = EquityOption {
             option_type: side,
-            transection: Transection::Buy,
+            transection: trade::Transection::Buy,
             current_price: curr_quote,
             strike_price: data.market_data.strike_price,
             volatility: data.market_data.volatility,
@@ -72,19 +75,19 @@ pub fn process_contract(data: utils::Contract) -> String {
             engine: Engine::BlackScholes,
             simulation: Option::from(sim.unwrap_or(10000))
         };
-        if data.pricer=="BS"{
-            option.engine = Engine::BlackScholes;
-            //option.set_risk_free_rate();
-            //println!("Theoretical Price ${}", option.npv());
+
+        match data.pricer.trim() {
+            "Analytical" => {
+                option.engine = Engine::BlackScholes;
+            }
+
+            "MonteCarlo" => {
+                option.engine = Engine::MonteCarlo;
+            }
+            _ => {
+                panic!("Invalid pricer");}
         }
-        else if data.pricer=="MC" {
-            option.engine = Engine::MonteCarlo;
-            //option.set_risk_free_rate();
-            //println!("Theoretical Price ${}", option.npv());
-        }
-        else{
-            panic!("Invalid pricer");
-        }
+
         option.set_risk_free_rate();
         let contract_output = utils::ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
         println!("Theoretical Price ${}", contract_output.pv);
@@ -113,7 +116,7 @@ pub fn process_contract(data: utils::Contract) -> String {
         let year_fraction = duration.num_days() as f64 / 365.0;
 
         let sim = data.market_data.simulation;
-        if data.pricer=="BS"{
+        if data.pricer=="Analytical"{
             let mut option: CmdtyOption = CmdtyOption {
                 option_type: side,
                 transection: trade::Transection::Buy,
@@ -146,6 +149,6 @@ pub fn process_contract(data: utils::Contract) -> String {
     else{
         panic!("Invalid action");
     }
-    return "Invalid".to_string();
+    return "Invalid Action".to_string();
 
 }

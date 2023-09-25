@@ -1,8 +1,7 @@
 // extern crate probability;
 // extern crate rand_chacha;
 // extern crate rand_pcg;
-#![allow(dead_code)]
-#![allow(unused_variables)]
+
 use rand;
 use rand::{SeedableRng};
 use chrono::{Local,DateTime,NaiveDate,NaiveTime,Datelike, Duration};
@@ -37,6 +36,8 @@ use std::env;
 use utils::parse_json;
 use std::time::{Instant};
 
+#[allow(dead_code)]
+#[allow(unused_variables)]
 fn main() {
     let args: Vec<String> = env::args().collect();
     let num_args = args.len();
