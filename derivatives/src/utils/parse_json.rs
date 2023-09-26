@@ -77,12 +77,14 @@ pub fn process_contract(data: utils::Contract) -> String {
         };
 
         match data.pricer.trim() {
-            "Analytical" => {
+            "Analytical" |"analytical" => {
                 option.engine = Engine::BlackScholes;
             }
-
-            "MonteCarlo" => {
+            "MonteCarlo" |"montecarlo"|"MC" => {
                 option.engine = Engine::MonteCarlo;
+            }
+            "Binomial"|"binomial" => {
+                option.engine = Engine::Binomial;
             }
             _ => {
                 panic!("Invalid pricer");}
@@ -100,7 +102,6 @@ pub fn process_contract(data: utils::Contract) -> String {
         return output_json;
     }
     else if data.action=="PV" && data.asset=="CO"{
-
         let curr_quote = Quote{value: data.market_data.underlying_price};
         let option_type = &data.market_data.option_type;
         let side: trade::OptionType;

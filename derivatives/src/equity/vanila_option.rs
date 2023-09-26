@@ -1,4 +1,5 @@
 use crate::equity::montecarlo;
+use crate::equity::binomial;
 use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::{Instrument,Greeks};
@@ -14,10 +15,13 @@ impl Instrument for EquityOption  {
                 value
             }
             Engine::MonteCarlo => {
-
                 println!("Using MonteCarlo ");
                 let value = montecarlo::npv(&self,false);
-
+                value
+            }
+            Engine::Binomial => {
+                println!("Using Binomial ");
+                let value = binomial::npv(&self,false);
                 value
             }
             _ => {
