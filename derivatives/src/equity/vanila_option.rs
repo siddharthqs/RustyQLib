@@ -6,6 +6,7 @@ use super::super::core::traits::{Instrument,Greeks};
 use super::blackscholes;
 use crate::equity::utils::{Engine};
 use crate::core::trade::{OptionType,Transection};
+use crate::core::utils::{ContractStyle};
 
 impl Instrument for EquityOption  {
     fn npv(&self) -> f64 {
@@ -21,7 +22,7 @@ impl Instrument for EquityOption  {
             }
             Engine::Binomial => {
                 println!("Using Binomial ");
-                let value = binomial::npv(&self,false);
+                let value = binomial::npv(&self);
                 value
             }
             _ => {
@@ -42,5 +43,6 @@ pub struct EquityOption {
     pub risk_free_rate: f64,
     pub transection_price: f64,
     pub engine: Engine,
-    pub simulation:Option<u64>
+    pub simulation:Option<u64>,
+    pub style: ContractStyle,
 }

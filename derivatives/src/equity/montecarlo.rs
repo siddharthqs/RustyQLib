@@ -104,7 +104,7 @@ pub fn npv(option: &&EquityOption,path_size: bool) -> f64 {
     let payoff = payoff(&st,&option.strike_price,&option.option_type);
     let sum_pay:f64 = payoff.iter().sum();
     let num_of_simulations = st.len() as f64;
-    let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.risk_free_rate - option.dividend_yield)*option.time_to_maturity);
+    let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.risk_free_rate)*option.time_to_maturity);
     c0
     }
 

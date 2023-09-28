@@ -4,7 +4,7 @@ use std::{io, thread};
 use crate::core::quotes::Quote;
 //use utils::{N,dN};
 //use vanila_option::{EquityOption,OptionType};
-use crate::core::utils::{dN, N};
+use crate::core::utils::{ContractStyle, dN, N};
 use crate::core::trade::{OptionType,Transection};
 use super::vanila_option::{EquityOption};
 use super::utils::{Engine};
@@ -296,7 +296,9 @@ pub fn implied_volatility() {
         transection_price: 0.0,
         term_structure: ts,
         engine: Engine::BlackScholes,
-        simulation:sim
+        simulation:sim,
+        //style:Option::from("European".to_string()),
+        style: ContractStyle::European,
     };
     option.set_risk_free_rate();
     println!("Implied Volatility  {}%", 100.0*option.imp_vol(option_price.trim().parse::<f64>().unwrap()));

@@ -14,6 +14,7 @@ use crate::cmdty::cmdty_option;
 use crate::core::traits::Instrument;
 use crate::core::utils;
 use crate::core::utils::{CombinedContract, ContractOutput, Contracts, OutputJson,EngineType};
+use crate::core::utils::ContractStyle;
 use crate::core::traits::Greeks;
 use std::io::Write;
 use crate::read_csv::read_ts;
@@ -40,11 +41,13 @@ pub fn parse_contract(mut file: &mut File,output_filename:&String) {
     file.write_all(output_str.as_bytes()).expect("Failed to write to file");
 }
 pub fn process_contract(data: utils::Contract) -> String {
+    //println!("Processing {:?}",data);
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
     let rates = vec![0.05,0.05,0.06,0.07,0.08,0.9,0.9,0.10];
     let ts = YieldTermStructure::new(date,rates);
-    if data.action=="PV" && data.asset=="EQ"{
+    let sim = data.market_data.simulation;
 
+    if data.action=="PV" && data.asset=="EQ"{
         let curr_quote = Quote{value: data.market_data.underlying_price};
         let option_type = &data.market_data.option_type;
         let side: trade::OptionType;
@@ -60,7 +63,6 @@ pub fn process_contract(data: utils::Contract) -> String {
         let year_fraction = duration.num_days() as f64 / 365.0;
         let rf = Some(data.market_data.risk_free_rate).unwrap();
         let div = Some(data.market_data.dividend).unwrap();
-        let sim = data.market_data.simulation;
         let mut option = EquityOption {
             option_type: side,
             transection: trade::Transection::Buy,
@@ -73,9 +75,11 @@ pub fn process_contract(data: utils::Contract) -> String {
             transection_price: 0.0,
             term_structure: ts,
             engine: Engine::BlackScholes,
-            simulation: Option::from(sim.unwrap_or(10000))
+            simulation: Option::from(sim.unwrap_or(10000)),
+            style: ContractStyle::European,
+            //style: Option::from(data.style.as_ref().unwrap_or(&default_style)).map(|x| &**x),
         };
-
+        println!("style {:?}",data.style);
         match data.pricer.trim() {
             "Analytical" |"analytical" => {
                 option.engine = Engine::BlackScholes;
@@ -88,6 +92,17 @@ pub fn process_contract(data: utils::Contract) -> String {
             }
             _ => {
                 panic!("Invalid pricer");}
+        }
+        //println!("{:?}",option.engine);
+        match data.style.as_ref().unwrap_or(&"European".to_string()).trim() {
+            "European" |"european" => {
+                option.style = ContractStyle::European;
+            }
+            "American" |"american" => {
+                option.style = ContractStyle::American;
+            }
+            _ => {
+                option.style = ContractStyle::European;}
         }
 
         option.set_risk_free_rate();

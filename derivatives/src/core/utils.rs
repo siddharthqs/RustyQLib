@@ -6,6 +6,12 @@ use std::f64::consts::{PI, SQRT_2};
 use serde::Serialize;
 use crate::Deserialize;
 
+#[derive(Clone,Debug)]
+pub enum ContractStyle {
+    European,
+    American,
+}
+
 #[derive(strum_macros::Display)]
 pub enum EngineType {
     Analytical,
@@ -26,7 +32,7 @@ impl EngineType {
     }
 }
 
-#[derive(Debug,Deserialize,Serialize)]
+#[derive(Clone,Debug,Deserialize,Serialize)]
 pub struct MarketData {
     pub underlying_price:f64,
     pub option_type:String,
@@ -35,14 +41,16 @@ pub struct MarketData {
     pub risk_free_rate:Option<f64>,
     pub maturity:String,
     pub dividend: Option<f64>,
-    pub simulation:Option<u64>
+    pub simulation:Option<u64>,
+
 }
 
-#[derive(Debug,Deserialize,Serialize)]
+#[derive(Clone,Debug,Deserialize,Serialize)]
 pub struct Contract {
     pub action: String,
     pub pricer: String,
     pub asset: String,
+    pub style: Option<String>,
     pub market_data: MarketData,
 }
 #[derive(Deserialize,Serialize)]
