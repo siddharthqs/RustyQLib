@@ -26,7 +26,7 @@ pub fn npv(option: &&EquityOption) -> f64 {
         let spot_price_j = option.current_price.value * u.powi(num_steps as i32 - j as i32) * d.powi(j as i32);
         tree[[j,num_steps]] = (multiplier*(spot_price_j - option.strike_price)).max(0.0);
     }
-    //println!("{:?}",tree);
+
     match option.style {
         ContractStyle::European => {
             for i in (0..num_steps).rev() {
