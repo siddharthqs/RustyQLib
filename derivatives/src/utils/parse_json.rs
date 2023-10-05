@@ -79,7 +79,7 @@ pub fn process_contract(data: utils::Contract) -> String {
             style: ContractStyle::European,
             //style: Option::from(data.style.as_ref().unwrap_or(&default_style)).map(|x| &**x),
         };
-        println!("style {:?}",data.style);
+
         match data.pricer.trim() {
             "Analytical" |"analytical" => {
                 option.engine = Engine::BlackScholes;

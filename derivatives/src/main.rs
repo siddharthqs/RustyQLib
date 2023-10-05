@@ -12,7 +12,8 @@ mod equity;
 mod core;
 mod utils;
 mod cmdty;
-
+use std::fs;
+use std::path::Path;
 
 use rand::prelude::*;
 use serde::Deserialize;
@@ -48,14 +49,14 @@ fn main() {
     }
     let flag = &args[1];
     //let argument = &args[2];
-    // make argument optional
+
     let binding = String::from("default");
-    let argument = args.get(2).expect(" ok");
+    let argument = args.get(2).expect("input not provided or invalid");
     //let argument = args.get(2).unwrap_or_else(|| &String::from("default"));
 
 
     let output_filename = &args[3];
-    let output_filename = args.get(3).expect("ok ");
+    let output_filename = args.get(3).expect("output name not provided");
 
 
     //let output_filename = args.get(3).unwrap_or_else(|| &String::from("default"));
@@ -70,7 +71,32 @@ fn main() {
             let elapsed_time = end_time - start_time;
             println!("Time taken: {:?}", elapsed_time);
         },
-        "-d" => println!("Found flag -d"),
+        "-d" => {
+
+            let folder_path = argument;
+            let start_time = Instant::now();
+            let mut output_vec:Vec<String> = Vec::new();
+            let files = fs::read_dir(folder_path).unwrap();
+            for ifile in files {
+                let ifile = ifile.unwrap();
+                let path = ifile.path();
+                if path.is_file(){
+                    // Check if the file has a ".json" extension
+                    if let Some(extension) = path.extension() {
+                        if extension == "json" {
+                            let mut file = File::open(ifile.path()).expect("Failed to open JSON file");
+                            let output_file_i = output_filename.to_owned() + "\\" + &ifile.path().file_name().unwrap().to_str().unwrap();
+                            parse_json::parse_contract(&mut file,&output_file_i);
+                        }
+                    }
+
+                }
+
+            }
+            let end_time = Instant::now();
+            let elapsed_time = end_time - start_time;
+            println!("Time taken to process the dir: {:?}", elapsed_time);
+        },
         "-i" => {
             println!("Welcome to Option pricing CLI");
             loop {
