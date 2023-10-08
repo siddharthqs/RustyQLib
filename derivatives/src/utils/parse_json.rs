@@ -19,7 +19,7 @@ use crate::core::traits::Greeks;
 use std::io::Write;
 use crate::read_csv::read_ts;
 
-pub fn parse_contract(mut file: &mut File,output_filename:&String) {
+pub fn parse_contract(mut file: &mut File,output_filename: &str) {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .expect("Failed to read JSON file");

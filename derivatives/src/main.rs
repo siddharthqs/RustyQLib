@@ -32,7 +32,7 @@ use std::env::{args, temp_dir};
 use rand::Rng;
 use equity::blackscholes;
 use crate::equity::montecarlo;
-use clap::{App,Arg};
+use clap::{App, Arg, ArgMatches, SubCommand};
 use std::env;
 use utils::parse_json;
 use std::time::{Instant};
@@ -40,43 +40,80 @@ use std::time::{Instant};
 #[allow(dead_code)]
 #[allow(unused_variables)]
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let num_args = args.len();
+    let matches = App::new("Rust Quant Option Pricing CLI")
+        .version("0.1.0")
+        .author("Siddharth Singh <siddharth_qs@outlook.com>")
+        .about("Pricing and risk management of financial derivatives")
+        .subcommand(
+            SubCommand::with_name("file")
+                .about("Pricing a single contract")
+                .arg(
+                    Arg::with_name("input")
+                        .short("i")
+                        .long("input")
+                        .value_name("FILE")
+                        .help("Pricing a single contract")
+                        .required(true)
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("output")
+                        .short("o")
+                        .long("output")
+                        .value_name("FILE")
+                        .help("Output file name")
+                        .required(true)
+                        .takes_value(true)
+                )
+        )
+        .subcommand(
+            SubCommand::with_name("dir")
+                .about("Pricing all contracts in a directory")
+                .arg(
+                    Arg::with_name("input")
+                        .short("i")
+                        .long("input")
+                        .value_name("DIR")
+                        .help("Pricing all contracts in a directory")
+                        .required(true)
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("output")
+                        .short("o")
+                        .long("output")
+                        .value_name("DIR")
+                        .help("Output priced contracts to a directory")
+                        .required(true)
+                        .takes_value(true)
+                )
+        )
+        .subcommand(
+            SubCommand::with_name("interactive")
+                .about("Interactive mode")
+        )
+        .get_matches();
 
-    if num_args < 2 {
-        println!("Usage: {} <argument>", args[0]);
-        return;
-    }
-    let flag = &args[1];
-    //let argument = &args[2];
-
-    let binding = String::from("default");
-    let argument = args.get(2).expect("input not provided or invalid");
-    //let argument = args.get(2).unwrap_or_else(|| &String::from("default"));
-
-
-    let output_filename = &args[3];
-    let output_filename = args.get(3).expect("output name not provided");
-
-
-    //let output_filename = args.get(3).unwrap_or_else(|| &String::from("default"));
-    let flag = &args[1];
-    println!("You provided the argument: {}", flag);
-    match flag.as_str() {
-        "-f" => {
-            let mut file = File::open(argument).expect("Failed to open JSON file");
+    let input_matches = matches.subcommand_matches("file");
+    let dir_matches = matches.subcommand_matches("dir");
+    let interactive_matches = matches.subcommand_matches("interactive");
+    match matches.subcommand(){
+        ("file",Some(input_matches)) => {
+            let input_file = input_matches.value_of("input").unwrap();
+            let output_file = input_matches.value_of("output").unwrap();
+            let mut file = File::open(input_file).expect("Failed to open JSON file");
             let start_time = Instant::now();
-            parse_json::parse_contract(&mut file,output_filename);
+            parse_json::parse_contract(&mut file,output_file);
             let end_time = Instant::now();
             let elapsed_time = end_time - start_time;
             println!("Time taken: {:?}", elapsed_time);
-        },
-        "-d" => {
-
-            let folder_path = argument;
+        }
+        ("dir",Some(dir_matches)) => {
+            let input_dir = dir_matches.value_of("input").unwrap();
+            let output_dir = dir_matches.value_of("output").unwrap();
             let start_time = Instant::now();
             let mut output_vec:Vec<String> = Vec::new();
-            let files = fs::read_dir(folder_path).unwrap();
+            let files = fs::read_dir(input_dir).unwrap();
             for ifile in files {
                 let ifile = ifile.unwrap();
                 let path = ifile.path();
@@ -85,56 +122,57 @@ fn main() {
                     if let Some(extension) = path.extension() {
                         if extension == "json" {
                             let mut file = File::open(ifile.path()).expect("Failed to open JSON file");
-                            let output_file_i = output_filename.to_owned() + "\\" + &ifile.path().file_name().unwrap().to_str().unwrap();
+                            let output_file_i = output_dir.to_owned() + "\\" + &ifile.path().file_name().unwrap().to_str().unwrap();
                             parse_json::parse_contract(&mut file,&output_file_i);
                         }
                     }
-
                 }
-
             }
             let end_time = Instant::now();
             let elapsed_time = end_time - start_time;
             println!("Time taken to process the dir: {:?}", elapsed_time);
-        },
-        "-i" => {
+        }
+        ("interactive",Some(interactive_matches)) => {
             println!("Welcome to Option pricing CLI");
-            loop {
-                println!(" Do you want to price option (1) or calculate implied volatility (2)? or (3) to exit");
-                let mut input = String::new();
-                print!("{}", input);
-                io::stdin()
-                    .read_line(&mut input)
-                    .expect("Failed to read line");
-                let input: u8 = input.trim().parse::<u8>().unwrap();
-                if input == 1 {
-                    println!("Do you want to use the Black-Sholes (1) or Monte-Carlo (2) option pricing model?");
-                    let mut model = String::new();
+            println!("Welcome to Option pricing CLI");
+                loop {
+                    println!(" Do you want to price option (1) or calculate implied volatility (2)? or (3) to exit");
+                    let mut input = String::new();
+                    print!("{}", input);
                     io::stdin()
-                        .read_line(&mut model)
+                        .read_line(&mut input)
                         .expect("Failed to read line");
-                    let model: u8 = model.trim().parse::<u8>().unwrap();
-                    if model == 1 {
-                        blackscholes::option_pricing();
-                        } else if model == 2 {
-                            montecarlo::option_pricing();
-                    } else {
+                    let input: u8 = input.trim().parse::<u8>().unwrap();
+                    if input == 1 {
+                        println!("Do you want to use the Black-Sholes (1) or Monte-Carlo (2) option pricing model?");
+                        let mut model = String::new();
+                        io::stdin()
+                            .read_line(&mut model)
+                            .expect("Failed to read line");
+                        let model: u8 = model.trim().parse::<u8>().unwrap();
+                        if model == 1 {
+                            blackscholes::option_pricing();
+                            } else if model == 2 {
+                                montecarlo::option_pricing();
+                        } else {
+                            println!("You gave a wrong number! The accepted arguments are 1 and 2.")
+                        }
+                    } else if input == 2 {
+                        blackscholes::implied_volatility();
+                    }
+                    else if input == 3 {
+                        break;
+                    }
+                    else {
                         println!("You gave a wrong number! The accepted arguments are 1 and 2.")
                     }
-                } else if input == 2 {
-                    blackscholes::implied_volatility();
-                }
-                else if input == 3 {
-                    break;
-                }
-                else {
-                    println!("You gave a wrong number! The accepted arguments are 1 and 2.")
-                }
 
+                }
             }
-        },
-        _ => println!("No flag found"),
-    }
+        (_, _) => {
+            println!("No mode specified. Please use --help to see the available options.");
+        }
+        }
 
 }
 
