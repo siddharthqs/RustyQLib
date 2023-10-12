@@ -42,7 +42,18 @@ pub struct MarketData {
     pub maturity:String,
     pub dividend: Option<f64>,
     pub simulation:Option<u64>,
-
+}
+#[derive(Clone,Debug,Deserialize,Serialize)]
+pub struct RateData {
+    pub instrument: String,
+    pub currency: String,
+    pub start_date: String,
+    pub maturity_date: String,
+    pub valuation_date: String,
+    pub notional: f64,
+    pub fix_rate: f64,
+    pub day_count: String,
+    pub business_day_adjustment: i8,
 }
 
 #[derive(Clone,Debug,Deserialize,Serialize)]
@@ -51,7 +62,8 @@ pub struct Contract {
     pub pricer: String,
     pub asset: String,
     pub style: Option<String>,
-    pub market_data: MarketData,
+    pub market_data: Option<MarketData>,
+    pub rate_data: Option<RateData>,
 }
 #[derive(Deserialize,Serialize)]
 pub struct CombinedContract{

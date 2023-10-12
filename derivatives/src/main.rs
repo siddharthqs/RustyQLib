@@ -12,6 +12,8 @@ mod equity;
 mod core;
 mod utils;
 mod cmdty;
+mod rates;
+
 use std::fs;
 use std::path::Path;
 
@@ -45,14 +47,14 @@ fn main() {
         .author("Siddharth Singh <siddharth_qs@outlook.com>")
         .about("Pricing and risk management of financial derivatives")
         .subcommand(
-            SubCommand::with_name("file")
-                .about("Pricing a single contract")
+            SubCommand::with_name("build")
+                .about("Building the curve / Vol surface")
                 .arg(
                     Arg::with_name("input")
                         .short("i")
                         .long("input")
                         .value_name("FILE")
-                        .help("Pricing a single contract")
+                        .help("input financial contracts to use in constuction ")
                         .required(true)
                         .takes_value(true)
                 )
@@ -66,6 +68,28 @@ fn main() {
                         .takes_value(true)
                 )
         )
+        .subcommand(
+        SubCommand::with_name("file")
+            .about("Pricing a single contract")
+            .arg(
+                Arg::with_name("input")
+                    .short("i")
+                    .long("input")
+                    .value_name("FILE")
+                    .help("Pricing a single contract")
+                    .required(true)
+                    .takes_value(true)
+            )
+            .arg(
+                Arg::with_name("output")
+                    .short("o")
+                    .long("output")
+                    .value_name("FILE")
+                    .help("Output file name")
+                    .required(true)
+                    .takes_value(true)
+            )
+    )
         .subcommand(
             SubCommand::with_name("dir")
                 .about("Pricing all contracts in a directory")
@@ -93,11 +117,21 @@ fn main() {
                 .about("Interactive mode")
         )
         .get_matches();
-
+    let build_matches = matches.subcommand_matches("build");
     let input_matches = matches.subcommand_matches("file");
     let dir_matches = matches.subcommand_matches("dir");
     let interactive_matches = matches.subcommand_matches("interactive");
     match matches.subcommand(){
+        ("build",Some(build_matches)) => {
+            let input_file = build_matches.value_of("input").unwrap();
+            let output_file = build_matches.value_of("output").unwrap();
+            let mut file = File::open(input_file).expect("Failed to open JSON file");
+            let start_time = Instant::now();
+            parse_json::build_curve(&mut file,output_file);
+            let end_time = Instant::now();
+            let elapsed_time = end_time - start_time;
+            println!("Time taken: {:?}", elapsed_time);
+        }
         ("file",Some(input_matches)) => {
             let input_file = input_matches.value_of("input").unwrap();
             let output_file = input_matches.value_of("output").unwrap();

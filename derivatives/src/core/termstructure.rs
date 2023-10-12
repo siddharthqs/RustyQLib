@@ -1,4 +1,4 @@
-use chrono::{DateTime,Local};
+use chrono::{DateTime, Local, NaiveDate};
 pub struct YieldTermStructure<T> {
     pub date: Vec<T>,
     pub rates: Vec<f64>
@@ -11,3 +11,4 @@ impl<T> YieldTermStructure<T> {
         }
     }
 }
+

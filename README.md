@@ -1,19 +1,27 @@
 # RUSTQuant :Pricing Options with Confidence
 RustQuant is a lightweight yet robust quantitative finance library designed for pricing options.
 Built entirely in Rust, it offers a unique combination of safety, performance, and expressiveness that is crucial
-for handling financial data and complex calculations. RustQuant simplifies equity option pricing without compromising on safety, speed, or usability.
+for handling financial data and complex calculations. RustQuant simplifies equity option pricing without compromising
+on safety, speed, or usability.
 ## License
 RustQuant is distributed under the terms of both the MIT license and the Apache License (Version 2.0).
 See LICENSE-APACHE and LICENSE-MIT for details.
 ## Running
-After cloning the repository and compiling you can run the following command:
+After cloning the repository and building you can run the following command:
 ```bash
-derivatives.exe -f "input_file_path.json" "output_file_path.json"
+derivatives file --input <FILE> --output <FILE>
+````
+and for pricing all contracts in a directory
+```bash
+derivatives dir --input <DIR> --output <DIR>
+```
+and for interactive mode
+```bash
+derivatives interactive
 ```
 
--f is the flag to specify the input file to read.
-
-Sample input file is provided in the repository (src\input\equity_option.json).
+Sample input file is provided in the repository (src\input\equity_option.json)
+Files are in JSON format and can be easily edited with any text editor.
 ## Features
 
 ### JSON Input Simplicity:
@@ -57,8 +65,5 @@ JSON Output Clarity
 - [ ] Local Volatility
 - [ ] Stochastic Volatility
 - [ ] Jump Diffusion
-## TODO
-TODO -d is the flag to specify the directory to read all the input files from
 
-TODO -i for interactive mode
 
