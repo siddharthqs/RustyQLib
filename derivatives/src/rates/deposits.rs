@@ -1,7 +1,7 @@
 use chrono::{Local, NaiveDate};
 use crate::core::termstructure::YieldTermStructure;
 use crate::core::traits::Instrument;
-use crate::rates::utils::{DayCountConvention};
+use crate::rates::utils::{DayCountConvention,TermStructure};
 /*
 "" An deposit is an agreement to borrow money interbank at the Ibor fixing rate starting on the start
     date and repaid on the maturity date with the interest amount calculated according to a day
@@ -95,8 +95,9 @@ impl Deposit {
         let value = (1.0 + self.fix_rate * self.get_year_fraction(self.start_date)) * self.notional;
         value
     }
-    pub fn get_pv(&self) -> f64 {
-        let value = self.get_value();
+    pub fn get_pv(&self,curve:&TermStructure) -> f64 {
+        let df = curve.interpolate_log_linear(self.valuation_date,self.maturity_date);
+        let value = self.get_value() * df;
         return value;
     }
 }

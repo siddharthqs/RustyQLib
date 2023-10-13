@@ -2,7 +2,7 @@ use chrono::{Local, NaiveDate, Weekday};
 use chrono::Datelike;
 use crate::rates::deposits::Deposit;
 
-fn is_weekend(date: &NaiveDate) -> bool {
+fn is_weekend(date: NaiveDate) -> bool {
     // Check if the day of the week is Saturday (6) or Sunday (7)
     let day_of_week = date.weekday();
     day_of_week == Weekday::Sat || day_of_week == Weekday::Sun
@@ -35,7 +35,7 @@ fn is_holiday(date: NaiveDate) -> bool {
 
 fn adjust_for_weekend(mut date: NaiveDate) -> NaiveDate {
     // Increment the date until it's not a weekend
-    while is_weekend(&date) || is_holiday(date) {
+    while is_holiday(date) || is_holiday(date) {
         date = date.succ();
     }
     date
@@ -79,6 +79,47 @@ impl TermStructure {
             day_count
         }
     }
+    pub fn interpolate_log_linear(&self,val_date:NaiveDate,maturity_date:NaiveDate)-> f64{
+        let year_fraction = self.get_year_fraction(val_date);
+        let target_yf = maturity_date.signed_duration_since(val_date).num_days() as f64
+            / self.day_count.num_of_days() as f64;
+        let mut df1 = 1.0;
+        let mut df2 = 1.0;
+        let mut t1 = 0.0;
+        let mut t2 = 0.0;
+        for (i, time) in year_fraction.iter().enumerate() {
+            if time==&target_yf{
+                 return self.discount_factor[i];
+            }
+            else if time< &target_yf {
+                t1 = *time;
+                df1 = self.discount_factor[i];
+            }
+            else if time> &target_yf {
+                t2 = *time;
+                df2 = self.discount_factor[i];
+                break;
+            }
+
+        }
+        let log_df1 = f64::ln(df1);
+        let log_df2 = f64::ln(df2);
+        let w = (target_yf - t1) / (t2 - t1);
+        let log_df = log_df1 + w * (log_df2 - log_df1);
+        let df = f64::exp(log_df);
+        return df;
+        //let dfs  = self.discount_factor;
+
+    }
+    pub fn get_year_fraction(&self,val_date:NaiveDate) -> Vec<f64> {
+        let mut year_fraction_vec:Vec<f64> = Vec::new();
+        for time in self.date.iter() {
+            let duration = time.signed_duration_since(val_date);
+            let year_fraction = duration.num_days() as f64 / self.day_count.num_of_days() as f64;
+            year_fraction_vec.push(year_fraction);
+        }
+        year_fraction_vec
+    }
     pub fn rates(&self,val_date:NaiveDate) -> Vec<f64> {
         let mut rates:Vec<f64> = Vec::new();
         for i in 0..self.discount_factor.len() {
@@ -117,6 +158,7 @@ pub fn convert_mm_to_date(mut date: String) -> NaiveDate {
     };
     let date_in_months = current_date.with_year(new_year).unwrap_or(current_date)
         .with_month(new_month).unwrap_or(current_date);
-    let maturity_date = date_in_months.naive_utc();
+    let mut maturity_date = date_in_months.naive_utc();
+    maturity_date = adjust_for_weekend(maturity_date);
     return maturity_date;
 }

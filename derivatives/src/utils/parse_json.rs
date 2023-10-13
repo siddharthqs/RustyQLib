@@ -37,8 +37,20 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
     let df = contracts.iter().map(|x| x.get_discount_factor()).collect();
     let day_count = contracts[0].day_count.clone();
     let ts = rates::utils::TermStructure::new(dates,df,rates,day_count);
+    let today = Local::today().naive_utc();
+    let m = ts.interpolate_log_linear(today,NaiveDate::from_ymd(2024, 12, 12));
+    println!("interpolated value {:?}",m);
     println!("Term Structure {:?}",ts);
-
+    let mut deposit_test = rates::deposits::Deposit {
+        start_date: today,
+        maturity_date: NaiveDate::from_ymd(2024, 12, 12),
+        valuation_date: today,
+        notional: 1.0,
+        fix_rate: 0.05,
+        day_count: rates::utils::DayCountConvention::Act360,
+        business_day_adjustment: 0
+    };
+    println!("PV {:?}",deposit_test.get_pv(&ts));
 
 
 }
@@ -49,6 +61,7 @@ pub fn build_contracts(data: utils::Contract) -> Deposit {
         let mut maturity_date_str = rate_data.maturity_date;
         let current_date = Local::today();
         let maturity_date = rates::utils::convert_mm_to_date(maturity_date_str);
+        //maturity_date = rates::utils::
         let start_date = rates::utils::convert_mm_to_date(start_date_str);
         println!("Maturity Date {:?}",maturity_date);
         let mut deposit = rates::deposits::Deposit {
