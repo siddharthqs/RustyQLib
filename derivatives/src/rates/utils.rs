@@ -1,7 +1,8 @@
 use chrono::{Local, NaiveDate, Weekday};
 use chrono::Datelike;
 use crate::rates::deposits::Deposit;
-
+use crate::core::traits::Rates;
+use serde::{Serialize,Deserialize};
 fn is_weekend(date: NaiveDate) -> bool {
     // Check if the day of the week is Saturday (6) or Sunday (7)
     let day_of_week = date.weekday();
@@ -62,7 +63,7 @@ impl DayCountConvention{
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone,Debug)]
 pub struct TermStructure {
     pub date: Vec<NaiveDate>,
     pub discount_factor: Vec<f64>,
@@ -79,6 +80,7 @@ impl TermStructure {
             day_count
         }
     }
+
     pub fn interpolate_log_linear(&self,val_date:NaiveDate,maturity_date:NaiveDate)-> f64{
         let year_fraction = self.get_year_fraction(val_date);
         let target_yf = maturity_date.signed_duration_since(val_date).num_days() as f64
@@ -162,3 +164,4 @@ pub fn convert_mm_to_date(mut date: String) -> NaiveDate {
     maturity_date = adjust_for_weekend(maturity_date);
     return maturity_date;
 }
+

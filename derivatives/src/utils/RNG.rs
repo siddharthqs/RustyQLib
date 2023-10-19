@@ -59,7 +59,7 @@ impl MonteCarloSimulation{
         dir.push("rng1d");
         let rng_dir = dir.as_path();
         if !rng_dir.exists() {
-            fs::create_dir(rng_dir);
+            let _ = fs::create_dir(rng_dir);
         }
         dir.push("1dt.bin");
         let path = dir.as_path();
