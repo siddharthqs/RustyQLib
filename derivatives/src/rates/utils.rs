@@ -38,6 +38,7 @@ fn adjust_for_weekend(mut date: NaiveDate) -> NaiveDate {
     // Increment the date until it's not a weekend
     while is_holiday(date) || is_holiday(date) {
         date = date.succ();
+
     }
     date
 }

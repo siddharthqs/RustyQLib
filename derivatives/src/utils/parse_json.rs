@@ -45,8 +45,8 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
         ts.date.push(contract.get_maturity_date());
         ts.rate.push(contract.get_rate());
     }
-    let mut dir = temp_dir();
-    println!("dir {:?}",dir);
+    let mut dir = std::path::PathBuf::from(output_filename);
+
     dir.push("term_structure");
     let ts_dir = dir.as_path();
     if !ts_dir.exists() {
@@ -60,11 +60,11 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
     }
     file.write_all(output.as_bytes()).expect("Failed to write to file");
 
-    let today = Local::today().naive_utc();
-    let m = ts.interpolate_log_linear(today,NaiveDate::from_ymd(2024, 12, 12));
-    println!("interpolated value {:?}",m);
-    println!("Term Structure {:?}",ts);
-    let mut deposit_test = rates::deposits::Deposit {
+    //let today = Local::today().naive_utc();
+    //let m = ts.interpolate_log_linear(today,NaiveDate::from_ymd(2024, 12, 12));
+    //println!("interpolated value {:?}",m);
+    //println!("Term Structure {:?}",ts);
+    /*let mut deposit_test = rates::deposits::Deposit {
         start_date: today,
         maturity_date: NaiveDate::from_ymd(2024, 1, 17),
         valuation_date: today,
@@ -73,9 +73,9 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
         day_count: rates::utils::DayCountConvention::Act360,
         business_day_adjustment: 0,
         term_structure: Some(ts.clone()),
-    };
-    println!("PV {:?}",deposit_test.get_pv(&ts));
-    println!("Implied Rate {:?}",deposit_test.get_implied_rates());
+    };*/
+    //println!("PV {:?}",deposit_test.get_pv(&ts));
+    //println!("Implied Rate {:?}",deposit_test.get_implied_rates());
 
 }
 pub fn build_contracts(data: utils::Contract) -> Box<dyn Rates> {
