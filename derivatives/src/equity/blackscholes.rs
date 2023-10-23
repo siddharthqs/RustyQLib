@@ -12,13 +12,12 @@ use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::traits::{Instrument,Greeks};
 use super::super::core::interpolation;
 
-
 pub fn npv(bsd_option: &&EquityOption) -> f64 {
     assert!(bsd_option.volatility >= 0.0);
     assert!(bsd_option.time_to_maturity >= 0.0);
-    assert!(bsd_option.current_price.value >= 0.0);
+    assert!(bsd_option.underlying_price.value >= 0.0);
     if bsd_option.option_type == OptionType::Call {
-        let option_price = bsd_option.current_price.value()
+        let option_price = bsd_option.underlying_price.value()
             * N(bsd_option.d1())
             * exp(-bsd_option.dividend_yield * bsd_option.time_to_maturity)
             - bsd_option.strike_price
@@ -26,7 +25,7 @@ pub fn npv(bsd_option: &&EquityOption) -> f64 {
             * N(bsd_option.d2());
         return option_price;
     } else {
-        let option_price = -bsd_option.current_price.value()
+        let option_price = -bsd_option.underlying_price.value()
             * N(-bsd_option.d1())
             * exp(-bsd_option.dividend_yield * bsd_option.time_to_maturity)
             + bsd_option.strike_price
@@ -194,11 +193,12 @@ pub fn option_pricing() {
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
     let rates = vec![0.05,0.05,0.06,0.07,0.08,0.9,0.9,0.10];
     let ts = YieldTermStructure::new(date,rates);
-    let curr_quote = Quote{value: curr_price.trim().parse::<f64>().unwrap()};
+    let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
     let mut option = EquityOption {
         option_type: side,
         transection: Transection::Buy,
-        current_price: curr_quote,
+        underlying_price: curr_quote,
+        current_price: Quote::new(0.0),
         strike_price: strike.trim().parse::<f64>().unwrap(),
         volatility: vol.trim().parse::<f64>().unwrap(),
         time_to_maturity: expiry.trim().parse::<f64>().unwrap(),
@@ -279,12 +279,13 @@ pub fn implied_volatility() {
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
     let rates = vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12];
     let ts = YieldTermStructure::new(date,rates);
-    let curr_quote = Quote{value: curr_price.trim().parse::<f64>().unwrap()};
-    let sim = std::option::Option::Some(10000);
+    let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
+    let sim = Some(10000);
     let mut option = EquityOption {
         option_type: side,
         transection: Transection::Buy,
-        current_price: curr_quote,
+        underlying_price: curr_quote,
+        current_price: Quote::new(0.0),
         strike_price: strike.trim().parse::<f64>().unwrap(),
         volatility: 0.20,
         time_to_maturity: expiry.trim().parse::<f64>().unwrap(),

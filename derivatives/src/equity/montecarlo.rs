@@ -38,7 +38,7 @@ pub fn simulate_market(option: &&EquityOption) -> Vec<f64>{
 
     let mut market_at_maturity:Vec<f64> = Vec::new();
     for z in path{
-        let sim_value = option.current_price.value()
+        let sim_value = option.underlying_price.value()
             *exp(((option.risk_free_rate - option.dividend_yield - 0.5 * option.volatility.powi(2))
             * option.time_to_maturity)+option.volatility * option.time_to_maturity.sqrt()*z);
         market_at_maturity.push(sim_value);
@@ -90,7 +90,7 @@ pub fn payoff(market: &Vec<f64>,
 pub fn npv(option: &&EquityOption,path_size: bool) -> f64 {
     assert!(option.volatility >= 0.0);
     assert!(option.time_to_maturity >= 0.0);
-    assert!(option.current_price.value >= 0.0);
+    assert!(option.underlying_price.value >= 0.0);
     let mut st = vec![];
     if path_size {
         st  = simulate_market_path_wise(&option);
@@ -166,11 +166,12 @@ pub fn option_pricing() {
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
     let rates = vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12];
     let ts = YieldTermStructure::new(date,rates);
-    let curr_quote = Quote{value: curr_price.trim().parse::<f64>().unwrap()};
+    let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
     let mut option = EquityOption {
         option_type: side,
         transection: Transection::Buy,
-        current_price: curr_quote,
+        underlying_price: curr_quote,
+        current_price: Quote::new(0.01),
         strike_price: strike.trim().parse::<f64>().unwrap(),
         volatility: vol.trim().parse::<f64>().unwrap(),
         time_to_maturity: expiry.trim().parse::<f64>().unwrap(),

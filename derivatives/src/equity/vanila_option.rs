@@ -34,15 +34,23 @@ impl Instrument for EquityOption  {
 pub struct EquityOption {
     pub option_type: OptionType,
     pub transection: Transection,
+    pub underlying_price: Quote,
     pub current_price: Quote,
     pub strike_price: f64,
     pub dividend_yield: f64,
     pub volatility: f64,
-    pub time_to_maturity: f64,
+    pub maturity_date: NaiveDate,
+    pub valuation_date: NaiveDate,
     pub term_structure: YieldTermStructure<f64>,
     pub risk_free_rate: f64,
     pub transection_price: f64,
     pub engine: Engine,
     pub simulation:Option<u64>,
     pub style: ContractStyle,
+}
+impl EquityOption{
+    pub fn time_to_maturity(&self) -> f64{
+        let time_to_maturity = (self.maturity_date - self.valuation_date).num_days() as f64/365.0;
+        time_to_maturity
+    }
 }

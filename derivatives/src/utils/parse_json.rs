@@ -23,71 +23,71 @@ use std::env::temp_dir;
 //use crate::read_csv::read_ts;
 use crate::rates;
 use crate::rates::deposits::Deposit;
-use crate::utils::build_contracts::build_ir_contracts;
+use crate::rates::build_contracts::{build_ir_contracts, build_ir_contracts_from_json, build_term_structure};
+use crate::equity::build_contracts::{build_vol_surface, build_eq_contracts_from_json};
 pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .expect("Failed to read JSON file");
-    let list_contracts: utils::Contracts = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
-    let mut contracts:Vec<Box<dyn Rates>> = Vec::new();
-    contracts = list_contracts.contracts.into_iter()
-        .map(|x| build_contracts(x)).collect();
-
-    let mut ts:rates::utils::TermStructure = rates::utils::TermStructure::new(vec![],vec![],vec![],rates::utils::DayCountConvention::Act360);
-    let mut contract = contracts[0].as_mut();
-    ts.discount_factor.push(contract.get_maturity_discount_factor());
-    ts.date.push(contract.get_maturity_date());
-    ts.rate.push(contract.get_rate());
-    for i in 1..contracts.len(){
-        let mut contract = contracts[i].as_mut();
-        contract.set_term_structure(ts.clone());
-        ts.discount_factor.push(contract.get_maturity_discount_factor());
-        ts.date.push(contract.get_maturity_date());
-        ts.rate.push(contract.get_rate());
+    let list_contracts: Contracts = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
+    if list_contracts.contracts.len() == 0 {
+        panic!("No contracts found in JSON file");
     }
-    let mut dir = std::path::PathBuf::from(output_filename);
+    else if list_contracts.asset=="EQ"{
+        let mut contracts:Vec<Box<EquityOption>> = build_eq_contracts_from_json(list_contracts.contracts);
+        let vol_surface = build_vol_surface(contracts);
+        let mut dir = std::path::PathBuf::from(output_filename);
 
-    dir.push("term_structure");
-    let ts_dir = dir.as_path();
-    if !ts_dir.exists() {
-        let _ = fs::create_dir(ts_dir);
-    }
-    dir.push("term_structure.csv");
-    let mut file = File::create(dir).expect("Failed to create file");
-    let mut output: String = String::new();
-    for i in 0..ts.date.len(){
-        output.push_str(&format!("{},{},{}\n",ts.date[i],ts.discount_factor[i],ts.rate[i]));
-    }
-    file.write_all(output.as_bytes()).expect("Failed to write to file");
-
-    //let today = Local::today().naive_utc();
-    //let m = ts.interpolate_log_linear(today,NaiveDate::from_ymd(2024, 12, 12));
-    //println!("interpolated value {:?}",m);
-    //println!("Term Structure {:?}",ts);
-    /*let mut deposit_test = rates::deposits::Deposit {
-        start_date: today,
-        maturity_date: NaiveDate::from_ymd(2024, 1, 17),
-        valuation_date: today,
-        notional: 1.0,
-        fix_rate: 0.055,
-        day_count: rates::utils::DayCountConvention::Act360,
-        business_day_adjustment: 0,
-        term_structure: Some(ts.clone()),
-    };*/
-    //println!("PV {:?}",deposit_test.get_pv(&ts));
-    //println!("Implied Rate {:?}",deposit_test.get_implied_rates());
-
-}
-pub fn build_contracts(data: utils::Contract) -> Box<dyn Rates> {
-    if data.asset=="IR"{
-        let contract = build_ir_contracts(data);
-        return contract;
+        dir.push("vol_surface");
+        let vol_dir = dir.as_path();
+        if !vol_dir.exists() {
+            let _ = fs::create_dir(vol_dir);
+        }
+        dir.push("vol_surface.csv");
+        let mut file = File::create(dir).expect("Failed to create file");
+        let mut output: String = String::new();
+        /* dump the hash map in csv format */
+        for (k, v) in vol_surface.iter() {
+            output.push_str(&format!("{},{},{}\n",k,v.0,v.1));
+        }
+        file.write_all(output.as_bytes()).expect("Failed to write to file");
 
     }
-    else {
-        panic!("Invalid asset");
+    else if list_contracts.asset=="CO"{
+        panic!("Commodity contracts not supported");
+    }
+    else if list_contracts.asset=="IR"{
+        let mut contracts:Vec<Box<dyn Rates>> = build_ir_contracts_from_json(list_contracts.contracts);
+        let ts = build_term_structure(contracts);
+        let mut dir = std::path::PathBuf::from(output_filename);
+
+        dir.push("term_structure");
+        let ts_dir = dir.as_path();
+        if !ts_dir.exists() {
+            let _ = fs::create_dir(ts_dir);
+        }
+        dir.push("term_structure.csv");
+        let mut file = File::create(dir).expect("Failed to create file");
+        let mut output: String = String::new();
+        for i in 0..ts.date.len(){
+            output.push_str(&format!("{},{},{}\n",ts.date[i],ts.discount_factor[i],ts.rate[i]));
+        }
+        file.write_all(output.as_bytes()).expect("Failed to write to file");
+    }
+    else{
+        panic!("Asset class not supported");
     }
 }
+// pub fn build_contracts(data: utils::Contract) -> Box<dyn Rates> {
+//     if data.asset=="IR"{
+//         let contract = build_ir_contracts(data);
+//         return contract;
+//
+//     }
+//     else {
+//         panic!("Invalid asset");
+//     }
+// }
 
 pub fn parse_contract(mut file: &mut File,output_filename: &str) {
     let mut contents = String::new();
@@ -119,7 +119,8 @@ pub fn process_contract(data: utils::Contract) -> String {
     if data.action=="PV" && data.asset=="EQ"{
         let market_data = data.market_data.clone().unwrap();
         let sim = market_data.simulation;
-        let curr_quote = Quote{value: market_data.underlying_price};
+        let curr_quote = Quote::new(market_data.underlying_price);
+
         let option_type = &market_data.option_type;
         let side: trade::OptionType;
         match option_type.trim() {
@@ -134,12 +135,14 @@ pub fn process_contract(data: utils::Contract) -> String {
         let year_fraction = duration.num_days() as f64 / 365.0;
         let rf = Some(market_data.risk_free_rate).unwrap();
         let div = Some(market_data.dividend).unwrap();
+        let vol = Some(market_data.volatility).unwrap();
         let mut option = EquityOption {
             option_type: side,
             transection: trade::Transection::Buy,
-            current_price: curr_quote,
+            underlying_price: curr_quote.unwrap(),
+            current_price: Quote::new(0.0),
             strike_price: market_data.strike_price,
-            volatility: market_data.volatility,
+            volatility: vol.unwrap(),
             time_to_maturity: year_fraction,
             risk_free_rate: rf.unwrap_or(0.0),
             dividend_yield: div.unwrap_or(0.0),
@@ -189,7 +192,7 @@ pub fn process_contract(data: utils::Contract) -> String {
     }
     else if data.action=="PV" && data.asset=="CO"{
         let market_data = data.market_data.clone().unwrap();
-        let curr_quote = Quote{value: market_data.underlying_price};
+        let curr_quote = Quote::new( market_data.underlying_price);
         let option_type = &market_data.option_type;
         let side: trade::OptionType;
         match option_type.trim() {
@@ -202,6 +205,7 @@ pub fn process_contract(data: utils::Contract) -> String {
         let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
         let duration = future_date.signed_duration_since(today.naive_utc());
         let year_fraction = duration.num_days() as f64 / 365.0;
+        let vol = Some(market_data.volatility).unwrap();
 
         let sim = market_data.simulation;
         if data.pricer=="Analytical"{
@@ -210,7 +214,7 @@ pub fn process_contract(data: utils::Contract) -> String {
                 transection: trade::Transection::Buy,
                 current_price: curr_quote,
                 strike_price: market_data.strike_price,
-                volatility: market_data.volatility,
+                volatility: vol.unwrap(),
                 time_to_maturity: year_fraction,
                 transection_price: 0.0,
                 term_structure: ts,

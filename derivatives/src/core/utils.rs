@@ -37,7 +37,8 @@ pub struct MarketData {
     pub underlying_price:f64,
     pub option_type:String,
     pub strike_price:f64,
-    pub volatility:f64,
+    pub volatility:Option<f64>,
+    pub option_price:Option<f64>,
     pub risk_free_rate:Option<f64>,
     pub maturity:String,
     pub dividend: Option<f64>,
@@ -73,6 +74,7 @@ pub struct CombinedContract{
 
 #[derive(Debug, Deserialize,Serialize)]
 pub struct Contracts {
+    pub asset: String,
     pub contracts: Vec<Contract>,
 }
 #[derive(Debug, Deserialize,Serialize)]
