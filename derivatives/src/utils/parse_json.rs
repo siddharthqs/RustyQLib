@@ -24,7 +24,7 @@ use std::env::temp_dir;
 use crate::rates;
 use crate::rates::deposits::Deposit;
 use crate::rates::build_contracts::{build_ir_contracts, build_ir_contracts_from_json, build_term_structure};
-use crate::equity::build_contracts::{build_vol_surface, build_eq_contracts_from_json};
+use crate::equity::build_contracts::{build_volatility_surface, build_eq_contracts_from_json};
 pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
@@ -35,7 +35,7 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
     }
     else if list_contracts.asset=="EQ"{
         let mut contracts:Vec<Box<EquityOption>> = build_eq_contracts_from_json(list_contracts.contracts);
-        let vol_surface = build_vol_surface(contracts);
+        let vol_surface = build_volatility_surface(contracts);
         let mut dir = std::path::PathBuf::from(output_filename);
 
         dir.push("vol_surface");
@@ -44,13 +44,9 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
             let _ = fs::create_dir(vol_dir);
         }
         dir.push("vol_surface.csv");
-        let mut file = File::create(dir).expect("Failed to create file");
-        let mut output: String = String::new();
-        /* dump the hash map in csv format */
-        for (k, v) in vol_surface.iter() {
-            output.push_str(&format!("{},{},{}\n",k,v.0,v.1));
-        }
-        file.write_all(output.as_bytes()).expect("Failed to write to file");
+        //Todo write Vol Surface to file
+        println!("{:?}",vol_surface);
+
 
     }
     else if list_contracts.asset=="CO"{
@@ -78,16 +74,7 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
         panic!("Asset class not supported");
     }
 }
-// pub fn build_contracts(data: utils::Contract) -> Box<dyn Rates> {
-//     if data.asset=="IR"{
-//         let contract = build_ir_contracts(data);
-//         return contract;
-//
-//     }
-//     else {
-//         panic!("Invalid asset");
-//     }
-// }
+
 
 pub fn parse_contract(mut file: &mut File,output_filename: &str) {
     let mut contents = String::new();
@@ -117,69 +104,9 @@ pub fn process_contract(data: utils::Contract) -> String {
 
 
     if data.action=="PV" && data.asset=="EQ"{
-        let market_data = data.market_data.clone().unwrap();
-        let sim = market_data.simulation;
-        let curr_quote = Quote::new(market_data.underlying_price);
+        //let market_data = data.market_data.clone().unwrap();
+        let option = EquityOption::equityoption_from_json(data.clone());
 
-        let option_type = &market_data.option_type;
-        let side: trade::OptionType;
-        match option_type.trim() {
-            "C" | "c" | "Call" | "call" => side = trade::OptionType::Call,
-            "P" | "p" | "Put" | "put" => side = trade::OptionType::Put,
-            _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
-        }
-        let maturity_date = &market_data.maturity;
-        let today = Local::today();
-        let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
-        let duration = future_date.signed_duration_since(today.naive_utc());
-        let year_fraction = duration.num_days() as f64 / 365.0;
-        let rf = Some(market_data.risk_free_rate).unwrap();
-        let div = Some(market_data.dividend).unwrap();
-        let vol = Some(market_data.volatility).unwrap();
-        let mut option = EquityOption {
-            option_type: side,
-            transection: trade::Transection::Buy,
-            underlying_price: curr_quote.unwrap(),
-            current_price: Quote::new(0.0),
-            strike_price: market_data.strike_price,
-            volatility: vol.unwrap(),
-            time_to_maturity: year_fraction,
-            risk_free_rate: rf.unwrap_or(0.0),
-            dividend_yield: div.unwrap_or(0.0),
-            transection_price: 0.0,
-            term_structure: ts,
-            engine: Engine::BlackScholes,
-            simulation: Option::from(sim.unwrap_or(10000)),
-            style: ContractStyle::European,
-            //style: Option::from(data.style.as_ref().unwrap_or(&default_style)).map(|x| &**x),
-        };
-
-        match data.pricer.trim() {
-            "Analytical" |"analytical" => {
-                option.engine = Engine::BlackScholes;
-            }
-            "MonteCarlo" |"montecarlo"|"MC" => {
-                option.engine = Engine::MonteCarlo;
-            }
-            "Binomial"|"binomial" => {
-                option.engine = Engine::Binomial;
-            }
-            _ => {
-                panic!("Invalid pricer");}
-        }
-
-        match data.style.as_ref().unwrap_or(&"European".to_string()).trim() {
-            "European" |"european" => {
-                option.style = ContractStyle::European;
-            }
-            "American" |"american" => {
-                option.style = ContractStyle::American;
-            }
-            _ => {
-                option.style = ContractStyle::European;}
-        }
-
-        option.set_risk_free_rate();
         let contract_output = utils::ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
         println!("Theoretical Price ${}", contract_output.pv);
         println!("Delta ${}", contract_output.delta);

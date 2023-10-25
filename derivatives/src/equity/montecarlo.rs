@@ -10,6 +10,7 @@
 //println!(":?:{}",t);
 
 use std::io;
+use chrono::{Datelike, Local, NaiveDate};
 use libm::exp;
 
 //use crate::equity::vanila_option::{Engine, EquityOption, OptionType, Transection};
@@ -40,7 +41,7 @@ pub fn simulate_market(option: &&EquityOption) -> Vec<f64>{
     for z in path{
         let sim_value = option.underlying_price.value()
             *exp(((option.risk_free_rate - option.dividend_yield - 0.5 * option.volatility.powi(2))
-            * option.time_to_maturity)+option.volatility * option.time_to_maturity.sqrt()*z);
+            * option.time_to_maturity())+option.volatility * option.time_to_maturity().sqrt()*z);
         market_at_maturity.push(sim_value);
     }
     market_at_maturity
@@ -49,7 +50,7 @@ pub fn simulate_market(option: &&EquityOption) -> Vec<f64>{
 pub fn simulate_market_path_wise(option: &&EquityOption) -> Vec<f64>{
     let M = 1000;
     let N = 10000;
-    let dt = option.time_to_maturity/1000.0;
+    let dt = option.time_to_maturity()/1000.0;
     let path = RNG::get_matrix_standard_normal(N,M);
     let mut market_at_maturity:Vec<f64> = Vec::new();
     for ipath in &path{
@@ -89,7 +90,7 @@ pub fn payoff(market: &Vec<f64>,
 
 pub fn npv(option: &&EquityOption,path_size: bool) -> f64 {
     assert!(option.volatility >= 0.0);
-    assert!(option.time_to_maturity >= 0.0);
+    assert!(option.time_to_maturity() >= 0.0);
     assert!(option.underlying_price.value >= 0.0);
     let mut st = vec![];
     if path_size {
@@ -104,7 +105,7 @@ pub fn npv(option: &&EquityOption,path_size: bool) -> f64 {
     let payoff = payoff(&st,&option.strike_price,&option.option_type);
     let sum_pay:f64 = payoff.iter().sum();
     let num_of_simulations = st.len() as f64;
-    let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.risk_free_rate)*option.time_to_maturity);
+    let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.risk_free_rate)*option.time_to_maturity());
     c0
     }
 
@@ -147,12 +148,12 @@ pub fn option_pricing() {
     let mut rf = String::new();
     io::stdin().read_line(&mut rf).expect("Failed to read line");
 
-    println!("Time to maturity in years");
+    println!("Maturity date in YYYY-MM-DD format:");
     let mut expiry = String::new();
     io::stdin()
         .read_line(&mut expiry)
         .expect("Failed to read line");
-
+    let future_date = NaiveDate::parse_from_str(&expiry.trim(), "%Y-%m-%d").expect("Invalid date format");
     println!("Dividend yield on this stock:");
     let mut div = String::new();
     io::stdin()
@@ -174,7 +175,7 @@ pub fn option_pricing() {
         current_price: Quote::new(0.01),
         strike_price: strike.trim().parse::<f64>().unwrap(),
         volatility: vol.trim().parse::<f64>().unwrap(),
-        time_to_maturity: expiry.trim().parse::<f64>().unwrap(),
+        maturity_date: future_date,
         risk_free_rate: rf.trim().parse::<f64>().unwrap(),
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         transection_price: 0.0,
@@ -182,6 +183,7 @@ pub fn option_pricing() {
         engine: Engine::MonteCarlo,
         simulation: std::option::Option::Some(10000),
         style: ContractStyle::European,
+        valuation_date: Local::today().naive_utc(),
     };
     option.set_risk_free_rate();
     println!("Theoretical Price ${}", option.npv());

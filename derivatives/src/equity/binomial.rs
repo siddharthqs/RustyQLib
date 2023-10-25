@@ -6,11 +6,11 @@ use crate::core::utils::{ContractStyle};
 use ndarray::Array2;
 pub fn npv(option: &&EquityOption) -> f64 {
     assert!(option.volatility >= 0.0);
-    assert!(option.time_to_maturity >= 0.0);
+    assert!(option.time_to_maturity() >= 0.0);
     assert!(option.current_price.value >= 0.0);
     let num_steps = 1000;
 
-    let dt = option.time_to_maturity / num_steps as f64;
+    let dt = option.time_to_maturity() / num_steps as f64;
     let discount_factor = (-option.risk_free_rate * dt).exp();
     // Calculate parameters for the binomial tree
     let u = (option.volatility*dt.sqrt()).exp(); //up movement
