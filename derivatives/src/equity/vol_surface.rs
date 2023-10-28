@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use crate::rates::utils::{DayCountConvention};
 use chrono::{NaiveDate};
-#[derive(Clone,Debug)]
+#[derive(Clone,Debug,Serialize,Deserialize)]
 pub struct VolSurface{
     pub term_structure: BTreeMap<NaiveDate, Vec<(f64,f64)>>,
     pub spot: f64,

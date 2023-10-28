@@ -43,10 +43,13 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
         if !vol_dir.exists() {
             let _ = fs::create_dir(vol_dir);
         }
-        dir.push("vol_surface.csv");
+        dir.push("vol_surface.json");
         //Todo write Vol Surface to file
-        println!("{:?}",vol_surface);
 
+        let mut file = File::create(dir).expect("Failed to create file");
+        let mut output: String = String::new();
+        let serialized_vol_surface = serde_json::to_string(&vol_surface).unwrap();
+        file.write_all(serialized_vol_surface.as_bytes()).expect("Failed to write to file");
 
     }
     else if list_contracts.asset=="CO"{

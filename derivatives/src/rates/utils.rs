@@ -42,7 +42,7 @@ fn adjust_for_weekend(mut date: NaiveDate) -> NaiveDate {
     }
     date
 }
-#[derive(Clone,Debug)]
+#[derive(Clone,Debug,Serialize,Deserialize)]
 pub enum DayCountConvention{
     Act365,
     Act360,

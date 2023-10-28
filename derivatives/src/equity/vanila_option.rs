@@ -126,8 +126,6 @@ impl EquityOption {
             }
         }
         option.set_risk_free_rate();
-        println!("{:?}", option);
-        //option.volatility = option.imp_vol(option.current_price.value);
         return Box::new(option);
     }
 }
