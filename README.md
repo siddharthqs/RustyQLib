@@ -1,25 +1,30 @@
-# RUSTQuant :Pricing Options with Confidence
-RustQuant is a lightweight yet robust quantitative finance library designed for pricing options.
+[![Rust](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml/badge.svg)](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml)
+
+# RUSTYQLib :Pricing Options with Confidence using JSON
+RustyQLib is a lightweight yet robust quantitative finance library designed for pricing options.
 Built entirely in Rust, it offers a unique combination of safety, performance, and expressiveness that is crucial
-for handling financial data and complex calculations. RustQuant simplifies equity option pricing without compromising
+for handling financial data and complex calculations. RustyQlib simplifies equity option pricing without compromising
 on safety, speed, or usability.
 ## License
-RustQuant is distributed under the terms of both the MIT license and the Apache License (Version 2.0).
+RustyQlib is distributed under the terms of both the MIT license and the Apache License (Version 2.0).
 See LICENSE-APACHE and LICENSE-MIT for details.
 ## Running
 After cloning the repository and building you can run the following command:
 ```bash
-derivatives file --input <FILE> --output <FILE>
+rustyqlib file --input <FILE> --output <FILE>
 ````
 and for pricing all contracts in a directory
 ```bash
-derivatives dir --input <DIR> --output <DIR>
+rustyqlib dir --input <DIR> --output <DIR>
 ```
 and for interactive mode
 ```bash
-derivatives interactive
+rustyqlib interactive
 ```
-
+and for build mode to build vol surface or interest rate curve
+```bash
+rustyqlib build --input <FILE> --output <DIR>
+```
 Sample input file is provided in the repository (src\input\equity_option.json)
 Files are in JSON format and can be easily edited with any text editor.
 ## Features
