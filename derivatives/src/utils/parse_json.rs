@@ -108,7 +108,7 @@ pub fn process_contract(data: utils::Contract) -> String {
 
     if data.action=="PV" && data.asset=="EQ"{
         //let market_data = data.market_data.clone().unwrap();
-        let option = EquityOption::equityoption_from_json(data.clone());
+        let option = EquityOption::from_json(data.clone());
 
         let contract_output = utils::ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
         println!("Theoretical Price ${}", contract_output.pv);

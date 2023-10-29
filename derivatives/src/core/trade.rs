@@ -1,4 +1,4 @@
-#[derive(Debug,Clone)]
+#[derive(PartialEq,Debug,Clone)]
 pub enum Transection {
     Buy,
     Sell,

@@ -6,7 +6,7 @@ use std::f64::consts::{PI, SQRT_2};
 use serde::Serialize;
 use crate::Deserialize;
 
-#[derive(Clone,Debug)]
+#[derive(PartialEq,Clone,Debug)]
 pub enum ContractStyle {
     European,
     American,

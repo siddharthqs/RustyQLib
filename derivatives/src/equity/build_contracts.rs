@@ -15,7 +15,7 @@ use crate::equity::utils::{Engine};
 use std::collections::BTreeMap;
 
 pub fn build_eq_contracts_from_json(data: Vec<Contract>) -> Vec<Box<EquityOption>> {
-    let derivatives:Vec<Box<EquityOption>> = data.iter().map(|x| EquityOption::equityoption_from_json(x.clone())).collect();
+    let derivatives:Vec<Box<EquityOption>> = data.iter().map(|x| EquityOption::from_json(x.clone())).collect();
     return derivatives;
 }
 pub fn build_volatility_surface(mut contracts:Vec<Box<EquityOption>>) -> VolSurface {
