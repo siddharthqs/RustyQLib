@@ -2,6 +2,20 @@
 name = "RustyQLib"
 version = "0.0.1"
 edition = "2021"
+authors = ["Siddharth Singh"]
+description = "RustyQLib is a lightweight yet robust quantitative finance library designed to price derivatives and perform risk analysis"
+license = "MIT"
+repository = "https://github.com/siddharthqs/RustyQLib"
+readme = "README.md"
+homepage = "https://github.com/siddharthqs/RustyQLib"
+keywords = [
+    "quantitative-finance",
+    "derivatives",
+    "monte-carlo",
+    "black-scholes",
+    "cli"
+]
+categories = ["command-line", "quant", "monte-carlo", "finance"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

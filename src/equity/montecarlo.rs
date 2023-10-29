@@ -1,14 +1,4 @@
 
-
-
-// let val: f64 = thread_rng().sample(StandardNormal);
-// println!("normal vector: {}", val);
-// let t = RNG::get_vector_standard_normal(10000);
-// for i in &t{
-//     println!("{}", i);
-// }
-//println!(":?:{}",t);
-
 use std::io;
 use chrono::{Datelike, Local, NaiveDate};
 use libm::exp;

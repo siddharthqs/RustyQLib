@@ -37,6 +37,7 @@ pub fn npv(bsd_option: &&EquityOption) -> f64 {
 }
 
 impl Greeks for EquityOption{
+
     fn delta(&self) -> f64 {
         let mut delta = N(self.d1());
         if self.option_type == OptionType::Call {

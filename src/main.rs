@@ -42,8 +42,8 @@ use std::time::{Instant};
 #[allow(dead_code)]
 #[allow(unused_variables)]
 fn main() {
-    let matches = App::new("Rust Quant Option Pricing CLI")
-        .version("0.1.0")
+    let matches = App::new("RustyQLib Quant Library for Option Pricing")
+        .version("0.0.1")
         .author("Siddharth Singh <siddharth_qs@outlook.com>")
         .about("Pricing and risk management of financial derivatives")
         .subcommand(

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use crate::rates::utils::{DayCountConvention};
 use chrono::{NaiveDate};
+
+/// Vol Surface is a collection of volatilities for different maturities and strikes
 #[derive(Clone,Debug,Serialize,Deserialize)]
 pub struct VolSurface{
     pub term_structure: BTreeMap<NaiveDate, Vec<(f64,f64)>>,

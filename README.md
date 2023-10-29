@@ -1,4 +1,4 @@
-[![Rust](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml/badge.svg)](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml)
+[![Build and Tests](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml/badge.svg)](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml)
 
 # RUSTYQLib :Pricing Options with Confidence using JSON
 RustyQLib is a lightweight yet robust quantitative finance library designed for pricing options.

@@ -4,6 +4,8 @@ use super::utils::{Engine};
 use crate::core::trade::{OptionType,Transection};
 use crate::core::utils::{ContractStyle};
 use ndarray::Array2;
+
+/// Binomial tree model for European and American options
 pub fn npv(option: &&EquityOption) -> f64 {
     assert!(option.volatility >= 0.0);
     assert!(option.time_to_maturity() >= 0.0);

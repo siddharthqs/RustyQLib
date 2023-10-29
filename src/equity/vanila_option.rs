@@ -33,7 +33,7 @@ impl Instrument for EquityOption  {
         }
     }
 }
-
+/// Equity Option represents a real world equity option contract
 #[derive(Debug)]
 pub struct EquityOption {
     pub option_type: OptionType,
