@@ -33,7 +33,7 @@ impl Instrument for EquityOption  {
         }
     }
 }
-/// Equity Option represents a real world equity option contract
+/// This struct represents a real world equity option contract
 #[derive(Debug)]
 pub struct EquityOption {
     pub option_type: OptionType,
@@ -59,8 +59,8 @@ impl EquityOption{
     }
 }
 impl EquityOption {
-    pub fn from_json(data: Contract) -> Box<EquityOption> {
-        let market_data = data.market_data.unwrap();
+    pub fn from_json(data: &Contract) -> Box<EquityOption> {
+        let market_data = data.market_data.as_ref().unwrap();
         let underlying_quote = Quote::new(market_data.underlying_price);
         //TODO: Add term structure
         let date = vec![0.01, 0.02, 0.05, 0.1, 0.5, 1.0, 2.0, 3.0];
@@ -168,7 +168,7 @@ mod tests {
             style: Some("European".to_string()),
             rate_data: None
         };
-        let option = EquityOption::from_json(data);
+        let option = EquityOption::from_json(&data);
         assert_eq!(option.option_type, OptionType::Call);
         assert_eq!(option.transection, Transection::Buy);
         assert_eq!(option.underlying_price.value, 100.0);

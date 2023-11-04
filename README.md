@@ -1,4 +1,5 @@
 [![Build and Tests](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml/badge.svg)](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 # RUSTYQLib :Pricing Options with Confidence using JSON
 RustyQLib is a lightweight yet robust quantitative finance library designed for pricing options.
@@ -50,6 +51,7 @@ JSON Output Clarity
 - [ ] Asian
 
 ### Instruments:
+#### Equity
 - [x] Equity Option
 - [ ] Equity Forward Start Option
 - [ ] Equity Basket
@@ -58,6 +60,15 @@ JSON Output Clarity
 - [ ] Equity Asian
 - [ ] Equity Rainbow
 - [ ] Equity Chooser
+#### Interest Rate
+- [x] Deposit
+- [x] FRA
+- [ ] Interest Rate Swap
+#### Commodities
+- [x] Commodity Option
+- [ ] Commodity Forward Start Option
+- [ ] Commodity Barrier
+- [ ] Commodity Lookback
 
 
 ### Pricing engines:

@@ -24,7 +24,26 @@ use std::env::temp_dir;
 use crate::rates;
 use crate::rates::deposits::Deposit;
 use crate::rates::build_contracts::{build_ir_contracts, build_ir_contracts_from_json, build_term_structure};
-use crate::equity::build_contracts::{build_volatility_surface, build_eq_contracts_from_json};
+use crate::equity::build_contracts::{build_eq_contracts_from_json};
+use crate::equity::vol_surface::VolSurface;
+
+/// This function saves the output to a file and returns the path to the file.
+pub fn save_to_file<'a>(output_folder: &'a str, subfolder: &'a str, filename: &'a str, output: &'a str) -> String {
+    let mut dir = std::path::PathBuf::from(output_folder);
+    if subfolder.len() > 0 {
+        dir.push(subfolder);
+    }
+    let _dir = dir.as_path();
+    if !_dir.exists() {
+        let _ = fs::create_dir(_dir);
+    }
+    dir.push(filename);
+    let mut file = File::create(&dir).expect("Failed to create file");
+    file.write_all(output.as_bytes()).expect("Failed to write to file");
+    return dir.as_path().to_str().unwrap().to_string();
+}
+
+/// This function different types of curves such as term structure, volatility surface, etc.
 pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
@@ -34,50 +53,33 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
         panic!("No contracts found in JSON file");
     }
     else if list_contracts.asset=="EQ"{
+        println!("Building volatility surface");
         let mut contracts:Vec<Box<EquityOption>> = build_eq_contracts_from_json(list_contracts.contracts);
-        let vol_surface = build_volatility_surface(contracts);
-        let mut dir = std::path::PathBuf::from(output_filename);
-
-        dir.push("vol_surface");
-        let vol_dir = dir.as_path();
-        if !vol_dir.exists() {
-            let _ = fs::create_dir(vol_dir);
-        }
-        dir.push("vol_surface.json");
-        //Todo write Vol Surface to file
-
-        let mut file = File::create(dir).expect("Failed to create file");
-        let mut output: String = String::new();
+        let vol_surface = VolSurface::build_eq_vol(contracts);
         let serialized_vol_surface = serde_json::to_string(&vol_surface).unwrap();
-        file.write_all(serialized_vol_surface.as_bytes()).expect("Failed to write to file");
-
+        let out_dir = save_to_file(output_filename, "vol_surface", "vol_surface.json", &serialized_vol_surface);
+        println!("Volatility surface saved to {}", out_dir);
     }
     else if list_contracts.asset=="CO"{
+        //Todo -build commodity vol surface
         panic!("Commodity contracts not supported");
     }
     else if list_contracts.asset=="IR"{
         let mut contracts:Vec<Box<dyn Rates>> = build_ir_contracts_from_json(list_contracts.contracts);
         let ts = build_term_structure(contracts);
-        let mut dir = std::path::PathBuf::from(output_filename);
-
-        dir.push("term_structure");
-        let ts_dir = dir.as_path();
-        if !ts_dir.exists() {
-            let _ = fs::create_dir(ts_dir);
-        }
-        dir.push("term_structure.csv");
-        let mut file = File::create(dir).expect("Failed to create file");
         let mut output: String = String::new();
         for i in 0..ts.date.len(){
             output.push_str(&format!("{},{},{}\n",ts.date[i],ts.discount_factor[i],ts.rate[i]));
         }
-        file.write_all(output.as_bytes()).expect("Failed to write to file");
+
+        let out_dir = save_to_file(output_filename, "term_structure", "term_structure.csv", &output);
+        println!("Term structure saved to {}", out_dir);
+
     }
     else{
         panic!("Asset class not supported");
     }
 }
-
 
 pub fn parse_contract(mut file: &mut File,output_filename: &str) {
     let mut contents = String::new();
@@ -108,7 +110,7 @@ pub fn process_contract(data: utils::Contract) -> String {
 
     if data.action=="PV" && data.asset=="EQ"{
         //let market_data = data.market_data.clone().unwrap();
-        let option = EquityOption::from_json(data.clone());
+        let option = EquityOption::from_json(&data);
 
         let contract_output = utils::ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
         println!("Theoretical Price ${}", contract_output.pv);

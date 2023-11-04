@@ -152,13 +152,14 @@ impl EquityOption {
 }
 pub fn option_pricing() {
     println!("Welcome to the Black-Scholes Option pricer.");
-    println!("(Step 1/7) What is the current price of the underlying asset?");
+    println!(" What is the current price of the underlying asset?");
     print!(">>");
     let mut curr_price = String::new();
     io::stdin()
         .read_line(&mut curr_price)
         .expect("Failed to read line");
-    println!("(Step 2/7) Do you want a call option ('C') or a put option ('P') ?");
+    println!(" Do you want a call option ('C') or a put option ('P') ?");
+    print!(">>");
     let mut side_input = String::new();
     io::stdin()
         .read_line(&mut side_input)
@@ -170,28 +171,36 @@ pub fn option_pricing() {
         _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
     }
     println!("Stike price:");
+    print!(">>");
     let mut strike = String::new();
     io::stdin()
         .read_line(&mut strike)
         .expect("Failed to read line");
     println!("Expected annualized volatility in %:");
     println!("E.g.: Enter 50% chance as 0.50 ");
+    print!(">>");
     let mut vol = String::new();
     io::stdin()
         .read_line(&mut vol)
         .expect("Failed to read line");
 
     println!("Risk-free rate in %:");
+    print!(">>");
     let mut rf = String::new();
     io::stdin().read_line(&mut rf).expect("Failed to read line");
     println!(" Maturity date in YYYY-MM-DD format:");
 
     let mut expiry = String::new();
+    println!("E.g.: Enter 2020-12-31 for 31st December 2020");
+    print!(">>");
     io::stdin()
         .read_line(&mut expiry)
         .expect("Failed to read line");
-    let future_date = NaiveDate::parse_from_str(&expiry, "%Y-%m-%d").expect("Invalid date format");
+    println!("{:?}", expiry.trim());
+    let _d = expiry.trim();
+    let future_date = NaiveDate::parse_from_str(&_d, "%Y-%m-%d").expect("Invalid date format");
     println!("Dividend yield on this stock:");
+    print!(">>");
     let mut div = String::new();
     io::stdin()
         .read_line(&mut div)

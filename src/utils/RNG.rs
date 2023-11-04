@@ -14,26 +14,26 @@ use std::io::prelude::*;
 use std::fs;
 use std::path::Path;
 use std::env::temp_dir;
+/// Random Number Generator using marsaglia polar method
 fn generate_standard_normal_marsaglia_polar() -> (f64, f64) {
     let mut rng = rand::thread_rng();
-    let mut X = 0.0;
-    let mut Y = 0.0;
-    let mut S = 0.0f64;
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut s = 0.0f64;
 
-    while(true) {
-        X = Uniform::new(0.0,1.0).sample(&mut rng)*2.0 -1.0;
-        Y = Uniform::new(0.0,1.0).sample(&mut rng)*2.0 -1.0;
-        S = X*X + Y*Y;
-        if S<1.0f64 && S != 0.0f64 {
+    while true {
+        x = Uniform::new(0.0,1.0).sample(&mut rng)*2.0 -1.0;
+        y = Uniform::new(0.0,1.0).sample(&mut rng)*2.0 -1.0;
+        s = x*x + y*y;
+        if s<1.0f64 && s != 0.0f64 {
             break;
         }
     }
-
-    let I = ((-2.0 * S.ln()) / S).sqrt();
-    (I*X,I*Y)
+    let i = ((-2.0 * s.ln()) / s).sqrt();
+    (i*x,i*y)
 
 }
-
+/// Random Number Generator using Box Muller method
 fn generate_standard_normal_box() -> (f64, f64) {
     let mut rng = rand::thread_rng();
 
@@ -122,6 +122,7 @@ pub fn get_matrix_standard_normal(size_n:u64,size_m:u64)-> Vec<Vec<f64>> {
     }
     rn_vec_n
 }
+/// Write a vector of f64 to a file using BigEndian byte order
 fn write_to_file_byteorder<P: AsRef<Path>>(data: &[f64], path: P) -> std::io::Result<()> {
     let mut file = File::create(path)?;
     for f in data {
@@ -129,6 +130,7 @@ fn write_to_file_byteorder<P: AsRef<Path>>(data: &[f64], path: P) -> std::io::Re
     }
     Ok(())
 }
+/// Read a vector of f64 from a file using BigEndian byte order
 fn read_from_file_byteorder<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<f64>> {
     let mut file = File::open(path)?;
     let buf_len = file.metadata()?.len() / 8; // 8 bytes for one f64

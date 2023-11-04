@@ -3,11 +3,11 @@
 // extern crate rand_pcg;
 
 use rand;
-use rand::{SeedableRng};
-use chrono::{Local,DateTime,NaiveDate,NaiveTime,Datelike, Duration};
-use rand::distributions::{Standard,Uniform};
-use rand::distributions::Distribution;
-use rand_distr::StandardNormal;
+//use rand::{SeedableRng};
+//use chrono::{Local,DateTime,NaiveDate,NaiveTime,Datelike, Duration};
+//use rand::distributions::{Standard,Uniform};
+//use rand::distributions::Distribution;
+//use rand_distr::StandardNormal;
 mod equity;
 mod core;
 mod utils;
@@ -25,17 +25,17 @@ use std::io::Read;
 use std::{io, thread};
 use std::collections::HashMap;
 use std::error::Error;
-use csv;
+//use csv;
 //use std::env::{args,Args};
-use utils::read_csv;
-use utils::RNG;
+//use utils::read_csv;
+//use utils::RNG;
 
-use std::env::{args, temp_dir};
-use rand::Rng;
+//use std::env::{args, temp_dir};
+//use rand::Rng;
 use equity::blackscholes;
 use crate::equity::montecarlo;
 use clap::{App, Arg, ArgMatches, SubCommand};
-use std::env;
+//use std::env;
 use utils::parse_json;
 use std::time::{Instant};
 
@@ -146,7 +146,7 @@ fn main() {
             let input_dir = dir_matches.value_of("input").unwrap();
             let output_dir = dir_matches.value_of("output").unwrap();
             let start_time = Instant::now();
-            let mut output_vec:Vec<String> = Vec::new();
+            let output_vec:Vec<String> = Vec::new();
             let files = fs::read_dir(input_dir).unwrap();
             for ifile in files {
                 let ifile = ifile.unwrap();
@@ -167,7 +167,7 @@ fn main() {
             println!("Time taken to process the dir: {:?}", elapsed_time);
         }
         ("interactive",Some(interactive_matches)) => {
-            println!("Welcome to Option pricing CLI");
+
             println!("Welcome to Option pricing CLI");
                 loop {
                     println!(" Do you want to price option (1) or calculate implied volatility (2)? or (3) to exit");
