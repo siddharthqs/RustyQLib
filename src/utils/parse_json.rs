@@ -86,7 +86,7 @@ pub fn parse_contract(mut file: &mut File,output_filename: &str) {
     file.read_to_string(&mut contents)
         .expect("Failed to read JSON file");
 
-    let list_contracts: utils::Contracts = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
+    let list_contracts: Contracts = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
 
     //let data: utils::Contract = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
     //let mut output: String = String::new();
@@ -104,7 +104,7 @@ pub fn parse_contract(mut file: &mut File,output_filename: &str) {
 pub fn process_contract(data: utils::Contract) -> String {
     //println!("Processing {:?}",data);
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
-    let rates = vec![0.05,0.05,0.06,0.07,0.08,0.9,0.9,0.10];
+    let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
     let ts = YieldTermStructure::new(date,rates);
 
 
@@ -112,10 +112,10 @@ pub fn process_contract(data: utils::Contract) -> String {
         //let market_data = data.market_data.clone().unwrap();
         let option = EquityOption::from_json(&data);
 
-        let contract_output = utils::ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
+        let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
         println!("Theoretical Price ${}", contract_output.pv);
         println!("Delta ${}", contract_output.delta);
-        let combined_ = utils::CombinedContract{
+        let combined_ = CombinedContract{
             contract: data,
             output:contract_output
         };

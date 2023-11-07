@@ -64,7 +64,7 @@ impl EquityOption {
         let underlying_quote = Quote::new(market_data.underlying_price);
         //TODO: Add term structure
         let date = vec![0.01, 0.02, 0.05, 0.1, 0.5, 1.0, 2.0, 3.0];
-        let rates = vec![0.05, 0.055, 0.06, 0.07, 0.07, 0.08, 0.1, 0.1];
+        let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
         let ts = YieldTermStructure::new(date, rates);
         let option_type = &market_data.option_type;
         let side: trade::OptionType;
@@ -79,8 +79,10 @@ impl EquityOption {
 
         let risk_free_rate = Some(market_data.risk_free_rate).unwrap();
         let dividend = Some(market_data.dividend).unwrap();
-        let option_price = Quote::new(match Some(market_data.option_price) {
-            Some(x) => x.unwrap(),
+        let mut op = 0.0;
+
+        let option_price = Quote::new(match market_data.option_price {
+            Some(x) => x,
             None => 0.0,
         });
         //let volatility = Some(market_data.volatility);

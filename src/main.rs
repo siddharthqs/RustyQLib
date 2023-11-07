@@ -123,6 +123,7 @@ fn main() {
     let interactive_matches = matches.subcommand_matches("interactive");
     match matches.subcommand(){
         ("build",Some(build_matches)) => {
+
             let input_file = build_matches.value_of("input").unwrap();
             let output_file = build_matches.value_of("output").unwrap();
             let mut file = File::open(input_file).expect("Failed to open JSON file");

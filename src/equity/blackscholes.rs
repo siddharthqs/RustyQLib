@@ -18,12 +18,17 @@ pub fn npv(bsd_option: &&EquityOption) -> f64 {
     assert!(bsd_option.time_to_maturity() >= 0.0);
     assert!(bsd_option.underlying_price.value >= 0.0);
     if bsd_option.option_type == OptionType::Call {
+
         let option_price = bsd_option.underlying_price.value()
             * N(bsd_option.d1())
             * exp(-bsd_option.dividend_yield * bsd_option.time_to_maturity())
             - bsd_option.strike_price
             * exp(-bsd_option.risk_free_rate * bsd_option.time_to_maturity())
             * N(bsd_option.d2());
+        let a = N(bsd_option.d1());
+        let b = N(bsd_option.d2());
+        println!("a = {:?} b = {:?}",a,b);
+        println!("{:?}",bsd_option);
         return option_price;
     } else {
         let option_price = -bsd_option.underlying_price.value()
@@ -152,6 +157,7 @@ impl EquityOption {
 }
 pub fn option_pricing() {
     println!("Welcome to the Black-Scholes Option pricer.");
+    print!(">>");
     println!(" What is the current price of the underlying asset?");
     print!(">>");
     let mut curr_price = String::new();
@@ -199,6 +205,7 @@ pub fn option_pricing() {
     println!("{:?}", expiry.trim());
     let _d = expiry.trim();
     let future_date = NaiveDate::parse_from_str(&_d, "%Y-%m-%d").expect("Invalid date format");
+    //println!("{:?}", future_date);
     println!("Dividend yield on this stock:");
     print!(">>");
     let mut div = String::new();
@@ -211,7 +218,7 @@ pub fn option_pricing() {
     //    rates: vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12]
     //};
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
-    let rates = vec![0.05,0.05,0.06,0.07,0.08,0.9,0.9,0.10];
+    let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
     let ts = YieldTermStructure::new(date,rates);
     let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
     let mut option = EquityOption {
@@ -231,17 +238,18 @@ pub fn option_pricing() {
         style: ContractStyle::European,
         valuation_date: Local::today().naive_local(),
     };
+    println!("{:?}", option.time_to_maturity());
     option.set_risk_free_rate();
     println!("Theoretical Price ${}", option.npv());
     println!("Premium at risk ${}", option.get_premium_at_risk());
-    println!("Delata {}", option.delta());
+    println!("Delta {}", option.delta());
     println!("Gamma {}", option.gamma());
     println!("Vega {}", option.vega() * 0.01);
     println!("Theta {}", option.theta() * (1.0 / 365.0));
     println!("Rho {}", option.rho() * 0.01);
-    let mut div1 = String::new();
+    let mut wait = String::new();
     io::stdin()
-        .read_line(&mut div)
+        .read_line(&mut wait)
         .expect("Failed to read line");
 }
 pub fn implied_volatility() {
