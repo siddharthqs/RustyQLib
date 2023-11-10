@@ -1,0 +1,49 @@
+{"asset":"EQ",
+"contracts" : [
+{
+"action":"PV",
+"style":"American",
+"pricer":"Binomial",
+"asset":"EQ",
+"market_data":{
+"underlying_price":100,
+"option_type":"P",
+"strike_price":100,
+"volatility":0.3,
+"risk_free_rate":0.05,
+"maturity":"2024-01-01",
+"dividend": 0.0
+}
+},
+{
+"action":"PV",
+"pricer":"Binomial",
+"asset":"EQ",
+"style":"American",
+"market_data":{
+"underlying_price":100,
+"option_type":"P",
+"strike_price":105,
+"volatility":0.3,
+"risk_free_rate":0.05,
+"maturity":"2024-01-01",
+"dividend": 0.0
+}
+},
+{
+"action":"PV",
+"pricer":"Binomial",
+"asset":"EQ",
+"style":"American",
+"market_data":{
+"underlying_price":100,
+"option_type":"P",
+"strike_price":110,
+"volatility":0.3,
+"risk_free_rate":0.05,
+"maturity":"2024-01-01",
+"dividend": 0.0
+}
+}
+]
+}

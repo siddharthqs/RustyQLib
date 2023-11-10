@@ -14,8 +14,7 @@ use crate::cmdty::cmdty_option::{CmdtyOption};
 use crate::core::trade;
 use crate::cmdty::cmdty_option;
 use crate::core::traits::{Instrument, Rates};
-use crate::core::utils;
-use crate::core::utils::{CombinedContract, ContractOutput, Contracts, OutputJson,EngineType};
+use crate::core::utils::{Contract,CombinedContract, ContractOutput, Contracts, OutputJson,EngineType};
 use crate::core::utils::ContractStyle;
 use crate::core::traits::Greeks;
 use std::io::Write;
@@ -26,7 +25,7 @@ use crate::rates::deposits::Deposit;
 use crate::rates::build_contracts::{build_ir_contracts, build_ir_contracts_from_json, build_term_structure};
 use crate::equity::build_contracts::{build_eq_contracts_from_json};
 use crate::equity::vol_surface::VolSurface;
-
+use rayon::prelude::*;
 /// This function saves the output to a file and returns the path to the file.
 pub fn save_to_file<'a>(output_folder: &'a str, subfolder: &'a str, filename: &'a str, output: &'a str) -> String {
     let mut dir = std::path::PathBuf::from(output_folder);
@@ -88,35 +87,38 @@ pub fn parse_contract(mut file: &mut File,output_filename: &str) {
 
     let list_contracts: Contracts = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
 
-    //let data: utils::Contract = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
-    //let mut output: String = String::new();
-    let mut output_vec:Vec<String> = Vec::new();
-    for data in list_contracts.contracts.into_iter() {
-        output_vec.push(process_contract(data));
+    if list_contracts.contracts.len() == 0 {
+        println!("No contracts found in JSON file");
+        return;
     }
+    // parallel processing of each contract
+    let mut output_vec: Vec<_> = list_contracts.contracts.par_iter().enumerate()
+        .map(|(index,data)| (index,process_contract(data)))
+        .collect();
+    output_vec.sort_by_key(|k| k.0);
 
-    let mut file = File::create(output_filename).expect("Failed to create file");
-    //let mut output:OutputJson = OutputJson{contracts:output_vec};
+    let output_vec: Vec<String> = output_vec.into_iter().map(|(_,v)| v).collect();
     let output_str = output_vec.join(",");
-    //let output_json = serde_json::to_string(&output_vec).expect("Failed to generate output");
+    //Write to file
+    let mut file = File::create(output_filename).expect("Failed to create file");
     file.write_all(output_str.as_bytes()).expect("Failed to write to file");
 }
-pub fn process_contract(data: utils::Contract) -> String {
+pub fn process_contract(data: &Contract) -> String {
     //println!("Processing {:?}",data);
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
     let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
     let ts = YieldTermStructure::new(date,rates);
 
-
     if data.action=="PV" && data.asset=="EQ"{
         //let market_data = data.market_data.clone().unwrap();
         let option = EquityOption::from_json(&data);
 
-        let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
+        let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),
+            vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
         println!("Theoretical Price ${}", contract_output.pv);
         println!("Delta ${}", contract_output.delta);
         let combined_ = CombinedContract{
-            contract: data,
+            contract: data.clone(),
             output:contract_output
         };
         let output_json = serde_json::to_string(&combined_).expect("Failed to generate output");
@@ -155,11 +157,11 @@ pub fn process_contract(data: utils::Contract) -> String {
                 time_to_future_maturity: None,
                 risk_free_rate: None
             };
-            let contract_output = utils::ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
+            let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
             println!("Theoretical Price ${}", contract_output.pv);
             println!("Delta ${}", contract_output.delta);
-            let combined_ = utils::CombinedContract{
-                contract: data,
+            let combined_ = CombinedContract{
+                contract: data.clone(),
                 output:contract_output
             };
             let output_json = serde_json::to_string(&combined_).expect("Failed to generate output");

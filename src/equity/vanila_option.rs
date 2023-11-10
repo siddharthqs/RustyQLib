@@ -18,12 +18,12 @@ impl Instrument for EquityOption  {
                 value
             }
             Engine::MonteCarlo => {
-                println!("Using MonteCarlo Engine ");
+
                 let value = montecarlo::npv(&self,false);
                 value
             }
             Engine::Binomial => {
-                println!("Using Binomial Engine ");
+
                 let value = binomial::npv(&self);
                 value
             }

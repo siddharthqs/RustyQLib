@@ -25,10 +25,6 @@ pub fn npv(bsd_option: &&EquityOption) -> f64 {
             - bsd_option.strike_price
             * exp(-bsd_option.risk_free_rate * bsd_option.time_to_maturity())
             * N(bsd_option.d2());
-        let a = N(bsd_option.d1());
-        let b = N(bsd_option.d2());
-        println!("a = {:?} b = {:?}",a,b);
-        println!("{:?}",bsd_option);
         return option_price;
     } else {
         let option_price = -bsd_option.underlying_price.value()
@@ -336,3 +332,51 @@ pub fn implied_volatility() {
         .read_line(&mut div)
         .expect("Failed to read line");
 }
+
+#[cfg(test)]
+mod tests {
+
+    use assert_approx_eq::assert_approx_eq;
+    use super::*;
+    use crate::core::utils::{Contract,MarketData};
+    use crate::core::trade::{OptionType,Transection};
+    use crate::core::utils::{ContractStyle};
+    use crate::equity::vanila_option::{EquityOption};
+
+    #[test]
+    fn test_black_scholes() {
+        let mut data = Contract {
+            action: "PV".to_string(),
+            market_data: Some(MarketData {
+                underlying_price: 100.0,
+                strike_price: 100.0,
+                volatility: Some(0.3),
+                option_price: Some(10.0),
+                risk_free_rate: Some(0.05),
+                dividend: Some(0.0),
+                maturity: "2024-01-01".to_string(),
+                option_type: "C".to_string(),
+                simulation: None
+            }),
+            pricer: "Analytical".to_string(),
+            asset: "".to_string(),
+            style: Some("European".to_string()),
+            rate_data: None
+        };
+
+        let mut option = EquityOption::from_json(&data);
+        option.valuation_date = NaiveDate::from_ymd(2023, 11, 06);
+        //Call European test
+        let npv = option.npv();
+        assert_approx_eq!(npv, 5.05933313, 1e-6);
+
+        //Put European test
+        option.option_type = OptionType::Put;
+        option.style = ContractStyle::European;
+        option.valuation_date = NaiveDate::from_ymd(2023, 11, 07);
+        let npv = option.npv();
+        assert_approx_eq!(npv,4.2601813, 1e-6);
+
+    }
+}
+
