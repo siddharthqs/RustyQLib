@@ -57,8 +57,8 @@ fn fd(s0:f64,k:f64,risk_free_rate:f64,dividend_yield:f64,sigma:f64,time_to_mat:f
             price_grid[[(M-i) as usize,j as usize]] = (i as f64)*ds as f64;
         }
     }
-    let mm = M as usize - ii as usize;
-    println!("price_ {:?}",price_grid[[mm as usize as usize,0]]);
+
+
     let mut v_grid:Array2<f64> = Array2::zeros((M as usize +1,time_steps as usize+1));
     // Boundary condition
     // for j in 0..time_steps+1 {
