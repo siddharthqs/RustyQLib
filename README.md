@@ -2,6 +2,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 ![Crates.io](https://img.shields.io/crates/dr/rustyqlib)
 ![Crates.io](https://img.shields.io/crates/v/rustyqlib)
+[![codecov](https://codecov.io/gh/siddharthqs/RustyQLib/graph/badge.svg?token=879K6LTTR4)](https://codecov.io/gh/siddharthqs/RustyQLib)
 # RUSTYQLib :Pricing Options with Confidence using JSON
 RustyQLib is a lightweight yet robust quantitative finance library designed for pricing options.
 Built entirely in Rust, it offers a unique combination of safety, performance, and expressiveness that is crucial

@@ -91,7 +91,7 @@ pub fn parse_contract(mut file: &mut File,output_filename: &str) {
         println!("No contracts found in JSON file");
         return;
     }
-    // parallel processing of each contract
+    // parallel processing of each contract using rayon
     let mut output_vec: Vec<_> = list_contracts.contracts.par_iter().enumerate()
         .map(|(index,data)| (index,process_contract(data)))
         .collect();
@@ -104,7 +104,7 @@ pub fn parse_contract(mut file: &mut File,output_filename: &str) {
     file.write_all(output_str.as_bytes()).expect("Failed to write to file");
 }
 pub fn process_contract(data: &Contract) -> String {
-    //println!("Processing {:?}",data);
+
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
     let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
     let ts = YieldTermStructure::new(date,rates);
@@ -112,7 +112,6 @@ pub fn process_contract(data: &Contract) -> String {
     if data.action=="PV" && data.asset=="EQ"{
         //let market_data = data.market_data.clone().unwrap();
         let option = EquityOption::from_json(&data);
-
         let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),
             vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
         println!("Theoretical Price ${}", contract_output.pv);
@@ -180,7 +179,7 @@ pub fn process_contract(data: &Contract) -> String {
         let maturity_date = rates::utils::convert_mm_to_date(maturity_date_str);
         let start_date = rates::utils::convert_mm_to_date(start_date_str);
         println!("Maturity Date {:?}",maturity_date);
-        let mut deposit = rates::deposits::Deposit {
+        let mut deposit = Deposit {
             start_date: start_date,
             maturity_date: maturity_date,
             valuation_date: current_date.naive_utc(),

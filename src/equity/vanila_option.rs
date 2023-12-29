@@ -1,6 +1,5 @@
 use chrono::{Datelike, Local, NaiveDate};
-use crate::equity::montecarlo;
-use crate::equity::binomial;
+use crate::equity::{binomial,finite_difference,montecarlo};
 use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::{Instrument,Greeks};
@@ -27,9 +26,11 @@ impl Instrument for EquityOption  {
                 let value = binomial::npv(&self);
                 value
             }
-            _ => {
-                0.0
+            Engine::FiniteDifference => {
+                let value = finite_difference::npv(&self);
+                value
             }
+
         }
     }
 }
@@ -67,10 +68,10 @@ impl EquityOption {
         let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
         let ts = YieldTermStructure::new(date, rates);
         let option_type = &market_data.option_type;
-        let side: trade::OptionType;
+        let side: OptionType;
         match option_type.trim() {
-            "C" | "c" | "Call" | "call" => side = trade::OptionType::Call,
-            "P" | "p" | "Put" | "put" => side = trade::OptionType::Put,
+            "C" | "c" | "Call" | "call" => side = OptionType::Call,
+            "P" | "p" | "Put" | "put" => side = OptionType::Put,
             _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
         }
         let maturity_date = &market_data.maturity;
@@ -79,7 +80,7 @@ impl EquityOption {
 
         let risk_free_rate = Some(market_data.risk_free_rate).unwrap();
         let dividend = Some(market_data.dividend).unwrap();
-        let mut op = 0.0;
+        //let mut op = 0.0;
 
         let option_price = Quote::new(match market_data.option_price {
             Some(x) => x,
@@ -110,14 +111,17 @@ impl EquityOption {
             valuation_date: today.naive_utc(),
         };
         match data.pricer.trim() {
-            "Analytical" | "analytical" => {
+            "Analytical" | "analytical"|"bs" => {
                 option.engine = Engine::BlackScholes;
             }
-            "MonteCarlo" | "montecarlo" | "MC" => {
+            "MonteCarlo" | "montecarlo" | "MC"|"mc" => {
                 option.engine = Engine::MonteCarlo;
             }
-            "Binomial" | "binomial" => {
+            "Binomial" | "binomial"|"bino" => {
                 option.engine = Engine::Binomial;
+            }
+            "FiniteDifference" | "finitdifference" |"FD" |"fd" => {
+                option.engine = Engine::FiniteDifference;
             }
             _ => {
                 panic!("Invalid pricer");
