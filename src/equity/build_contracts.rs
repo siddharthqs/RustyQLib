@@ -11,7 +11,7 @@ use crate::equity::vol_surface::VolSurface;
 use crate::rates::utils::{DayCountConvention};
 use crate::core::quotes::Quote;
 use crate::core::utils::{Contract,ContractStyle};
-use crate::equity::utils::{Engine};
+use crate::equity::utils::{Engine, Payoff};
 use std::collections::BTreeMap;
 
 pub fn build_eq_contracts_from_json(mut data: Vec<Contract>) -> Vec<Box<EquityOption>> {

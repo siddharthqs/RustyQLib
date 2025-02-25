@@ -4,6 +4,7 @@
 "pricer":"Analytical",
 "asset":"EQ",
 "payoff_type": "Binary",
+"binary_type":"Cash-or-Nothing",
 "market_data":{
 "underlying_price":100,
 "option_type":"C",
@@ -19,6 +20,7 @@
 "pricer":"MonteCarlo",
 "asset":"EQ",
 "payoff_type": "Binary",
+"binary_type":"Cash-or-Nothing",
 "market_data":{
 "underlying_price":100,
 "option_type":"C",

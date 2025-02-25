@@ -7,3 +7,4 @@ pub mod binomial;
 pub mod build_contracts;
 pub mod vol_surface;
 pub mod finite_difference;
+pub mod binary_option;

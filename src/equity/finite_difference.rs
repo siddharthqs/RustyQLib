@@ -1,38 +1,39 @@
 use super::vanila_option::{EquityOption};
-use super::utils::{Engine};
+use super::utils::{Engine, Payoff};
 
 use crate::core::trade::{OptionType,Transection};
 use crate::core::utils::{ContractStyle};
 use ndarray::{Array, Array2,Array1, ArrayBase, Ix1, OwnedRepr, s};
 //use num_integer::Integer;
 /// finite difference model for European and American options
-pub fn npv(option: &&EquityOption) -> f64 {
-    assert!(option.volatility >= 0.0);
-    assert!(option.time_to_maturity() >= 0.0);
-    assert!(option.underlying_price.value >= 0.0);
-    let strike_price = option.strike_price;
-    let time_to_maturity = option.time_to_maturity();
-    let underlying_price = option.underlying_price.value;
-    let volatility = option.volatility;
-    let risk_free_rate = option.risk_free_rate;
-    let dividend_yield = option.dividend_yield;
-    let time_steps:f64 = 1000.0;
-    //let time_steps:f64 = time_to_maturity/0.001 as f64;
-
-    let mut spot_steps = (time_steps / 50.0) as usize; //should be even number
-    //let spot_steps:usize = 20;
-    if spot_steps % 2 != 0{
-        spot_steps = spot_steps + 1;
-    }// should be even number
-
-    if option.option_type == OptionType::Call {
-        return fd(underlying_price,strike_price,risk_free_rate,dividend_yield,volatility,
-              time_to_maturity,spot_steps,time_steps);
-    } else {
-        //TODO implement  for put option
-        //println!("Not implemented"");
-        return 0.0;
-    }
+pub fn npv(option: &EquityOption) -> f64 {
+    0.0
+    // assert!(option.volatility >= 0.0);
+    // assert!(option.time_to_maturity() >= 0.0);
+    // assert!(option.underlying_price.value >= 0.0);
+    // let strike_price = option.strike_price;
+    // let time_to_maturity = option.time_to_maturity();
+    // let underlying_price = option.underlying_price.value;
+    // let volatility = option.volatility;
+    // let risk_free_rate = option.risk_free_rate;
+    // let dividend_yield = option.dividend_yield;
+    // let time_steps:f64 = 1000.0;
+    // //let time_steps:f64 = time_to_maturity/0.001 as f64;
+    //
+    // let mut spot_steps = (time_steps / 50.0) as usize; //should be even number
+    // //let spot_steps:usize = 20;
+    // if spot_steps % 2 != 0{
+    //     spot_steps = spot_steps + 1;
+    // }// should be even number
+    //
+    // if option.option_type == OptionType::Call {
+    //     return fd(underlying_price,strike_price,risk_free_rate,dividend_yield,volatility,
+    //           time_to_maturity,spot_steps,time_steps);
+    // } else {
+    //     //TODO implement  for put option
+    //     //println!("Not implemented"");
+    //     return 0.0;
+    // }
 
 }
 fn fd(s0:f64,k:f64,risk_free_rate:f64,dividend_yield:f64,sigma:f64,time_to_mat:f64,spot_steps:usize,time_steps:f64)->f64{
