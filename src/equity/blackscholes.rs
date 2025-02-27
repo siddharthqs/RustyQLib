@@ -61,6 +61,7 @@ impl BlackScholesPricer {
         }
     }
     fn npv_vanilla(&self, bsd_option: &EquityOption) -> f64 {
+
         let n_d1 = N(bsd_option.base.d1());
         let n_d2 = N(bsd_option.base.d2());
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
@@ -94,13 +95,13 @@ impl BlackScholesPricer {
         let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
         let num = dn_d1*(df_r/df_d);
         let var_sqrt = bsd_option.base.volatility * (bsd_option.time_to_maturity().sqrt());
-        return  num/ (bsd_option.base.current_price.value() * var_sqrt);
+        return  num/ (bsd_option.base.underlying_price.value() * var_sqrt);
     }
     fn vega_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         let dn_d1 = dN(bsd_option.base.d1());
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
         let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
-        let df_S = bsd_option.base.current_price.value()*df_r/df_d;
+        let df_S = bsd_option.base.underlying_price.value()*df_r/df_d;
         let vega = df_S * dn_d1 * bsd_option.time_to_maturity().sqrt();
         return vega;
     }
@@ -112,7 +113,7 @@ impl BlackScholesPricer {
         let n_d2 = N(bsd_option.base.d2());
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
         let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
-        let df_S = bsd_option.base.current_price.value()*df_r/df_d;
+        let df_S = bsd_option.base.underlying_price.value()*df_r/df_d;
         let t1 = -df_S*dn_d1  * bsd_option.base.volatility
             / (2.0 * bsd_option.time_to_maturity().sqrt());
 
