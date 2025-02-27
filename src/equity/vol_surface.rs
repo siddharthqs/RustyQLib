@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::rates::utils::{DayCountConvention};
 use chrono::{NaiveDate};
 use crate::core::trade::OptionType;
+use crate::equity::utils::Payoff;
 use super::vanila_option::{EquityOption};
 
 /// Vol Surface is a collection of volatilities for different maturities and strikes
@@ -32,25 +33,25 @@ impl VolSurface {
     }
     pub fn build_eq_vol(mut contracts:Vec<Box<EquityOption>>) -> VolSurface {
         let mut vol_tree:BTreeMap<NaiveDate,Vec<(f64,f64)>> = BTreeMap::new();
-        let spot_date = contracts[0].valuation_date;
-        let spot_price = contracts[0].underlying_price.value;
+        let spot_date = contracts[0].base.valuation_date;
+        let spot_price = contracts[0].base.underlying_price.value;
         for i in 0..contracts.len(){
             let mut moneyness=1.0;
             let mut contract = contracts[i].as_mut();
-            match contract.option_type{
+            match contract.payoff.option_type(){
                 OptionType::Call => {
-                    moneyness = contract.underlying_price.value / contract.strike_price as f64;
+                    moneyness = contract.base.underlying_price.value / contract.base.strike_price as f64;
 
                 },
                 OptionType::Put => {
-                    moneyness = contract.strike_price / contract.underlying_price.value  as f64;
+                    moneyness = contract.base.strike_price / contract.base.underlying_price.value  as f64;
                 }
                 _ => {
                     panic!("Option type not supported");
                 }
             }
             let volatility = contract.get_imp_vol();
-            let maturity = contract.maturity_date;
+            let maturity = contract.base.maturity_date;
             vol_tree.entry(maturity).or_insert(Vec::new()).push((moneyness,volatility));
         }
         let vol_surface:VolSurface = VolSurface::new(vol_tree, spot_price, spot_date,

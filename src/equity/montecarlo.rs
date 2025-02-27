@@ -6,8 +6,8 @@ use libm::exp;
 //use crate::equity::vanila_option::{Engine, EquityOption, OptionType, Transection};
 use crate::core::utils::{ContractStyle,dN, N};
 
-use super::vanila_option::{EquityOption};
-use super::utils::{Engine};
+use super::vanila_option::{EquityOption, EquityOptionBase, VanillaPayoff};
+use super::utils::{Engine, Payoff};
 use crate::core::trade::{OptionType,Transection};
 use super::super::utils::RNG;
 use crate::core::quotes::Quote;
@@ -15,7 +15,7 @@ use crate::core::termstructure::YieldTermStructure;
 use crate::core::traits::Instrument;
 use serde::de::Unexpected::Option;
 
-pub fn simulate_market(option: &&EquityOption) -> Vec<f64>{
+pub fn simulate_market(option: &EquityOption) -> Vec<f64>{
     let mut monte_carlo = RNG::MonteCarloSimulation{
         antithetic: true,
         moment_matching: true,
@@ -29,26 +29,26 @@ pub fn simulate_market(option: &&EquityOption) -> Vec<f64>{
 
     let mut market_at_maturity:Vec<f64> = Vec::new();
     for z in path{
-        let sim_value = option.underlying_price.value()
-            *exp(((option.risk_free_rate - option.dividend_yield - 0.5 * option.volatility.powi(2))
-            * option.time_to_maturity())+option.volatility * option.time_to_maturity().sqrt()*z);
+        let sim_value = option.base.underlying_price.value()
+            *exp(((option.base.risk_free_rate - option.base.dividend_yield - 0.5 * option.base.volatility.powi(2))
+            * option.time_to_maturity())+option.base.volatility * option.time_to_maturity().sqrt()*z);
         market_at_maturity.push(sim_value);
     }
     market_at_maturity
 }
 
-pub fn simulate_market_path_wise(option: &&EquityOption) -> Vec<f64>{
+pub fn simulate_market_path_wise(option: &EquityOption) -> Vec<f64>{
     let M = 1000;
     let N = 10000;
     let dt = option.time_to_maturity()/1000.0;
     let path = RNG::get_matrix_standard_normal(N,M);
     let mut market_at_maturity:Vec<f64> = Vec::new();
     for ipath in &path{
-        let mut st = option.current_price.value();
+        let mut st = option.base.current_price.value();
         for z in ipath{
             st = st
-                *exp(((option.risk_free_rate - option.dividend_yield - 0.5 * option.volatility.powi(2))
-                * dt)+option.volatility * dt.sqrt()*z);
+                *exp(((option.base.risk_free_rate - option.base.dividend_yield - 0.5 * option.base.volatility.powi(2))
+                * dt)+option.base.volatility * dt.sqrt()*z);
         }
         market_at_maturity.push(st);
     }
@@ -78,10 +78,10 @@ pub fn payoff(market: &Vec<f64>,
 }
 
 
-pub fn npv(option: &&EquityOption,path_size: bool) -> f64 {
-    assert!(option.volatility >= 0.0);
-    assert!(option.time_to_maturity() >= 0.0);
-    assert!(option.underlying_price.value >= 0.0);
+pub fn npv(option: &EquityOption,path_size: bool) -> f64 {
+    assert!(option.base.volatility >= 0.0);
+    assert!(option.base.time_to_maturity() >= 0.0);
+    assert!(option.base.underlying_price.value >= 0.0);
     let mut st = vec![];
     if path_size {
         st  = simulate_market_path_wise(&option);
@@ -92,10 +92,10 @@ pub fn npv(option: &&EquityOption,path_size: bool) -> f64 {
         st  = simulate_market(&option);
     }
 
-    let payoff = payoff(&st,&option.strike_price,&option.option_type);
+    let payoff = payoff(&st,&option.base.strike_price,&option.payoff.option_type());
     let sum_pay:f64 = payoff.iter().sum();
     let num_of_simulations = st.len() as f64;
-    let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.risk_free_rate)*option.time_to_maturity());
+    let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.base.risk_free_rate)*option.time_to_maturity());
     c0
     }
 
@@ -158,11 +158,10 @@ pub fn option_pricing() {
     let rates = vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12];
     let ts = YieldTermStructure::new(date,rates);
     let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
-    let mut option = EquityOption {
-        option_type: side,
+    let mut option = EquityOptionBase {
         transection: Transection::Buy,
         underlying_price: curr_quote,
-        current_price: Quote::new(0.01),
+        current_price: Quote::new(0.0),
         strike_price: strike.trim().parse::<f64>().unwrap(),
         volatility: vol.trim().parse::<f64>().unwrap(),
         maturity_date: future_date,
@@ -170,13 +169,20 @@ pub fn option_pricing() {
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         transection_price: 0.0,
         term_structure: ts,
-        engine: Engine::MonteCarlo,
-        simulation: std::option::Option::Some(10000),
         style: ContractStyle::European,
-        valuation_date: Local::today().naive_utc(),
+        valuation_date: Local::today().naive_local(),
     };
     option.set_risk_free_rate();
-    println!("Theoretical Price ${}", option.npv());
+    println!("{:?}", option.time_to_maturity());
+    let payoff = Box::new(VanillaPayoff{option_type:side});
+    let equityoption = EquityOption {
+        base: option,
+        payoff:payoff,
+        engine:Engine::BlackScholes,
+        simulation: None
+    };
+
+    println!("Theoretical Price ${}", equityoption.npv());
     // println!("Premium at risk ${}", option.get_premium_at_risk());
     // println!("Delata {}", option.delta());
     // println!("Gamma {}", option.gamma());

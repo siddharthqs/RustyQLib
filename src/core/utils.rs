@@ -20,6 +20,10 @@ pub enum EngineType {
     FiniteDifference,
     FFT,
 }
+pub trait Engine<I> {
+    fn npv(&self, instrument: &I) -> f64;
+}
+
 impl EngineType {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -62,6 +66,7 @@ pub struct Contract {
     pub action: String,
     pub pricer: String,
     pub asset: String,
+    pub payoff_type:Option<String>,
     pub style: Option<String>,
     pub market_data: Option<MarketData>,
     pub rate_data: Option<RateData>,

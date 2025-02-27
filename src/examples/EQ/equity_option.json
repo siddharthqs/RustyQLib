@@ -1,31 +1,33 @@
 {"contracts" : [
 {
-"action":"PV",
-"pricer":"Analytical",
-"asset":"EQ",
-"market_data":{
-"underlying_price":100,
-"option_type":"C",
-"strike_price":100,
-"volatility":0.4,
-"risk_free_rate":0.06,
-"maturity":"2023-12-31",
-"dividend": 0.01
-}
+  "action":"PV",
+  "pricer":"Analytical",
+  "asset":"EQ",
+  "payoff_type": "Vanilla",
+  "market_data":{
+    "underlying_price":100,
+    "option_type":"C",
+    "strike_price":100,
+    "volatility":0.4,
+    "risk_free_rate":0.06,
+    "maturity":"2025-03-31",
+    "dividend": 0.01
+  }
 },
-{
-"action":"PV",
-"pricer":"MonteCarlo",
-"asset":"EQ",
-"market_data":{
-"underlying_price":100,
-"option_type":"C",
-"strike_price":105,
-"volatility":0.45,
-"risk_free_rate":0.06,
-"maturity":"2023-12-31",
-"dividend": 0.01,
-"simulation":100000
-}}
+  {
+    "action":"PV",
+    "pricer":"Analytical",
+    "asset":"EQ",
+    "payoff_type": "Vanilla",
+    "market_data":{
+      "underlying_price":100,
+      "option_type":"P",
+      "strike_price":100,
+      "volatility":0.4,
+      "risk_free_rate":0.06,
+      "maturity":"2025-03-31",
+      "dividend": 0.01
+    }
+  }
 ]
 }
