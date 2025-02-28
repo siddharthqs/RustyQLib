@@ -47,7 +47,9 @@ pub struct MarketData {
     pub maturity:String,
     pub dividend: Option<f64>,
     pub simulation:Option<u64>,
+    pub current_price:Option<f64>
 }
+
 #[derive(Clone,Debug,Deserialize,Serialize)]
 pub struct RateData {
     pub instrument: String,
@@ -66,6 +68,7 @@ pub struct Contract {
     pub action: String,
     pub pricer: String,
     pub asset: String,
+    pub product_type: Option<String>,
     pub payoff_type:Option<String>,
     pub style: Option<String>,
     pub market_data: Option<MarketData>,

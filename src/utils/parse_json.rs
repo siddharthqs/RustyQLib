@@ -25,6 +25,8 @@ use crate::rates::deposits::Deposit;
 use crate::rates::build_contracts::{build_ir_contracts, build_ir_contracts_from_json, build_term_structure};
 use crate::equity::build_contracts::{build_eq_contracts_from_json};
 use crate::equity::vol_surface::VolSurface;
+use crate::equity::handle_equity_contracts::handle_equity_contract;
+
 use rayon::prelude::*;
 /// This function saves the output to a file and returns the path to the file.
 pub fn save_to_file<'a>(output_folder: &'a str, subfolder: &'a str, filename: &'a str, output: &'a str) -> String {
@@ -110,18 +112,8 @@ pub fn process_contract(data: &Contract) -> String {
     let ts = YieldTermStructure::new(date,rates);
 
     if data.action=="PV" && data.asset=="EQ"{
-        //let market_data = data.market_data.clone().unwrap();
-        let option = EquityOption::from_json(&data);
-        let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),
-            vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
-        println!("Theoretical Price ${}", contract_output.pv);
-        println!("Delta ${}", contract_output.delta);
-        let combined_ = CombinedContract{
-            contract: data.clone(),
-            output:contract_output
-        };
-        let output_json = serde_json::to_string(&combined_).expect("Failed to generate output");
-        return output_json;
+        return handle_equity_contract(data);
+
     }
     else if data.action=="PV" && data.asset=="CO"{
         let market_data = data.market_data.clone().unwrap();
