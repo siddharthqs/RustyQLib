@@ -26,11 +26,11 @@ impl EquityForward  {
             .expect("Invalid maturity date");
 
         let underlying_price = Quote::new(market_data.underlying_price);
-        let quote = Some(market_data.current_price).unwrap();
-        let current_quote = Quote::new(quote.unwrap_or(0.0));
+        let quote = Some(market_data.entry_price).unwrap();
+        let entry_quote = Quote::new(quote.unwrap_or(0.0));
         let risk_free_rate = Some(market_data.risk_free_rate).unwrap();
         let dividend = Some(market_data.dividend).unwrap();
-        let long_short = market_data.long_short.unwrap();
+        let long_short = market_data.long_short.unwrap_or(1);
         let position = match long_short{
             1=>LongShort::LONG,
             -1=>LongShort::SHORT,
@@ -38,7 +38,7 @@ impl EquityForward  {
         };
         Box::new(Self {
             underlying_price: underlying_price,
-            forward_price:current_quote,
+            forward_price:entry_quote,
             risk_free_rate: risk_free_rate.unwrap_or(0.0),
             dividend_yield: dividend.unwrap_or(0.0),
             maturity_date: maturity_date,
@@ -66,9 +66,10 @@ impl Instrument for EquityForward {
     fn npv(&self) -> f64 {
         // e −r(T−t) (Ft −K),
         let df_r = 1.0/(self.risk_free_rate*self.time_to_maturity()).exp();
+        let share = self.notional/self.forward_price.value();
         match self.long_short{
-            LongShort::LONG => (self.forward()-self.forward_price.value()) * self.notional*df_r,
-            LongShort::SHORT => -(self.forward()-self.forward_price.value()) * self.notional*df_r,
+            LongShort::LONG => (self.forward()-self.forward_price.value()) * share *df_r,
+            LongShort::SHORT => -(self.forward()-self.forward_price.value()) * share *df_r,
         }
 
     }

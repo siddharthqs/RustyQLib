@@ -49,7 +49,9 @@ pub struct MarketData {
     pub simulation:Option<u64>,
     pub current_price:Option<f64>,
     pub notional: Option<f64>,
-    pub long_short:Option<i32>
+    pub long_short:Option<i32>,
+    pub multiplier:Option<f64>,
+    pub entry_price:Option<f64>,
 }
 
 #[derive(Clone,Debug,Deserialize,Serialize)]

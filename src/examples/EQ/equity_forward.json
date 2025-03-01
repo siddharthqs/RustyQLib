@@ -1,19 +1,36 @@
 {"asset":"EQ",
   "contracts" : [
-{
-  "action":"PV",
-  "pricer":"Analytical",
-  "asset":"EQ",
-  "product_type": "Option",
-  "payoff_type": "Vanilla",
-  "market_data":{
-    "underlying_price":100,
-    "option_type":"C",
-    "strike_price":100,
-    "volatility":0.4,
-    "risk_free_rate":0.06,
-    "maturity":"2025-03-31",
-    "dividend": 0.01
-  }
-}]
+    {
+      "action": "PV",
+      "pricer": "Analytical",
+      "asset": "EQ",
+      "product_type": "Forward",
+      "payoff_type": "Vanilla",
+      "market_data": {
+        "underlying_price": 96.0,
+        "entry_price": 103.0,
+        "risk_free_rate": 0.06,
+        "maturity": "2025-03-31",
+        "dividend": 0.01,
+        "notional": 10000,
+        "long_short": 1
+      }
+    },
+    {
+      "action":"PV",
+      "pricer":"Analytical",
+      "asset":"EQ",
+      "product_type": "Future",
+      "payoff_type": "Vanilla",
+      "market_data":{
+        "underlying_price":96.0,
+        "current_price": 99.0,
+        "entry_price": 103.0,
+        "risk_free_rate":0.06,
+        "maturity":"2025-03-31",
+        "dividend": 0.01,
+        "multiplier": 1000,
+        "long_short": -1
+      }
+  }]
 }
