@@ -1,0 +1,19 @@
+{"asset":"EQ",
+  "contracts" : [
+{
+  "action":"PV",
+  "pricer":"Analytical",
+  "asset":"EQ",
+  "product_type": "Option",
+  "payoff_type": "Vanilla",
+  "market_data":{
+    "underlying_price":100,
+    "option_type":"C",
+    "strike_price":100,
+    "volatility":0.4,
+    "risk_free_rate":0.06,
+    "maturity":"2025-03-31",
+    "dividend": 0.01
+  }
+}]
+}

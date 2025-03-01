@@ -74,3 +74,10 @@ impl Instrument for EquityForward {
     }
 }
 
+impl EquityForward{
+    pub fn delta(&self) -> f64 { 1.0 }
+    pub fn gamma(&self) -> f64 { 0.0 }
+    pub fn vega(&self) -> f64  { 0.0 }
+    pub fn theta(&self) -> f64 { 0.0 }
+    pub fn rho(&self) -> f64   { 0.0 }
+}
