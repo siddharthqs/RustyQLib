@@ -12,7 +12,10 @@ pub enum Engine{
     Binomial,
     FiniteDifference
 }
-
+pub enum LongShort{
+    LONG,
+    SHORT
+}
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PayoffType {
