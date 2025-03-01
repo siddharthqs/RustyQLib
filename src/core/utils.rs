@@ -47,7 +47,9 @@ pub struct MarketData {
     pub maturity:String,
     pub dividend: Option<f64>,
     pub simulation:Option<u64>,
-    pub current_price:Option<f64>
+    pub current_price:Option<f64>,
+    pub notional: Option<f64>,
+    pub long_short:Option<i32>
 }
 
 #[derive(Clone,Debug,Deserialize,Serialize)]

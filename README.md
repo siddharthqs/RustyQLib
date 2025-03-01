@@ -47,6 +47,8 @@ Files are in JSON format and can be easily edited with any text editor.
 
 ### Instruments:
 #### Equity
+- [x] Equity Forward
+- [x] Equity Future
 - [x] Equity Option
 - [ ] Equity Forward Start Option
 - [ ] Equity Basket
@@ -57,7 +59,7 @@ Files are in JSON format and can be easily edited with any text editor.
 - [ ] Equity Chooser
 #### Interest Rate
 - [x] Deposit
-- [x] FRA
+- [ ] FRA
 - [ ] Interest Rate Swap
 #### Commodities
 - [x] Commodity Option

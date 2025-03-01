@@ -3,7 +3,7 @@ use chrono::{Datelike, Local, NaiveDate};
 use crate::core::quotes::Quote;
 use crate::core::traits::Instrument;
 use crate::core::utils::{Contract,ContractStyle};
-use crate::equity::vanila_option::EquityOption;
+//use crate::equity::vanila_option::EquityOption;
 
 pub struct EquityFuture {
     pub underlying_price: Quote,
