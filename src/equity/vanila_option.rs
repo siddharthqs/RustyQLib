@@ -79,14 +79,16 @@ impl EquityOption{
     }
 }
 impl EquityOption {
-    //pub fn new(x:T)->Self{
-    //
-    //}
+
     pub fn from_json(data: &Contract) -> Box<EquityOption> {
         let payoff_type = data.payoff_type.as_ref().unwrap().parse::<PayoffType>();
         let market_data = data.market_data.as_ref().unwrap();
-        let option_type = &market_data.option_type;
+        //let option_type = &market_data.option_type;
         let side: OptionType;
+        let option_type = match &market_data.option_type {
+            Some(x) => x.clone(),
+            None => "".to_string(),
+        };
         match option_type.trim() {
             "C" | "c" | "Call" | "call" => side = OptionType::Call,
             "P" | "p" | "Put" | "put" => side = OptionType::Put,
@@ -130,7 +132,7 @@ impl EquityOption {
             transection: Transection::Buy,
             underlying_price: underlying_quote,
             current_price: option_price,
-            strike_price: market_data.strike_price,
+            strike_price: market_data.strike_price.unwrap_or(0.0),
             volatility: volatility,
             maturity_date: future_date,
             risk_free_rate: risk_free_rate.unwrap_or(0.0),

@@ -120,6 +120,10 @@ pub fn process_contract(data: &Contract) -> String {
         let curr_quote = Quote::new( market_data.underlying_price);
         let option_type = &market_data.option_type;
         let side: trade::OptionType;
+        let option_type = match &market_data.option_type {
+            Some(x) => x.clone(),
+            None => "".to_string(),
+        };
         match option_type.trim() {
             "C" | "c" | "Call" | "call" => side = trade::OptionType::Call,
             "P" | "p" | "Put" | "put" => side = trade:: OptionType::Put,
@@ -138,7 +142,7 @@ pub fn process_contract(data: &Contract) -> String {
                 option_type: side,
                 transection: trade::Transection::Buy,
                 current_price: curr_quote,
-                strike_price: market_data.strike_price,
+                strike_price: market_data.strike_price.unwrap_or(0.0),
                 volatility: vol.unwrap(),
                 time_to_maturity: year_fraction,
                 transection_price: 0.0,

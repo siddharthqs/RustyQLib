@@ -39,8 +39,8 @@ impl EngineType {
 #[derive(Clone,Debug,Deserialize,Serialize)]
 pub struct MarketData {
     pub underlying_price:f64,
-    pub option_type:String,
-    pub strike_price:f64,
+    pub option_type:Option<String>,
+    pub strike_price:Option<f64>,
     pub volatility:Option<f64>,
     pub option_price:Option<f64>,
     pub risk_free_rate:Option<f64>,

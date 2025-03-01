@@ -10,3 +10,4 @@ pub mod finite_difference;
 pub mod binary_option;
 mod equity_future;
 pub mod handle_equity_contracts;
+mod equity_forward;
