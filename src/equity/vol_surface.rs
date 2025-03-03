@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use crate::rates::utils::{DayCountConvention};
 use chrono::{NaiveDate};
-use crate::core::trade::OptionType;
+use crate::core::trade::PutOrCall;
 use crate::equity::utils::Payoff;
 use super::vanila_option::{EquityOption};
 
@@ -38,12 +38,12 @@ impl VolSurface {
         for i in 0..contracts.len(){
             let mut moneyness=1.0;
             let mut contract = contracts[i].as_mut();
-            match contract.payoff.option_type(){
-                OptionType::Call => {
+            match contract.payoff.put_or_call(){
+                PutOrCall::Call => {
                     moneyness = contract.base.underlying_price.value / contract.base.strike_price as f64;
 
                 },
-                OptionType::Put => {
+                PutOrCall::Put => {
                     moneyness = contract.base.strike_price / contract.base.underlying_price.value  as f64;
                 }
                 _ => {

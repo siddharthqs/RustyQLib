@@ -10,7 +10,7 @@ use crate::equity::vanila_option::{EquityOption};
 //use crate::core::utils::{dN, N};
 //use super::vanila_option::{EquityOption};
 use crate::equity::utils::{Engine};
-use crate::cmdty::cmdty_option::{CmdtyOption};
+//use crate::cmdty::cmdty_option::{CmdtyOption};
 use crate::core::trade;
 use crate::cmdty::cmdty_option;
 use crate::core::traits::{Instrument, Rates};
@@ -115,57 +115,57 @@ pub fn process_contract(data: &Contract) -> String {
         return handle_equity_contract(data);
 
     }
-    else if data.action=="PV" && data.asset=="CO"{
-        let market_data = data.market_data.clone().unwrap();
-        let curr_quote = Quote::new( market_data.underlying_price);
-        let option_type = &market_data.option_type;
-        let side: trade::OptionType;
-        let option_type = match &market_data.option_type {
-            Some(x) => x.clone(),
-            None => "".to_string(),
-        };
-        match option_type.trim() {
-            "C" | "c" | "Call" | "call" => side = trade::OptionType::Call,
-            "P" | "p" | "Put" | "put" => side = trade:: OptionType::Put,
-            _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
-        }
-        let maturity_date = &market_data.maturity;
-        let today = Local::today();
-        let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
-        let duration = future_date.signed_duration_since(today.naive_utc());
-        let year_fraction = duration.num_days() as f64 / 365.0;
-        let vol = Some(market_data.volatility).unwrap();
-
-        let sim = market_data.simulation;
-        if data.pricer=="Analytical"{
-            let mut option: CmdtyOption = CmdtyOption {
-                option_type: side,
-                transection: trade::Transection::Buy,
-                current_price: curr_quote,
-                strike_price: market_data.strike_price.unwrap_or(0.0),
-                volatility: vol.unwrap(),
-                time_to_maturity: year_fraction,
-                transection_price: 0.0,
-                term_structure: ts,
-                engine: cmdty_option::Engine::Black76,
-                simulation: Option::from(sim.unwrap_or(10000)),
-                time_to_future_maturity: None,
-                risk_free_rate: None
-            };
-            let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
-            println!("Theoretical Price ${}", contract_output.pv);
-            println!("Delta ${}", contract_output.delta);
-            let combined_ = CombinedContract{
-                contract: data.clone(),
-                output:contract_output
-            };
-            let output_json = serde_json::to_string(&combined_).expect("Failed to generate output");
-            return output_json;
-
-
-        }
-
-    }
+    // else if data.action=="PV" && data.asset=="CO"{
+    //     let market_data = data.market_data.clone().unwrap();
+    //     let curr_quote = Quote::new( market_data.underlying_price);
+    //     let option_type = &market_data.option_type;
+    //     let side: trade::OptionType;
+    //     let option_type = match &market_data.option_type {
+    //         Some(x) => x.clone(),
+    //         None => "".to_string(),
+    //     };
+    //     match option_type.trim() {
+    //         "C" | "c" | "Call" | "call" => side = trade::OptionType::Call,
+    //         "P" | "p" | "Put" | "put" => side = trade:: OptionType::Put,
+    //         _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
+    //     }
+    //     let maturity_date = &market_data.maturity;
+    //     let today = Local::today();
+    //     let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
+    //     let duration = future_date.signed_duration_since(today.naive_utc());
+    //     let year_fraction = duration.num_days() as f64 / 365.0;
+    //     let vol = Some(market_data.volatility).unwrap();
+    //
+    //     let sim = market_data.simulation;
+    //     if data.pricer=="Analytical"{
+    //         let mut option: CmdtyOption = CmdtyOption {
+    //             option_type: side,
+    //             transection: trade::Transection::Buy,
+    //             current_price: curr_quote,
+    //             strike_price: market_data.strike_price.unwrap_or(0.0),
+    //             volatility: vol.unwrap(),
+    //             time_to_maturity: year_fraction,
+    //             transection_price: 0.0,
+    //             term_structure: ts,
+    //             engine: cmdty_option::Engine::Black76,
+    //             simulation: Option::from(sim.unwrap_or(10000)),
+    //             time_to_future_maturity: None,
+    //             risk_free_rate: None
+    //         };
+    //         let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
+    //         println!("Theoretical Price ${}", contract_output.pv);
+    //         println!("Delta ${}", contract_output.delta);
+    //         let combined_ = CombinedContract{
+    //             contract: data.clone(),
+    //             output:contract_output
+    //         };
+    //         let output_json = serde_json::to_string(&combined_).expect("Failed to generate output");
+    //         return output_json;
+    //
+    //
+    //     }
+    //
+    // }
     else if data.action=="PV" && data.asset=="IR"{
         //println!("Processing {:?}",data);
         let rate_data = data.rate_data.clone().unwrap();

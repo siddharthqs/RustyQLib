@@ -1,7 +1,7 @@
 use super::vanila_option::{EquityOption};
 use super::utils::{Engine, Payoff};
 
-use crate::core::trade::{OptionType,Transection};
+use crate::core::trade::{Transection};
 use crate::core::utils::{ContractStyle};
 use ndarray::{Array, Array2,Array1, ArrayBase, Ix1, OwnedRepr, s};
 //use num_integer::Integer;

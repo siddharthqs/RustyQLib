@@ -5,61 +5,80 @@ use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::{Instrument,Greeks};
 use super::blackscholes;
-use crate::equity::utils::{Engine,PayoffType,Payoff};
-use crate::core::trade::{OptionType,Transection};
+use crate::equity::utils::{Engine, PayoffType, Payoff, LongShort};
+use crate::core::trade::{PutOrCall,Transection};
 use crate::core::utils::{Contract,ContractStyle};
 use crate::core::{interpolation, trade};
 use serde::Deserialize;
 use blackscholes::BlackScholesPricer;
+use crate::core::data_models::EquityOptionData;
 
 #[derive(Debug)]
 pub struct VanillaPayoff {
-    pub option_type: OptionType,
+    pub put_or_call: PutOrCall,
+    pub exercise_style: ContractStyle,
 }
 #[derive(Debug)]
 pub struct BinaryPayoff {
-    pub option_type: OptionType,
+    pub put_or_call: PutOrCall,
+    pub exercise_style: ContractStyle,
 }
 #[derive(Debug)]
 pub struct BarrierPayoff {
-    pub option_type: OptionType,
+    pub put_or_call: PutOrCall,
+    pub exercise_style: ContractStyle,
 }
 #[derive(Debug)]
 pub struct AsianPayoff {
-    pub option_type: OptionType,
+    pub put_or_call: PutOrCall,
+    pub exercise_style: ContractStyle,
 }
 impl Payoff for VanillaPayoff {
     fn payoff_amount(&self, base: &EquityOptionBase) -> f64 {
         // implement vanilla payoff
         let intrinsic_value = base.underlying_price.value() - base.strike_price;
-        match &self.option_type {
-            OptionType::Call=> intrinsic_value.max(0.0),
-            OptionType::Put=> (-intrinsic_value).max(0.0),
+        match &self.put_or_call {
+            PutOrCall::Call=> intrinsic_value.max(0.0),
+            PutOrCall::Put=> (-intrinsic_value).max(0.0),
             _=>0.0
         }
     }
     fn payoff_kind(&self) -> PayoffType {
         PayoffType::Vanilla
     }
-    fn option_type(&self)->OptionType{
-        self.option_type.clone()
+    fn put_or_call(&self) -> &PutOrCall {
+        &self.put_or_call
     }
+    fn exercise_style(&self) -> &ContractStyle {
+        &self.exercise_style
+    }
+
 }
 
 #[derive(Debug)]
 pub struct EquityOptionBase {
+    pub symbol: String,
+    pub currency: Option<String>,
+    pub exchange: Option<String>,
+    pub name: Option<String>,
+    pub cusip: Option<String>,
+    pub isin: Option<String>,
+    pub settlement_type: Option<String>,
+
+    //pub payoff_type: String, // Vanilla/Barrier/Binary
     pub underlying_price: Quote,
     pub current_price: Quote,
     pub strike_price: f64,
-    pub transection: Transection,
     pub dividend_yield: f64,
     pub volatility: f64,
     pub maturity_date: NaiveDate,
     pub valuation_date: NaiveDate,
     pub term_structure: YieldTermStructure<f64>,
     pub risk_free_rate: f64,
-    pub transection_price: f64,
-    pub style: ContractStyle,
+    pub entry_price: f64,
+    pub long_short: LongShort,
+    pub multiplier: f64,
+
 }
 #[derive(Debug)]
 pub struct EquityOption {
@@ -74,90 +93,76 @@ impl EquityOption{
         let time_to_maturity = (self.base.maturity_date - self.base.valuation_date).num_days() as f64/365.0;
         time_to_maturity
     }
-    pub fn option_type(&self)->OptionType{
-        self.payoff.option_type().clone()
-    }
+
+
 }
 impl EquityOption {
 
-    pub fn from_json(data: &Contract) -> Box<EquityOption> {
-        let payoff_type = data.payoff_type.as_ref().unwrap().parse::<PayoffType>();
-        let market_data = data.market_data.as_ref().unwrap();
-        //let option_type = &market_data.option_type;
-        let side: OptionType;
-        let option_type = match &market_data.option_type {
-            Some(x) => x.clone(),
-            None => "".to_string(),
-        };
-        match option_type.trim() {
-            "C" | "c" | "Call" | "call" => side = OptionType::Call,
-            "P" | "p" | "Put" | "put" => side = OptionType::Put,
-            _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
-        }
-        let payoff:Box<dyn Payoff> = match payoff_type {
-            Ok(PayoffType::Vanilla) => Box::new(VanillaPayoff{option_type:side}),
-            //Ok(PayoffType::Binary) => Box::new(BinaryPayoff{option_type:side}),
-            //Ok(PayoffType::Barrier) => Box::new(BarrierPayoff{option_type:side}),
-            //Ok(PayoffType::Asian) => Box::new(AsianPayoff{option_type:side}),
-            _ => {Box::new(VanillaPayoff{option_type:side})}
-        };
-
-        let underlying_quote = Quote::new(market_data.underlying_price);
-        //TODO: Add term structure
+    pub fn from_json(data: &EquityOptionData) -> Box<EquityOption> {
         let date = vec![0.01, 0.02, 0.05, 0.1, 0.5, 1.0, 2.0, 3.0];
         let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
         let ts = YieldTermStructure::new(date, rates);
+        let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d").expect("Invalid date format");
+        let mut base_option = EquityOptionBase {
+            symbol:data.base.symbol.clone(),
+            currency: data.base.currency.clone(),
+            exchange:data.base.exchange.clone(),
+            name: data.base.name.clone(),
+            cusip: data.base.cusip.clone(),
+            isin: data.base.isin.clone(),
+            settlement_type: data.base.settlement_type.clone(),
 
-
-        let maturity_date = &market_data.maturity;
-        let today = Local::today();
-        let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
-
-        let risk_free_rate = Some(market_data.risk_free_rate).unwrap();
-        let dividend = Some(market_data.dividend).unwrap();
-        //let mut op = 0.0;
-
-        let option_price = Quote::new(match market_data.option_price {
-            Some(x) => x,
-            None => 0.0,
-        });
-        //let volatility = Some(market_data.volatility);
-        let volatility = match market_data.volatility {
-            Some(x) => {
-                x
-            }
-            None => 0.2
-        };
-        let mut option = EquityOptionBase {
-            transection: Transection::Buy,
-            underlying_price: underlying_quote,
-            current_price: option_price,
-            strike_price: market_data.strike_price.unwrap_or(0.0),
-            volatility: volatility,
-            maturity_date: future_date,
-            risk_free_rate: risk_free_rate.unwrap_or(0.0),
-            dividend_yield: dividend.unwrap_or(0.0),
-            transection_price: 0.0,
+            underlying_price: Quote::new(data.base.underlying_price),
+            current_price: Quote::new(data.current_price.unwrap_or(0.0)),
+            strike_price: data.strike_price,
+            volatility: data.volatility,
+            maturity_date,
+            risk_free_rate: data.base.risk_free_rate.unwrap_or(0.0),
+            entry_price: data.entry_price.unwrap_or(0.0),
+            long_short: LongShort::LONG,
+            dividend_yield: data.dividend.unwrap_or(0.0),
             term_structure: ts,
-            style: ContractStyle::European,
-            valuation_date: today.naive_utc(),
+            valuation_date: Local::today().naive_utc(),
+            multiplier: data.multiplier.unwrap_or(1.0),
         };
-        option.set_risk_free_rate();
-        match data.style.as_ref().unwrap_or(&"European".to_string()).trim() {
+        let payoff_type = &data.payoff_type.parse::<PayoffType>().unwrap();
+        let side: PutOrCall;
+        let put_or_call = data.put_or_call.clone();
+        match put_or_call.trim() {
+            "C" | "c" | "Call" | "call" => side = PutOrCall::Call,
+            "P" | "p" | "Put" | "put" => side = PutOrCall::Put,
+            _ => panic!("Invalid side argument! Side has to be either 'C' or 'P'."),
+        }
+
+        let style = match data.exercise_style.as_ref().unwrap_or(&"European".to_string()).trim() {
             "European" | "european" => {
-                option.style = ContractStyle::European;
+                ContractStyle::European
             }
             "American" | "american" => {
-                option.style = ContractStyle::American;
+                ContractStyle::American
             }
             _ => {
-                option.style = ContractStyle::European;
+                ContractStyle::European
             }
-        }
+        };
+
+        let payoff:Box<dyn Payoff> = match &payoff_type {
+            PayoffType::Vanilla => Box::new(VanillaPayoff{
+                put_or_call:side,
+                exercise_style:style}),
+            //Ok(PayoffType::Binary) => Box::new(BinaryPayoff{option_type:side}),
+            //Ok(PayoffType::Barrier) => Box::new(BarrierPayoff{option_type:side}),
+            //Ok(PayoffType::Asian) => Box::new(AsianPayoff{option_type:side}),
+            _ => {Box::new(VanillaPayoff{
+                put_or_call:side,
+                exercise_style:style})}
+        };
+
+        base_option.set_risk_free_rate();
         let equityoption = EquityOption {
-            base: option,
+            base: base_option,
             payoff,
-            engine: match data.pricer.trim() {
+            engine: match data.pricer.as_ref().map_or("Analytical",|v| v).trim() {
                 "Analytical" | "analytical" | "bs" => Engine::BlackScholes,
                 "MonteCarlo" | "montecarlo" | "MC" | "mc" => Engine::MonteCarlo,
                 "Binomial" | "binomial" | "bino" => Engine::Binomial,
@@ -168,8 +173,7 @@ impl EquityOption {
             },
             simulation: None
         };
-
-        return Box::new(equityoption);
+        Box::new(equityoption)
     }
 }
 

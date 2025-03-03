@@ -1,7 +1,7 @@
 //extern crate ndarray;
 use super::vanila_option::{EquityOption};
 use super::utils::{Engine, Payoff};
-use crate::core::trade::{OptionType,Transection};
+use crate::core::trade::{ PutOrCall, Transection};
 use crate::core::utils::{ContractStyle};
 use ndarray::Array2;
 
@@ -23,14 +23,14 @@ pub fn npv(option: &EquityOption) -> f64 {
     let mut tree = Array2::from_elem((num_steps + 1, num_steps + 1), 0.0);
     //println!("{:?}",tree);
     // Calculate option prices at the final time step (backward induction)
-    let multiplier = if option.payoff.option_type() == OptionType::Call { 1.0 } else { -1.0 };
+    let multiplier = if option.payoff.put_or_call() == &PutOrCall::Call { 1.0 } else { -1.0 };
 
     for j in 0..=num_steps {
         let spot_price_j = option.base.underlying_price.value * u.powi(num_steps as i32 - j as i32) * d.powi(j as i32);
         tree[[j,num_steps]] = (multiplier*(spot_price_j - option.base.strike_price)).max(0.0);
     }
 
-    match option.base.style {
+    match option.payoff.exercise_style() {
         ContractStyle::European => {
             for i in (0..num_steps).rev() {
                 for j in 0..=i {

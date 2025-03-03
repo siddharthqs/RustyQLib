@@ -4,6 +4,7 @@ use probability;
 use probability::distribution::Distribution;
 use std::f64::consts::{PI, SQRT_2};
 use serde::Serialize;
+use crate::core::data_models::ProductData;
 use crate::Deserialize;
 
 #[derive(PartialEq,Clone,Debug)]
@@ -36,23 +37,26 @@ impl EngineType {
     }
 }
 
-#[derive(Clone,Debug,Deserialize,Serialize)]
-pub struct MarketData {
-    pub underlying_price:f64,
-    pub option_type:Option<String>,
-    pub strike_price:Option<f64>,
-    pub volatility:Option<f64>,
-    pub option_price:Option<f64>,
-    pub risk_free_rate:Option<f64>,
-    pub maturity:String,
-    pub dividend: Option<f64>,
-    pub simulation:Option<u64>,
-    pub current_price:Option<f64>,
-    pub notional: Option<f64>,
-    pub long_short:Option<i32>,
-    pub multiplier:Option<f64>,
-    pub entry_price:Option<f64>,
-}
+
+
+// #[derive(Clone,Debug,Deserialize,Serialize)]
+// pub struct MarketData {
+//     pub underlying_price:f64,
+//     pub option_type:Option<String>,
+//     pub strike_price:Option<f64>,
+//     pub volatility:Option<f64>,
+//     pub option_price:Option<f64>,
+//     pub risk_free_rate:Option<f64>,
+//     pub maturity:String,
+//     pub dividend: Option<f64>,
+//     pub simulation:Option<u64>,
+//     pub current_price:Option<f64>,
+//     pub notional: Option<f64>,
+//     pub long_short:Option<i32>,
+//     pub multiplier:Option<f64>,
+//     pub entry_price:Option<f64>,
+// }
+
 
 #[derive(Clone,Debug,Deserialize,Serialize)]
 pub struct RateData {
@@ -70,12 +74,8 @@ pub struct RateData {
 #[derive(Clone,Debug,Deserialize,Serialize)]
 pub struct Contract {
     pub action: String,
-    pub pricer: String,
     pub asset: String,
-    pub product_type: Option<String>,
-    pub payoff_type:Option<String>,
-    pub style: Option<String>,
-    pub market_data: Option<MarketData>,
+    pub product_type: ProductData,
     pub rate_data: Option<RateData>,
 }
 #[derive(Deserialize,Serialize)]

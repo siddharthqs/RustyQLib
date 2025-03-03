@@ -1,12 +1,13 @@
 use crate::core::traits::Instrument;
 use crate::core::utils::{Contract,CombinedContract, ContractOutput};
+use crate::core::data_models::ProductData;
 use crate::equity::equity_forward::EquityForward;
 use crate::equity::vanila_option::EquityOption;
 use crate::equity::equity_future::EquityFuture;
 pub fn handle_equity_contract(data: &Contract) -> String {
-    match data.product_type.as_deref() {
-        Some("Option") => {
-            let option = EquityOption::from_json(&data);
+    match &data.product_type {
+        ProductData::Option(opt) => {
+            let option = EquityOption::from_json(opt);
             let contract_output = ContractOutput {
                 pv: option.npv(),
                 delta: option.delta(),
@@ -24,8 +25,8 @@ pub fn handle_equity_contract(data: &Contract) -> String {
             };
             serde_json::to_string(&combined_).expect("Failed to generate output")
         }
-        Some("Future") => {
-            let future = EquityFuture::from_json(data);
+        ProductData::Future(fut) => {
+            let future = EquityFuture::from_json(fut);
             let contract_output = ContractOutput {
                 pv: future.npv(),
                 delta: future.delta(),
@@ -42,8 +43,8 @@ pub fn handle_equity_contract(data: &Contract) -> String {
             };
             serde_json::to_string(&combined_).expect("Failed to generate output")
         }
-        Some("Forward") => {
-            let future = EquityForward::from_json(data);
+        ProductData::Forward(forward) => {
+            let future = EquityForward::from_json(forward);
             let contract_output = ContractOutput {
                 pv: future.npv(),
                 delta: future.delta(),

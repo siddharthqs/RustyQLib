@@ -13,8 +13,14 @@ use crate::core::quotes::Quote;
 use crate::core::utils::{Contract,ContractStyle};
 use crate::equity::utils::{Engine, Payoff};
 use std::collections::BTreeMap;
+use crate::core::data_models::ProductData;
 
 pub fn build_eq_contracts_from_json(mut data: Vec<Contract>) -> Vec<Box<EquityOption>> {
-    let derivatives:Vec<Box<EquityOption>> = data.iter().map(|x| EquityOption::from_json(&x)).collect();
+    let derivatives:Vec<Box<EquityOption>> = data.iter().map(|x| {
+        let ProductData::Option(opt_data) = &x.product_type else {
+            panic!("Not an option!");
+        };
+        EquityOption::from_json(opt_data)
+    }).collect();
     return derivatives;
 }

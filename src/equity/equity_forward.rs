@@ -1,4 +1,5 @@
 use chrono::{Local, NaiveDate};
+use crate::core::data_models::EquityForwardData;
 use crate::core::quotes::Quote;
 use crate::core::traits::Instrument;
 use crate::core::utils::Contract;
@@ -8,6 +9,15 @@ use crate::equity::utils::LongShort;
 /// a commodity (or financial instrument or currency or any other underlying)
 /// on a pre-determined future date at a price agreed when the contract is entered into.
 pub struct EquityForward {
+
+    pub symbol: String,
+    pub currency: Option<String>,
+    pub exchange: Option<String>,
+    pub name: Option<String>,
+    pub cusip: Option<String>,
+    pub isin: Option<String>,
+    pub settlement_type: Option<String>,
+
     pub underlying_price: Quote,
     pub forward_price: Quote, //Forward price you actually locked in.
     pub risk_free_rate: f64,
@@ -18,32 +28,41 @@ pub struct EquityForward {
     pub notional:f64
 }
 impl EquityForward  {
-    pub fn from_json(data: &Contract) -> Box<Self> {
-        let market_data = data.market_data.as_ref().unwrap();
+    pub fn from_json(data: &EquityForwardData) -> Box<Self> {
+        //let market_data = data.market_data.as_ref().unwrap();
         //let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
         let today = Local::today();
-        let maturity_date = NaiveDate::parse_from_str(&market_data.maturity, "%Y-%m-%d")
+        let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
             .expect("Invalid maturity date");
 
-        let underlying_price = Quote::new(market_data.underlying_price);
-        let quote = Some(market_data.entry_price).unwrap();
+        let underlying_price = Quote::new(data.base.underlying_price);
+        let quote = Some(data.entry_price).unwrap();
         let entry_quote = Quote::new(quote.unwrap_or(0.0));
-        let risk_free_rate = Some(market_data.risk_free_rate).unwrap();
-        let dividend = Some(market_data.dividend).unwrap();
-        let long_short = market_data.long_short.unwrap_or(1);
+        let risk_free_rate = data.base.risk_free_rate.unwrap_or(0.0);
+        let dividend = data.dividend.unwrap_or(0.0);
+        let long_short = data.base.long_short.unwrap_or(1);
         let position = match long_short{
             1=>LongShort::LONG,
             -1=>LongShort::SHORT,
             _=>LongShort::LONG,
         };
         Box::new(Self {
+            symbol:data.base.symbol.clone(),
+            currency: data.base.currency.clone(),
+            exchange:data.base.exchange.clone(),
+            name: data.base.name.clone(),
+            cusip: data.base.cusip.clone(),
+            isin: data.base.isin.clone(),
+            settlement_type: data.base.settlement_type.clone(),
+
+
             underlying_price: underlying_price,
             forward_price:entry_quote,
-            risk_free_rate: risk_free_rate.unwrap_or(0.0),
-            dividend_yield: dividend.unwrap_or(0.0),
+            risk_free_rate: risk_free_rate,
+            dividend_yield: dividend,
             maturity_date: maturity_date,
             valuation_date: today.naive_utc(),
-            notional:market_data.notional.unwrap_or(1.0),
+            notional:data.notional.unwrap_or(1.0),
             long_short:position
         })
     }

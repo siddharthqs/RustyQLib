@@ -7,13 +7,14 @@ use libm::exp;
 use crate::core::utils::{ContractStyle,dN, N};
 
 use super::vanila_option::{EquityOption, EquityOptionBase, VanillaPayoff};
-use super::utils::{Engine, Payoff};
-use crate::core::trade::{OptionType,Transection};
+use super::utils::{Engine, LongShort, Payoff};
+use crate::core::trade::{PutOrCall, Transection};
 use super::super::utils::RNG;
 use crate::core::quotes::Quote;
 use crate::core::termstructure::YieldTermStructure;
 use crate::core::traits::Instrument;
 use serde::de::Unexpected::Option;
+use crate::core::trade::PutOrCall::Put;
 
 pub fn simulate_market(option: &EquityOption) -> Vec<f64>{
     let mut monte_carlo = RNG::MonteCarloSimulation{
@@ -57,16 +58,16 @@ pub fn simulate_market_path_wise(option: &EquityOption) -> Vec<f64>{
 
 pub fn payoff(market: &Vec<f64>,
               strike: &f64,
-              option_type: &OptionType) -> Vec<f64>{
+              option_type: &PutOrCall) -> Vec<f64>{
     let mut payoff_vec = Vec::new();
     match option_type{
-        OptionType::Call=>{
+        PutOrCall::Call=>{
             for st in market{
                 let pay = (st - strike).max(0.0);
                 payoff_vec.push(pay);
             }
         }
-        OptionType::Put=>{
+        PutOrCall::Put=>{
             for st in market{
                 let pay = (strike-st).max(0.0);
                 payoff_vec.push(pay);
@@ -92,7 +93,7 @@ pub fn npv(option: &EquityOption,path_size: bool) -> f64 {
         st  = simulate_market(&option);
     }
 
-    let payoff = payoff(&st,&option.base.strike_price,&option.payoff.option_type());
+    let payoff = payoff(&st,&option.base.strike_price,&option.payoff.put_or_call());
     let sum_pay:f64 = payoff.iter().sum();
     let num_of_simulations = st.len() as f64;
     let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.base.risk_free_rate)*option.time_to_maturity());
@@ -114,10 +115,10 @@ pub fn option_pricing() {
         .read_line(&mut side_input)
         .expect("Failed to read line");
 
-    let side: OptionType;
+    let side: PutOrCall;
     match side_input.trim() {
-        "C" | "c" | "Call" | "call" => side = OptionType::Call,
-        "P" | "p" | "Put" | "put" => side = OptionType::Put,
+        "C" | "c" | "Call" | "call" => side = PutOrCall::Call,
+        "P" | "p" | "Put" | "put" => side = PutOrCall::Put,
         _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
     }
 
@@ -159,7 +160,16 @@ pub fn option_pricing() {
     let ts = YieldTermStructure::new(date,rates);
     let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
     let mut option = EquityOptionBase {
-        transection: Transection::Buy,
+
+        symbol:"ABC".to_string(),
+        currency: None,
+        exchange:None,
+        name: None,
+        cusip: None,
+        isin: None,
+        settlement_type: Some("ABC".to_string()),
+        entry_price: 0.0,
+        long_short: LongShort::LONG,
         underlying_price: curr_quote,
         current_price: Quote::new(0.0),
         strike_price: strike.trim().parse::<f64>().unwrap(),
@@ -167,14 +177,15 @@ pub fn option_pricing() {
         maturity_date: future_date,
         risk_free_rate: rf.trim().parse::<f64>().unwrap(),
         dividend_yield: div.trim().parse::<f64>().unwrap(),
-        transection_price: 0.0,
+
         term_structure: ts,
-        style: ContractStyle::European,
+
         valuation_date: Local::today().naive_local(),
+        multiplier: 1.0,
     };
     option.set_risk_free_rate();
     println!("{:?}", option.time_to_maturity());
-    let payoff = Box::new(VanillaPayoff{option_type:side});
+    let payoff = Box::new(VanillaPayoff{put_or_call:side,exercise_style:ContractStyle::European});
     let equityoption = EquityOption {
         base: option,
         payoff:payoff,

@@ -5,8 +5,8 @@ pub enum Transection {
 }
 
 #[derive(PartialEq, Debug,Clone)]
-pub enum OptionType {
+pub enum PutOrCall {
     Call,
     Put,
-    Straddle,
+
 }

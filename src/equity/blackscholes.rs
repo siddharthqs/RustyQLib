@@ -6,9 +6,9 @@ use chrono::{Datelike, Local, NaiveDate};
 //use utils::{N,dN};
 //use vanila_option::{EquityOption,OptionType};
 use crate::core::utils::{ContractStyle, dN, N};
-use crate::core::trade::{OptionType,Transection};
+use crate::core::trade::{PutOrCall, Transection};
 use super::vanila_option::{EquityOption, EquityOptionBase, VanillaPayoff};
-use super::utils::{Engine,PayoffType,Payoff};
+use super::utils::{Engine, PayoffType, Payoff, LongShort};
 use super::super::core::termstructure::YieldTermStructure;
 use super::super::core::traits::{Instrument,Greeks};
 use super::super::core::interpolation;
@@ -66,14 +66,14 @@ impl BlackScholesPricer {
         let n_d2 = N(bsd_option.base.d2());
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
         let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
-        match bsd_option.option_type() {
-            OptionType::Call => {bsd_option.base.underlying_price.value()*n_d1 *df_d
+        match bsd_option.payoff.put_or_call() {
+            PutOrCall::Call => {bsd_option.base.underlying_price.value()*n_d1 *df_d
                 -bsd_option.base.strike_price*n_d2*df_r
             }
-            OptionType::Put => {bsd_option.base.strike_price*N(-bsd_option.base.d2())*df_r-
+            PutOrCall::Put => {bsd_option.base.strike_price*N(-bsd_option.base.d2())*df_r-
                 bsd_option.base.underlying_price.value()*N(-bsd_option.base.d1()) *df_d
                 }
-            OptionType::Straddle => {0.0}
+
         }
     }
     fn delta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
@@ -82,11 +82,9 @@ impl BlackScholesPricer {
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
         let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
 
-        match bsd_option.option_type() {
-            OptionType::Call => {n_d1 *(df_r/df_d) }
-            OptionType::Put => {(n_d1-1.0) *(df_r/df_d)
-            }
-            _ => {0.0}
+        match bsd_option.payoff.put_or_call() {
+            PutOrCall::Call => {n_d1 *(df_r/df_d) }
+            PutOrCall::Put => {(n_d1-1.0) *(df_r/df_d) }
         }
     }
     fn gamma_vanilla(&self, bsd_option: &EquityOption) -> f64 {
@@ -95,7 +93,7 @@ impl BlackScholesPricer {
         let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
         let num = dn_d1*(df_r/df_d);
         let var_sqrt = bsd_option.base.volatility * (bsd_option.time_to_maturity().sqrt());
-        return  num/ (bsd_option.base.underlying_price.value() * var_sqrt);
+        num/ (bsd_option.base.underlying_price.value() * var_sqrt)
     }
     fn vega_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         let dn_d1 = dN(bsd_option.base.d1());
@@ -103,7 +101,7 @@ impl BlackScholesPricer {
         let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
         let df_S = bsd_option.base.underlying_price.value()*df_r/df_d;
         let vega = df_S * dn_d1 * bsd_option.time_to_maturity().sqrt();
-        return vega;
+        vega
     }
     fn theta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
 
@@ -117,18 +115,18 @@ impl BlackScholesPricer {
         let t1 = -df_S*dn_d1  * bsd_option.base.volatility
             / (2.0 * bsd_option.time_to_maturity().sqrt());
 
-        match bsd_option.option_type() {
-            OptionType::Call => {
+        match bsd_option.payoff.put_or_call() {
+            PutOrCall::Call => {
                 let t2 = -df_S*n_d1*(bsd_option.base.dividend_yield-bsd_option.base.risk_free_rate);
                 let t3 = -bsd_option.base.risk_free_rate*bsd_option.base.strike_price*df_r*n_d2;
                 t1+t2+t3
             }
-            OptionType::Put => {
+            PutOrCall::Put => {
                 let t2 = df_S*N(-bsd_option.base.d1())*(bsd_option.base.dividend_yield-bsd_option.base.risk_free_rate);
                 let t3 = bsd_option.base.risk_free_rate*bsd_option.base.strike_price*df_r*N(-bsd_option.base.d2());
                 t1+t2+t3
             }
-            OptionType::Straddle => {0.0}
+
         }
     }
     fn rho_vanilla(&self, bsd_option: &EquityOption) -> f64 {
@@ -137,13 +135,13 @@ impl BlackScholesPricer {
         //let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
         let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
         let r1 = bsd_option.time_to_maturity()*bsd_option.base.strike_price;
-        match bsd_option.option_type() {
-            OptionType::Call => {
+        match bsd_option.payoff.put_or_call() {
+            PutOrCall::Call => {
                 r1*n_d2*df_r
             }
-            OptionType::Put => {r1*N(-bsd_option.base.d2())*df_r
+            PutOrCall::Put => {r1*N(-bsd_option.base.d2())*df_r
             }
-            OptionType::Straddle => {0.0}
+
         }
     }
 
@@ -165,10 +163,10 @@ pub fn option_pricing() {
     io::stdin()
         .read_line(&mut side_input)
         .expect("Failed to read line");
-    let side: OptionType;
+    let side: PutOrCall;
     match side_input.trim() {
-        "C" | "c" | "Call" | "call" => side = OptionType::Call,
-        "P" | "p" | "Put" | "put" => side = OptionType::Put,
+        "C" | "c" | "Call" | "call" => side = PutOrCall::Call,
+        "P" | "p" | "Put" | "put" => side = PutOrCall::Put,
         _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
     }
     println!("Stike price:");
@@ -217,7 +215,16 @@ pub fn option_pricing() {
     let ts = YieldTermStructure::new(date,rates);
     let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
     let mut option = EquityOptionBase {
-        transection: Transection::Buy,
+
+        symbol:"ABC".to_string(),
+        currency: None,
+        exchange:None,
+        name: None,
+        cusip: None,
+        isin: None,
+        settlement_type: Some("ABC".to_string()),
+        entry_price: 0.0,
+        long_short: LongShort::LONG,
         underlying_price: curr_quote,
         current_price: Quote::new(0.0),
         strike_price: strike.trim().parse::<f64>().unwrap(),
@@ -225,14 +232,14 @@ pub fn option_pricing() {
         maturity_date: future_date,
         risk_free_rate: rf.trim().parse::<f64>().unwrap(),
         dividend_yield: div.trim().parse::<f64>().unwrap(),
-        transection_price: 0.0,
         term_structure: ts,
-        style: ContractStyle::European,
         valuation_date: Local::today().naive_local(),
+        multiplier: 1.0,
     };
     option.set_risk_free_rate();
     //println!("{:?}", option.time_to_maturity());
-    let payoff = Box::new(VanillaPayoff{option_type:side});
+    let payoff = Box::new(VanillaPayoff{put_or_call:side,
+                                    exercise_style:ContractStyle::European});
     let option = EquityOption {
         base: option,
         payoff:payoff,

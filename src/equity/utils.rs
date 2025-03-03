@@ -2,8 +2,10 @@ use serde::Deserialize;
 use crate::equity::vanila_option::EquityOptionBase;
 use std::str::FromStr;
 use std::error::Error;
-use crate::core::trade::OptionType;
+use crate::core::trade::{PutOrCall};
 use std::fmt::Debug;
+use crate::core::utils::ContractStyle;
+
 ///Enum for different engines to price options
 #[derive(PartialEq,Clone,Debug)]
 pub enum Engine{
@@ -12,6 +14,7 @@ pub enum Engine{
     Binomial,
     FiniteDifference
 }
+#[derive(Debug)]
 pub enum LongShort{
     LONG,
     SHORT
@@ -42,7 +45,8 @@ impl FromStr for PayoffType {
 pub trait Payoff: Debug {
     fn payoff_amount(&self, base: &EquityOptionBase) -> f64;
     fn payoff_kind(&self) -> PayoffType;
-    fn option_type(&self) ->OptionType;
+    fn put_or_call(&self) -> &PutOrCall;
+    fn exercise_style(&self)->&ContractStyle;
 
     // possibly other methods for payoff logic
 }
