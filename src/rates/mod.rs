@@ -1,5 +1,5 @@
 pub mod deposits;
-pub(crate) mod utils;
+pub mod utils;
 pub mod fra;
 pub mod build_contracts;
-mod term_structure;
+pub mod term_structure;

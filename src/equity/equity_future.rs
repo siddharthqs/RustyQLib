@@ -32,7 +32,7 @@ impl EquityFuture {
     pub fn from_json(data: &EquityFutureData) -> Box<Self> {
         //let market_data = data.market_data.as_ref().unwrap();
         //let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
-        let today = Local::today();
+        let today = Local::now().date_naive();
         let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
             .expect("Invalid maturity date");
 
@@ -63,7 +63,7 @@ impl EquityFuture {
             risk_free_rate: risk_free_rate.unwrap_or(0.0),
             dividend_yield: dividend.unwrap_or(0.0),
             maturity_date: maturity_date,
-            valuation_date: today.naive_utc(),
+            valuation_date: today,
             long_short:position
         })
     }

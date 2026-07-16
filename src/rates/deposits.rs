@@ -33,13 +33,13 @@ impl Deposit {
     }
     pub fn builder(start_date: String,maturity_date:String,notional: f64, fix_rate: f64,day_count: String) ->Deposit{
 
-        let today = Local::today();
+        let today = Local::now().date_naive();
         let start_date = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d").expect("Invalid date format");
         let maturity_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
         let mut deposit = Deposit {
             start_date: start_date,
             maturity_date: maturity_date,
-            valuation_date: today.naive_utc(),
+            valuation_date: today,
             notional: 1000000.0,
             fix_rate: 0.05,
             day_count: DayCountConvention::Act360,

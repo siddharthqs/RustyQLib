@@ -1,33 +1,60 @@
-{"asset":"EQ",
-  "contracts" : [
 {
-  "action":"PV",
-  "pricer":"Analytical",
-  "asset":"EQ",
-  "product_type": "Option",
-  "payoff_type": "Vanilla",
-  "market_data":{
-    "underlying_price":100,
-    "option_type":"C",
-    "strike_price":100,
-    "volatility":0.4,
-    "risk_free_rate":0.06,
-    "maturity":"2025-03-31",
-    "dividend": 0.01
-  }
-},
-  {
-    "action":"PV",
-    "pricer":"Analytical",
-    "asset":"EQ",
-    "product_type": "Future",
-    "market_data":{
-      "underlying_price":100,
-      "current_price":104,
-      "risk_free_rate":0.06,
-      "maturity":"2025-03-31",
-      "dividend": 0.01
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "vanilla",
+        "strike_price": 100.0,
+        "volatility": 0.4,
+        "maturity": "2027-03-31",
+        "dividend": 0.01,
+        "risk_free_rate": 0.06,
+        "exercise_style": "European",
+        "pricer": "Analytical"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "P",
+        "payoff_type": "vanilla",
+        "strike_price": 100.0,
+        "volatility": 0.4,
+        "maturity": "2027-03-31",
+        "dividend": 0.01,
+        "exercise_style": "European",
+        "pricer": "Analytical",
+        "discount_curve": {
+          "type": "zero_rates",
+          "tenors": [0.25, 0.5, 1.0, "2028-03-31"],
+          "rates": [0.045, 0.05, 0.055, 0.06],
+          "compounding": "continuous",
+          "day_count": "Act365"
+        }
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "future",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "current_price": 104.0,
+        "risk_free_rate": 0.06,
+        "maturity": "2027-03-31",
+        "dividend": 0.01
+      }
     }
-  }
-]
+  ]
 }

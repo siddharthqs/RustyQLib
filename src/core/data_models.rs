@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::core::curves::CurveInput;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "product_type", rename_all = "snake_case")]
@@ -61,6 +62,9 @@ pub struct EquityOptionData {
     pub entry_price:Option<f64>,
     pub simulation: Option<u64>,
     pub exercise_style: Option<String>, //European, American,
-    pub pricer:Option<String>
+    pub pricer:Option<String>,
+    /// Optional discount curve; when absent a flat curve is built from
+    /// `risk_free_rate` (which stays the simple way to specify a rate).
+    pub discount_curve: Option<CurveInput>,
 }
 

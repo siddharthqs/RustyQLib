@@ -13,11 +13,12 @@ pub fn npv(option: &EquityOption) -> f64 {
     let num_steps = 1000;
 
     let dt = option.time_to_maturity() / num_steps as f64;
-    let discount_factor = (-option.base.risk_free_rate * dt).exp();
+    let risk_free_rate = option.base.risk_free_rate();
+    let discount_factor = (-risk_free_rate * dt).exp();
     // Calculate parameters for the binomial tree
     let u = (option.base.volatility*dt.sqrt()).exp(); //up movement
     let d = 1.0 / u; //down movement
-    let a_factor = ((option.base.risk_free_rate-option.base.dividend_yield) * dt).exp();
+    let a_factor = ((risk_free_rate-option.base.dividend_yield) * dt).exp();
     let p = (a_factor - d) / (u - d); //martingale probability
     // Create a 2D array to represent the binomial tree
     let mut tree = Array2::from_elem((num_steps + 1, num_steps + 1), 0.0);

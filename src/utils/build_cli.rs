@@ -1,94 +1,87 @@
 use std::time::Instant;
-use clap::{App, Arg, SubCommand};
+use clap::{Arg, ArgMatches, Command};
 use std::fs::File;
-use utils::parse_json;
-use crate::utils;
+use crate::utils::parse_json;
 use std::fs;
 use std::path::Path;
-use std::{io, thread};
+use std::io;
 use std::io::Write;
 use crate::equity::blackscholes;
 use crate::equity::montecarlo;
-pub fn build_cli() -> App<'static, 'static> {
-    App::new("RustyQLib Quant Library for Option Pricing")
+pub fn build_cli() -> Command {
+    Command::new("RustyQLib Quant Library for Option Pricing")
         .version("0.0.2")
         .author("Siddharth Singh <siddharth_qs@outlook.com>")
         .about("Pricing and risk management of financial derivatives")
         .subcommand(
-            SubCommand::with_name("build")
+            Command::new("build")
                 .about("Building the curve / Vol surface")
                 .arg(
-                    Arg::with_name("input")
-                        .short("i")
+                    Arg::new("input")
+                        .short('i')
                         .long("input")
                         .value_name("FILE")
                         .help("Input financial contracts to use in construction")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 )
                 .arg(
-                    Arg::with_name("output")
-                        .short("o")
+                    Arg::new("output")
+                        .short('o')
                         .long("output")
                         .value_name("FILE")
                         .help("Output file name")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("file")
+            Command::new("file")
                 .about("Pricing a single contract")
                 .arg(
-                    Arg::with_name("input")
-                        .short("i")
+                    Arg::new("input")
+                        .short('i')
                         .long("input")
                         .value_name("FILE")
                         .help("Pricing a single contract")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 )
                 .arg(
-                    Arg::with_name("output")
-                        .short("o")
+                    Arg::new("output")
+                        .short('o')
                         .long("output")
                         .value_name("FILE")
                         .help("Output file name")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("dir")
+            Command::new("dir")
                 .about("Pricing all contracts in a directory")
                 .arg(
-                    Arg::with_name("input")
-                        .short("i")
+                    Arg::new("input")
+                        .short('i')
                         .long("input")
                         .value_name("DIR")
                         .help("Pricing all contracts in a directory")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 )
                 .arg(
-                    Arg::with_name("output")
-                        .short("o")
+                    Arg::new("output")
+                        .short('o')
                         .long("output")
                         .value_name("DIR")
                         .help("Output priced contracts to a directory")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("interactive").about("Interactive mode"),
+            Command::new("interactive").about("Interactive mode"),
         )
 }
 
 /// Handle the "build" subcommand.
-pub fn handle_build(matches: &clap::ArgMatches<'_>) {
-    let input_file = matches.value_of("input").unwrap();
-    let output_file = matches.value_of("output").unwrap();
+pub fn handle_build(matches: &ArgMatches) {
+    let input_file = matches.get_one::<String>("input").unwrap();
+    let output_file = matches.get_one::<String>("output").unwrap();
 
     // We measure the time of the operation
     measure_time("build_curve", || {
@@ -101,9 +94,9 @@ pub fn handle_build(matches: &clap::ArgMatches<'_>) {
 }
 
 /// Handle the "file" subcommand.
-pub fn handle_file(matches: &clap::ArgMatches<'_>) {
-    let input_file = matches.value_of("input").unwrap();
-    let output_file = matches.value_of("output").unwrap();
+pub fn handle_file(matches: &ArgMatches) {
+    let input_file = matches.get_one::<String>("input").unwrap();
+    let output_file = matches.get_one::<String>("output").unwrap();
 
     measure_time("parse_contract (single file)", || {
         let mut file = File::open(input_file).expect("Failed to open JSON file");
@@ -113,9 +106,9 @@ pub fn handle_file(matches: &clap::ArgMatches<'_>) {
 }
 
 /// Handle the "dir" subcommand.
-pub fn handle_dir(matches: &clap::ArgMatches<'_>) {
-    let input_dir = matches.value_of("input").unwrap();
-    let output_dir = matches.value_of("output").unwrap();
+pub fn handle_dir(matches: &ArgMatches) {
+    let input_dir = matches.get_one::<String>("input").unwrap();
+    let output_dir = matches.get_one::<String>("output").unwrap();
 
     let input_path = Path::new(input_dir);
     let output_path = Path::new(output_dir);

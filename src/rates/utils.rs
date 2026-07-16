@@ -147,7 +147,7 @@ impl TermStructure {
 }
 
 pub fn convert_mm_to_date(mut date: String) -> NaiveDate {
-    let current_date = Local::today();
+    let current_date = Local::now().date_naive();
     date.pop();
     let month = date.parse::<u32>().unwrap();
 
@@ -161,7 +161,7 @@ pub fn convert_mm_to_date(mut date: String) -> NaiveDate {
     };
     let date_in_months = current_date.with_year(new_year).unwrap_or(current_date)
         .with_month(new_month).unwrap_or(current_date);
-    let mut maturity_date = date_in_months.naive_utc();
+    let mut maturity_date = date_in_months;
     maturity_date = adjust_for_weekend(maturity_date);
     return maturity_date;
 }

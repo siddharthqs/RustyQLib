@@ -11,7 +11,8 @@ use super::utils::{Engine, LongShort, Payoff};
 use crate::core::trade::{PutOrCall, Transection};
 use super::super::utils::RNG;
 use crate::core::quotes::Quote;
-use crate::core::termstructure::YieldTermStructure;
+use crate::core::curves::{Compounding, YieldCurve};
+use crate::core::daycount::DayCountConvention;
 use crate::core::traits::Instrument;
 use serde::de::Unexpected::Option;
 use crate::core::trade::PutOrCall::Put;
@@ -31,7 +32,7 @@ pub fn simulate_market(option: &EquityOption) -> Vec<f64>{
     let mut market_at_maturity:Vec<f64> = Vec::new();
     for z in path{
         let sim_value = option.base.underlying_price.value()
-            *exp(((option.base.risk_free_rate - option.base.dividend_yield - 0.5 * option.base.volatility.powi(2))
+            *exp(((option.base.risk_free_rate() - option.base.dividend_yield - 0.5 * option.base.volatility.powi(2))
             * option.time_to_maturity())+option.base.volatility * option.time_to_maturity().sqrt()*z);
         market_at_maturity.push(sim_value);
     }
@@ -48,7 +49,7 @@ pub fn simulate_market_path_wise(option: &EquityOption) -> Vec<f64>{
         let mut st = option.base.current_price.value();
         for z in ipath{
             st = st
-                *exp(((option.base.risk_free_rate - option.base.dividend_yield - 0.5 * option.base.volatility.powi(2))
+                *exp(((option.base.risk_free_rate() - option.base.dividend_yield - 0.5 * option.base.volatility.powi(2))
                 * dt)+option.base.volatility * dt.sqrt()*z);
         }
         market_at_maturity.push(st);
@@ -96,7 +97,7 @@ pub fn npv(option: &EquityOption,path_size: bool) -> f64 {
     let payoff = payoff(&st,&option.base.strike_price,&option.payoff.put_or_call());
     let sum_pay:f64 = payoff.iter().sum();
     let num_of_simulations = st.len() as f64;
-    let c0:f64 = (sum_pay / num_of_simulations)*exp(-(option.base.risk_free_rate)*option.time_to_maturity());
+    let c0:f64 = (sum_pay / num_of_simulations)*option.base.maturity_discount_factor();
     c0
     }
 
@@ -151,15 +152,16 @@ pub fn option_pricing() {
         .read_line(&mut div)
         .expect("Failed to read line");
 
-    //let ts = YieldTermStructure{
-    //    date: vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0],
-    //    rates: vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12]
-    //};
-    let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
-    let rates = vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12];
-    let ts = YieldTermStructure::new(date,rates);
+    let valuation_date = Local::now().date_naive();
+    let discount_curve = YieldCurve::flat(
+        rf.trim().parse::<f64>().unwrap(),
+        valuation_date,
+        DayCountConvention::Act365,
+        Compounding::Continuous,
+    )
+    .expect("Invalid risk free rate");
     let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
-    let mut option = EquityOptionBase {
+    let option = EquityOptionBase {
 
         symbol:"ABC".to_string(),
         currency: None,
@@ -175,15 +177,11 @@ pub fn option_pricing() {
         strike_price: strike.trim().parse::<f64>().unwrap(),
         volatility: vol.trim().parse::<f64>().unwrap(),
         maturity_date: future_date,
-        risk_free_rate: rf.trim().parse::<f64>().unwrap(),
+        discount_curve,
         dividend_yield: div.trim().parse::<f64>().unwrap(),
-
-        term_structure: ts,
-
-        valuation_date: Local::today().naive_local(),
+        valuation_date,
         multiplier: 1.0,
     };
-    option.set_risk_free_rate();
     println!("{:?}", option.time_to_maturity());
     let payoff = Box::new(VanillaPayoff{put_or_call:side,exercise_style:ContractStyle::European});
     let equityoption = EquityOption {

@@ -1,14 +1,15 @@
 use std::error::Error;
 use chrono::{Datelike, Local, NaiveDate};
 use crate::equity::{binomial,finite_difference,montecarlo};
-use super::super::core::termstructure::YieldTermStructure;
+use crate::core::curves::{Compounding, YieldCurve};
+use crate::core::daycount::DayCountConvention;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::{Instrument,Greeks};
 use super::blackscholes;
 use crate::equity::utils::{Engine, PayoffType, Payoff, LongShort};
 use crate::core::trade::{PutOrCall,Transection};
 use crate::core::utils::{Contract,ContractStyle};
-use crate::core::{interpolation, trade};
+use crate::core::trade;
 use serde::Deserialize;
 use blackscholes::BlackScholesPricer;
 use crate::core::data_models::EquityOptionData;
@@ -73,8 +74,9 @@ pub struct EquityOptionBase {
     pub volatility: f64,
     pub maturity_date: NaiveDate,
     pub valuation_date: NaiveDate,
-    pub term_structure: YieldTermStructure<f64>,
-    pub risk_free_rate: f64,
+    /// Discounting curve anchored at `valuation_date`; discount factors are
+    /// the source of truth, rates are derived views.
+    pub discount_curve: YieldCurve,
     pub entry_price: f64,
     pub long_short: LongShort,
     pub multiplier: f64,
@@ -99,11 +101,20 @@ impl EquityOption{
 impl EquityOption {
 
     pub fn from_json(data: &EquityOptionData) -> Box<EquityOption> {
-        let date = vec![0.01, 0.02, 0.05, 0.1, 0.5, 1.0, 2.0, 3.0];
-        let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
-        let ts = YieldTermStructure::new(date, rates);
+        let valuation_date = Local::now().date_naive();
+        let discount_curve = match &data.discount_curve {
+            Some(input) => YieldCurve::from_input(input, valuation_date)
+                .expect("Invalid discount curve"),
+            None => YieldCurve::flat(
+                data.base.risk_free_rate.unwrap_or(0.0),
+                valuation_date,
+                DayCountConvention::Act365,
+                Compounding::Continuous,
+            )
+            .expect("Invalid risk free rate"),
+        };
         let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d").expect("Invalid date format");
-        let mut base_option = EquityOptionBase {
+        let base_option = EquityOptionBase {
             symbol:data.base.symbol.clone(),
             currency: data.base.currency.clone(),
             exchange:data.base.exchange.clone(),
@@ -117,12 +128,11 @@ impl EquityOption {
             strike_price: data.strike_price,
             volatility: data.volatility,
             maturity_date,
-            risk_free_rate: data.base.risk_free_rate.unwrap_or(0.0),
+            discount_curve,
             entry_price: data.entry_price.unwrap_or(0.0),
             long_short: LongShort::LONG,
             dividend_yield: data.dividend.unwrap_or(0.0),
-            term_structure: ts,
-            valuation_date: Local::today().naive_utc(),
+            valuation_date,
             multiplier: data.multiplier.unwrap_or(1.0),
         };
         let payoff_type = &data.payoff_type.parse::<PayoffType>().unwrap();
@@ -158,7 +168,6 @@ impl EquityOption {
                 exercise_style:style})}
         };
 
-        base_option.set_risk_free_rate();
         let equityoption = EquityOption {
             base: base_option,
             payoff,
@@ -182,15 +191,21 @@ impl EquityOptionBase {
         let time_to_maturity = (self.maturity_date - self.valuation_date).num_days() as f64/365.0;
         time_to_maturity
     }
-    pub fn set_risk_free_rate(&mut self) {
-        let model = interpolation::CubicSpline::new(&self.term_structure.date, &self.term_structure.rates);
-        let r = model.interpolation(self.time_to_maturity());
-        self.risk_free_rate = r;
+    /// Discount factor from the valuation date to maturity, off the curve.
+    pub fn maturity_discount_factor(&self) -> f64 {
+        self.discount_curve.df(self.time_to_maturity())
+    }
+    /// Continuously compounded zero rate to maturity implied by the curve.
+    /// This is the `r` that enters d1/d2; it is consistent with
+    /// [`maturity_discount_factor`](Self::maturity_discount_factor) by construction.
+    pub fn risk_free_rate(&self) -> f64 {
+        self.discount_curve
+            .zero_rate_with(self.time_to_maturity(), Compounding::Continuous)
     }
     pub fn d1(&self) -> f64 {
         //Black-Scholes-Merton d1 function Parameters
         let d1_numerator = (self.underlying_price.value() / self.strike_price).ln()
-            + (self.risk_free_rate - self.dividend_yield + 0.5 * self.volatility.powi(2))
+            + (self.risk_free_rate() - self.dividend_yield + 0.5 * self.volatility.powi(2))
             * self.time_to_maturity();
 
         let d1_denominator = self.volatility * (self.time_to_maturity().sqrt());

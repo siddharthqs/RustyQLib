@@ -9,9 +9,9 @@ use crate::core::utils::{ContractStyle, dN, N};
 use crate::core::trade::{PutOrCall, Transection};
 use super::vanila_option::{EquityOption, EquityOptionBase, VanillaPayoff};
 use super::utils::{Engine, PayoffType, Payoff, LongShort};
-use super::super::core::termstructure::YieldTermStructure;
+use crate::core::curves::{Compounding, YieldCurve};
+use crate::core::daycount::DayCountConvention;
 use super::super::core::traits::{Instrument,Greeks};
-use super::super::core::interpolation;
 
 pub struct BlackScholesPricer;
 impl BlackScholesPricer {
@@ -56,7 +56,7 @@ impl BlackScholesPricer {
     }
     pub fn rho(&self, bsd_option: &EquityOption) -> f64 {
         match &bsd_option.payoff.payoff_kind() {
-            PayoffType::Vanilla => self.theta_vanilla(bsd_option),
+            PayoffType::Vanilla => self.rho_vanilla(bsd_option),
             _ => {0.0}
         }
     }
@@ -65,7 +65,7 @@ impl BlackScholesPricer {
         let n_d1 = N(bsd_option.base.d1());
         let n_d2 = N(bsd_option.base.d2());
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
-        let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
+        let df_r = bsd_option.base.maturity_discount_factor();
         match bsd_option.payoff.put_or_call() {
             PutOrCall::Call => {bsd_option.base.underlying_price.value()*n_d1 *df_d
                 -bsd_option.base.strike_price*n_d2*df_r
@@ -77,69 +77,64 @@ impl BlackScholesPricer {
         }
     }
     fn delta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
+        // spot delta: e^{-qT} N(d1) for a call, e^{-qT}(N(d1)-1) for a put
         let n_d1 = N(bsd_option.base.d1());
-
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
-        let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
 
         match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => {n_d1 *(df_r/df_d) }
-            PutOrCall::Put => {(n_d1-1.0) *(df_r/df_d) }
+            PutOrCall::Call => {n_d1 * df_d }
+            PutOrCall::Put => {(n_d1-1.0) * df_d }
         }
     }
     fn gamma_vanilla(&self, bsd_option: &EquityOption) -> f64 {
+        // e^{-qT} dN(d1) / (S sigma sqrt(T))
         let dn_d1 = dN(bsd_option.base.d1());
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
-        let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
-        let num = dn_d1*(df_r/df_d);
         let var_sqrt = bsd_option.base.volatility * (bsd_option.time_to_maturity().sqrt());
-        num/ (bsd_option.base.underlying_price.value() * var_sqrt)
+        dn_d1 * df_d / (bsd_option.base.underlying_price.value() * var_sqrt)
     }
     fn vega_vanilla(&self, bsd_option: &EquityOption) -> f64 {
+        // S e^{-qT} dN(d1) sqrt(T)
         let dn_d1 = dN(bsd_option.base.d1());
         let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
-        let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
-        let df_S = bsd_option.base.underlying_price.value()*df_r/df_d;
+        let df_S = bsd_option.base.underlying_price.value() * df_d;
         let vega = df_S * dn_d1 * bsd_option.time_to_maturity().sqrt();
         vega
     }
     fn theta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
-
-        //let vol_time_sqrt = bsd_option.base.volatility * (bsd_option.time_to_maturity().sqrt());
+        // call: -S e^{-qT} dN(d1) sigma/(2 sqrt(T)) + q S e^{-qT} N(d1) - r K e^{-rT} N(d2)
+        // put:  -S e^{-qT} dN(d1) sigma/(2 sqrt(T)) - q S e^{-qT} N(-d1) + r K e^{-rT} N(-d2)
+        let q = bsd_option.base.dividend_yield;
+        let r = bsd_option.base.risk_free_rate();
+        let k = bsd_option.base.strike_price;
         let dn_d1 = dN(bsd_option.base.d1());
         let n_d1 = N(bsd_option.base.d1());
         let n_d2 = N(bsd_option.base.d2());
-        let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
-        let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
-        let df_S = bsd_option.base.underlying_price.value()*df_r/df_d;
-        let t1 = -df_S*dn_d1  * bsd_option.base.volatility
+        let df_d = exp(-q * bsd_option.time_to_maturity());
+        let df_r = bsd_option.base.maturity_discount_factor();
+        let df_S = bsd_option.base.underlying_price.value() * df_d;
+        let t1 = -df_S * dn_d1 * bsd_option.base.volatility
             / (2.0 * bsd_option.time_to_maturity().sqrt());
 
         match bsd_option.payoff.put_or_call() {
             PutOrCall::Call => {
-                let t2 = -df_S*n_d1*(bsd_option.base.dividend_yield-bsd_option.base.risk_free_rate);
-                let t3 = -bsd_option.base.risk_free_rate*bsd_option.base.strike_price*df_r*n_d2;
-                t1+t2+t3
+                t1 + q * df_S * n_d1 - r * k * df_r * n_d2
             }
             PutOrCall::Put => {
-                let t2 = df_S*N(-bsd_option.base.d1())*(bsd_option.base.dividend_yield-bsd_option.base.risk_free_rate);
-                let t3 = bsd_option.base.risk_free_rate*bsd_option.base.strike_price*df_r*N(-bsd_option.base.d2());
-                t1+t2+t3
+                t1 - q * df_S * N(-bsd_option.base.d1()) + r * k * df_r * N(-bsd_option.base.d2())
             }
-
         }
     }
     fn rho_vanilla(&self, bsd_option: &EquityOption) -> f64 {
-        //let n_d1 = N(bsd_option.base.d1());
+        // call: K T e^{-rT} N(d2); put: -K T e^{-rT} N(-d2)
         let n_d2 = N(bsd_option.base.d2());
-        //let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
-        let df_r = exp(-bsd_option.base.risk_free_rate * bsd_option.time_to_maturity());
+        let df_r = bsd_option.base.maturity_discount_factor();
         let r1 = bsd_option.time_to_maturity()*bsd_option.base.strike_price;
         match bsd_option.payoff.put_or_call() {
             PutOrCall::Call => {
                 r1*n_d2*df_r
             }
-            PutOrCall::Put => {r1*N(-bsd_option.base.d2())*df_r
+            PutOrCall::Put => {-r1*N(-bsd_option.base.d2())*df_r
             }
 
         }
@@ -206,15 +201,16 @@ pub fn option_pricing() {
         .read_line(&mut div)
         .expect("Failed to read line");
 
-    //let ts = YieldTermStructure{
-    //    date: vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0],
-    //    rates: vec![0.01,0.02,0.05,0.07,0.08,0.1,0.11,0.12]
-    //};
-    let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
-    let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
-    let ts = YieldTermStructure::new(date,rates);
+    let valuation_date = Local::now().date_naive();
+    let discount_curve = YieldCurve::flat(
+        rf.trim().parse::<f64>().unwrap(),
+        valuation_date,
+        DayCountConvention::Act365,
+        Compounding::Continuous,
+    )
+    .expect("Invalid risk free rate");
     let curr_quote = Quote::new( curr_price.trim().parse::<f64>().unwrap());
-    let mut option = EquityOptionBase {
+    let option = EquityOptionBase {
 
         symbol:"ABC".to_string(),
         currency: None,
@@ -230,13 +226,11 @@ pub fn option_pricing() {
         strike_price: strike.trim().parse::<f64>().unwrap(),
         volatility: vol.trim().parse::<f64>().unwrap(),
         maturity_date: future_date,
-        risk_free_rate: rf.trim().parse::<f64>().unwrap(),
+        discount_curve,
         dividend_yield: div.trim().parse::<f64>().unwrap(),
-        term_structure: ts,
-        valuation_date: Local::today().naive_local(),
+        valuation_date,
         multiplier: 1.0,
     };
-    option.set_risk_free_rate();
     //println!("{:?}", option.time_to_maturity());
     let payoff = Box::new(VanillaPayoff{put_or_call:side,
                                     exercise_style:ContractStyle::European});
@@ -344,50 +338,106 @@ pub fn implied_volatility(){}
 //         .expect("Failed to read line");
 // }
 
-// #[cfg(test)]
-// mod tests {
-//
-//     use assert_approx_eq::assert_approx_eq;
-//     use super::*;
-//     use crate::core::utils::{Contract,MarketData};
-//     use crate::core::trade::{OptionType,Transection};
-//     use crate::core::utils::{ContractStyle};
-//     use crate::equity::vanila_option::{EquityOption};
-//
-//     #[test]
-//     fn test_black_scholes() {
-//         let mut data = Contract {
-//             action: "PV".to_string(),
-//             market_data: Some(MarketData {
-//                 underlying_price: 100.0,
-//                 strike_price: 100.0,
-//                 volatility: Some(0.3),
-//                 option_price: Some(10.0),
-//                 risk_free_rate: Some(0.05),
-//                 dividend: Some(0.0),
-//                 maturity: "2024-01-01".to_string(),
-//                 option_type: "C".to_string(),
-//                 simulation: None
-//             }),
-//             pricer: "Analytical".to_string(),
-//             asset: "".to_string(),
-//             style: Some("European".to_string()),
-//             rate_data: None
-//         };
-//
-//         let mut option = EquityOption::from_json(&data);
-//         option.valuation_date = NaiveDate::from_ymd(2023, 11, 06);
-//         //Call European test
-//         let npv = option.npv();
-//         assert_approx_eq!(npv, 5.05933313, 1e-6);
-//
-//         //Put European test
-//         option.option_type = OptionType::Put;
-//         option.style = ContractStyle::European;
-//         option.valuation_date = NaiveDate::from_ymd(2023, 11, 07);
-//         let npv = option.npv();
-//         assert_approx_eq!(npv,4.2601813, 1e-6);
-//
-//     }
-// }
 
+#[cfg(test)]
+mod tests {
+    use assert_approx_eq::assert_approx_eq;
+    use super::*;
+    use crate::core::curves::{Compounding, InterpolationMethod, Tenor, YieldCurve};
+    use crate::core::daycount::DayCountConvention;
+    use crate::core::utils::ContractStyle;
+
+    /// S=100, K=100, sigma=30%, q=0, T=1y (2026-01-01 -> 2027-01-01, Act/365).
+    fn test_option(put_or_call: PutOrCall, curve: YieldCurve) -> EquityOption {
+        let valuation_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let base = EquityOptionBase {
+            symbol: "TEST".to_string(),
+            currency: None,
+            exchange: None,
+            name: None,
+            cusip: None,
+            isin: None,
+            settlement_type: None,
+            underlying_price: Quote::new(100.0),
+            current_price: Quote::new(0.0),
+            strike_price: 100.0,
+            dividend_yield: 0.0,
+            volatility: 0.3,
+            maturity_date: NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+            valuation_date,
+            discount_curve: curve,
+            entry_price: 0.0,
+            long_short: LongShort::LONG,
+            multiplier: 1.0,
+        };
+        EquityOption {
+            base,
+            payoff: Box::new(VanillaPayoff {
+                put_or_call,
+                exercise_style: ContractStyle::European,
+            }),
+            engine: Engine::BlackScholes,
+            simulation: None,
+        }
+    }
+
+    fn flat_5pct() -> YieldCurve {
+        YieldCurve::flat(
+            0.05,
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+        )
+        .unwrap()
+    }
+
+    // Golden values computed independently (erf-based reference implementation)
+    #[test]
+    fn golden_call_npv_and_greeks() {
+        let option = test_option(PutOrCall::Call, flat_5pct());
+        assert_approx_eq!(option.npv(), 14.2312547860, 1e-8);
+        assert_approx_eq!(option.delta(), 0.6242517279, 1e-8);
+        assert_approx_eq!(option.gamma(), 0.0126477644, 1e-8);
+        assert_approx_eq!(option.vega(), 37.9432933117, 1e-8);
+        assert_approx_eq!(option.theta(), -8.1011898970, 1e-8);
+        assert_approx_eq!(option.rho(), 48.1939180046, 1e-8);
+    }
+
+    #[test]
+    fn golden_put_npv_and_greeks() {
+        let option = test_option(PutOrCall::Put, flat_5pct());
+        assert_approx_eq!(option.npv(), 9.3541972361, 1e-8);
+        assert_approx_eq!(option.delta(), -0.3757482721, 1e-8);
+        assert_approx_eq!(option.gamma(), 0.0126477644, 1e-8);
+        assert_approx_eq!(option.vega(), 37.9432933117, 1e-8);
+        assert_approx_eq!(option.theta(), -3.3450427745, 1e-8);
+        assert_approx_eq!(option.rho(), -46.9290244455, 1e-8);
+    }
+
+    #[test]
+    fn put_call_parity() {
+        let call = test_option(PutOrCall::Call, flat_5pct());
+        let put = test_option(PutOrCall::Put, flat_5pct());
+        let s = call.base.underlying_price.value();
+        let k_df = call.base.strike_price * call.base.maturity_discount_factor();
+        assert_approx_eq!(call.npv() - put.npv(), s - k_df, 1e-10);
+    }
+
+    #[test]
+    fn zero_curve_prices_off_maturity_pillar() {
+        // A non-flat zero curve whose 1y pillar is 5% must reproduce the
+        // flat-5% price: discounting reads df at maturity, not any other node.
+        let curve = YieldCurve::from_zero_rates(
+            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0), Tenor::YearFraction(2.0)],
+            &[0.02, 0.05, 0.07],
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+            InterpolationMethod::LogLinearDf,
+        )
+        .unwrap();
+        let option = test_option(PutOrCall::Call, curve);
+        assert_approx_eq!(option.npv(), 14.2312547860, 1e-8);
+        assert_approx_eq!(option.base.risk_free_rate(), 0.05, 1e-12);
+    }
+}

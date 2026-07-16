@@ -1,11 +1,8 @@
 //mod dis{
-use libm::{exp, log};
-use probability;
-use probability::distribution::Distribution;
+use libm::erf;
 use std::f64::consts::{PI, SQRT_2};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::core::data_models::ProductData;
-use crate::Deserialize;
 
 #[derive(PartialEq,Clone,Debug)]
 pub enum ContractStyle {
@@ -104,16 +101,14 @@ pub struct ContractOutput {
     pub error: Option<String>
 }
 
+/// Probability density function of a standard normal random variable x.
 pub fn dN(x: f64) -> f64 {
-    /// Probability density function of standard normal random variable x.
     let t = -0.5 * x * x;
     return t.exp() / (SQRT_2 * PI.sqrt());
 }
 
+/// Cumulative distribution function of a standard normal random variable x.
 pub fn N(x: f64) -> f64 {
-    ///Cumulative density function of standard normal random variable x.
-    let m = probability::distribution::Gaussian::new(0.0, 1.0);
-    let cdf = m.distribution(x);
-    return cdf;
+    0.5 * (1.0 + erf(x / SQRT_2))
 }
 

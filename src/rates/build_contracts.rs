@@ -11,14 +11,14 @@ pub fn build_ir_contracts(data: Contract) -> Box<dyn Rates> {
     let rate_data = data.rate_data.clone().unwrap();
     let mut start_date_str = rate_data.start_date; // Only for 0M case
     let mut maturity_date_str = rate_data.maturity_date;
-    let current_date = Local::today();
+    let current_date = Local::now().date_naive();
     let maturity_date = rates::utils::convert_mm_to_date(maturity_date_str);
     let start_date = rates::utils::convert_mm_to_date(start_date_str);
     if rate_data.instrument.as_str() == "Deposit" {
         let mut deposit = Deposit {
             start_date: start_date,
             maturity_date: maturity_date,
-            valuation_date: current_date.naive_utc(),
+            valuation_date: current_date,
             notional: rate_data.notional,
             fix_rate: rate_data.fix_rate,
             day_count: rates::utils::DayCountConvention::Act360,
@@ -49,7 +49,7 @@ pub fn build_ir_contracts(data: Contract) -> Box<dyn Rates> {
         let mut fra = FRA {
             start_date: start_date,
             maturity_date: maturity_date,
-            valuation_date: current_date.naive_utc(),
+            valuation_date: current_date,
             notional: rate_data.notional,
             currency: rate_data.currency,
             fix_rate: rate_data.fix_rate,

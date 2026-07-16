@@ -8,6 +8,6 @@ pub mod build_contracts;
 pub mod vol_surface;
 pub mod finite_difference;
 pub mod binary_option;
-mod equity_future;
+pub mod equity_future;
 pub mod handle_equity_contracts;
-mod equity_forward;
+pub mod equity_forward;
