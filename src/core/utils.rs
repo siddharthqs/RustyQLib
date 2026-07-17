@@ -104,11 +104,72 @@ pub struct ContractOutput {
 /// Probability density function of a standard normal random variable x.
 pub fn dN(x: f64) -> f64 {
     let t = -0.5 * x * x;
-    return t.exp() / (SQRT_2 * PI.sqrt());
+    t.exp() / (SQRT_2 * PI.sqrt())
 }
 
 /// Cumulative distribution function of a standard normal random variable x.
 pub fn N(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / SQRT_2))
+}
+
+/// Inverse of the standard normal CDF (quantile function).
+///
+/// Acklam's rational approximation refined with one Halley step against the
+/// erf-based [`N`], giving close to machine precision. `p` must be in (0, 1);
+/// values outside return NaN.
+pub fn inv_N(p: f64) -> f64 {
+    if !(p > 0.0 && p < 1.0) {
+        return f64::NAN;
+    }
+    const A: [f64; 6] = [
+        -3.969683028665376e+01,
+        2.209460984245205e+02,
+        -2.759285104469687e+02,
+        1.383577518672690e+02,
+        -3.066479806614716e+01,
+        2.506628277459239e+00,
+    ];
+    const B: [f64; 5] = [
+        -5.447609879822406e+01,
+        1.615858368580409e+02,
+        -1.556989798598866e+02,
+        6.680131188771972e+01,
+        -1.328068155288572e+01,
+    ];
+    const C: [f64; 6] = [
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e+00,
+        -2.549732539343734e+00,
+        4.374664141464968e+00,
+        2.938163982698783e+00,
+    ];
+    const D: [f64; 4] = [
+        7.784695709041462e-03,
+        3.224671290700398e-01,
+        2.445134137142996e+00,
+        3.754408661907416e+00,
+    ];
+    const P_LOW: f64 = 0.02425;
+
+    let tail = |q: f64| -> f64 {
+        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    };
+    let mut x = if p < P_LOW {
+        tail((-2.0 * p.ln()).sqrt())
+    } else if p <= 1.0 - P_LOW {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+    } else {
+        -tail((-2.0 * (1.0 - p).ln()).sqrt())
+    };
+    // one Halley refinement step
+    let e = N(x) - p;
+    let u = e * (2.0 * PI).sqrt() * (x * x / 2.0).exp();
+    x -= u / (1.0 + x * u / 2.0);
+    x
 }
 

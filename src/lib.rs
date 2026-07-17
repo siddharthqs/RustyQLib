@@ -29,3 +29,4 @@ pub mod utils;
 pub use crate::core::curves::{Compounding, CurveInput, InterpolationMethod, Tenor, YieldCurve};
 pub use crate::core::daycount::DayCountConvention;
 pub use crate::core::traits::Instrument;
+pub use crate::core::vols::{VolInput, VolSurface};

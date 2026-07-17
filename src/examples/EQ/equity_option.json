@@ -29,7 +29,6 @@
         "put_or_call": "P",
         "payoff_type": "vanilla",
         "strike_price": 100.0,
-        "volatility": 0.4,
         "maturity": "2027-03-31",
         "dividend": 0.01,
         "exercise_style": "European",
@@ -39,6 +38,17 @@
           "tenors": [0.25, 0.5, 1.0, "2028-03-31"],
           "rates": [0.045, 0.05, 0.055, 0.06],
           "compounding": "continuous",
+          "day_count": "Act365"
+        },
+        "vol_surface": {
+          "type": "strike_expiry",
+          "expiries": [0.25, 1.0, 2.0],
+          "strikes": [80.0, 90.0, 100.0, 110.0, 120.0],
+          "vols": [
+            [0.46, 0.43, 0.40, 0.38, 0.37],
+            [0.44, 0.42, 0.40, 0.39, 0.38],
+            [0.43, 0.41, 0.40, 0.39, 0.39]
+          ],
           "day_count": "Act365"
         }
       }

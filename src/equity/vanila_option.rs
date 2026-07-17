@@ -3,6 +3,7 @@ use chrono::{Datelike, Local, NaiveDate};
 use crate::equity::{binomial,finite_difference,montecarlo};
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
+use crate::core::vols::VolSurface;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::{Instrument,Greeks};
 use super::blackscholes;
@@ -35,13 +36,10 @@ pub struct AsianPayoff {
     pub exercise_style: ContractStyle,
 }
 impl Payoff for VanillaPayoff {
-    fn payoff_amount(&self, base: &EquityOptionBase) -> f64 {
-        // implement vanilla payoff
-        let intrinsic_value = base.underlying_price.value() - base.strike_price;
+    fn payoff(&self, spot: f64, strike: f64) -> f64 {
         match &self.put_or_call {
-            PutOrCall::Call=> intrinsic_value.max(0.0),
-            PutOrCall::Put=> (-intrinsic_value).max(0.0),
-            _=>0.0
+            PutOrCall::Call => (spot - strike).max(0.0),
+            PutOrCall::Put => (strike - spot).max(0.0),
         }
     }
     fn payoff_kind(&self) -> PayoffType {
@@ -54,6 +52,27 @@ impl Payoff for VanillaPayoff {
         &self.exercise_style
     }
 
+}
+
+/// Cash-or-nothing binary: pays one unit of currency if the option finishes
+/// in the money (strictly beyond the strike), nothing otherwise.
+impl Payoff for BinaryPayoff {
+    fn payoff(&self, spot: f64, strike: f64) -> f64 {
+        let in_the_money = match &self.put_or_call {
+            PutOrCall::Call => spot > strike,
+            PutOrCall::Put => spot < strike,
+        };
+        if in_the_money { 1.0 } else { 0.0 }
+    }
+    fn payoff_kind(&self) -> PayoffType {
+        PayoffType::Binary
+    }
+    fn put_or_call(&self) -> &PutOrCall {
+        &self.put_or_call
+    }
+    fn exercise_style(&self) -> &ContractStyle {
+        &self.exercise_style
+    }
 }
 
 #[derive(Debug)]
@@ -71,7 +90,8 @@ pub struct EquityOptionBase {
     pub current_price: Quote,
     pub strike_price: f64,
     pub dividend_yield: f64,
-    pub volatility: f64,
+    /// Volatility surface; a flat surface represents a single constant vol.
+    pub vol_surface: VolSurface,
     pub maturity_date: NaiveDate,
     pub valuation_date: NaiveDate,
     /// Discounting curve anchored at `valuation_date`; discount factors are
@@ -87,15 +107,15 @@ pub struct EquityOption {
     pub base: EquityOptionBase,
     pub payoff: Box<dyn Payoff>,
     pub engine: Engine,
-    pub simulation: Option<u64>,
-
+    /// Monte Carlo settings (paths, time steps, scheme, sampler, seed);
+    /// only consulted when `engine` is [`Engine::MonteCarlo`].
+    pub mc: montecarlo::MonteCarloConfig,
 }
 impl EquityOption{
     pub fn time_to_maturity(&self) -> f64{
         let time_to_maturity = (self.base.maturity_date - self.base.valuation_date).num_days() as f64/365.0;
         time_to_maturity
     }
-
 
 }
 impl EquityOption {
@@ -113,6 +133,17 @@ impl EquityOption {
             )
             .expect("Invalid risk free rate"),
         };
+        let vol_surface = match &data.vol_surface {
+            Some(input) => VolSurface::from_input(input, valuation_date)
+                .expect("Invalid vol surface"),
+            None => VolSurface::flat(
+                data.volatility
+                    .expect("Either volatility or vol_surface must be provided"),
+                valuation_date,
+                DayCountConvention::Act365,
+            )
+            .expect("Invalid volatility"),
+        };
         let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d").expect("Invalid date format");
         let base_option = EquityOptionBase {
             symbol:data.base.symbol.clone(),
@@ -126,7 +157,7 @@ impl EquityOption {
             underlying_price: Quote::new(data.base.underlying_price),
             current_price: Quote::new(data.current_price.unwrap_or(0.0)),
             strike_price: data.strike_price,
-            volatility: data.volatility,
+            vol_surface,
             maturity_date,
             discount_curve,
             entry_price: data.entry_price.unwrap_or(0.0),
@@ -160,12 +191,10 @@ impl EquityOption {
             PayoffType::Vanilla => Box::new(VanillaPayoff{
                 put_or_call:side,
                 exercise_style:style}),
-            //Ok(PayoffType::Binary) => Box::new(BinaryPayoff{option_type:side}),
-            //Ok(PayoffType::Barrier) => Box::new(BarrierPayoff{option_type:side}),
-            //Ok(PayoffType::Asian) => Box::new(AsianPayoff{option_type:side}),
-            _ => {Box::new(VanillaPayoff{
+            PayoffType::Binary => Box::new(BinaryPayoff{
                 put_or_call:side,
-                exercise_style:style})}
+                exercise_style:style}),
+            _ => panic!("Payoff type not implemented yet (supported: vanilla, binary)"),
         };
 
         let equityoption = EquityOption {
@@ -180,7 +209,7 @@ impl EquityOption {
                     panic!("Invalid pricer");
                 }
             },
-            simulation: None
+            mc: montecarlo::MonteCarloConfig::from_data(data)
         };
         Box::new(equityoption)
     }
@@ -202,17 +231,30 @@ impl EquityOptionBase {
         self.discount_curve
             .zero_rate_with(self.time_to_maturity(), Compounding::Continuous)
     }
+    /// Forward price of the underlying at maturity implied by the discount
+    /// curve and dividend yield: `S * exp((r - q) * T)`.
+    pub fn forward_price(&self) -> f64 {
+        let t = self.time_to_maturity();
+        self.underlying_price.value() * ((self.risk_free_rate() - self.dividend_yield) * t).exp()
+    }
+    /// Black volatility for this option's strike and expiry, read off the
+    /// surface (a flat surface returns its single vol).
+    pub fn volatility(&self) -> f64 {
+        self.vol_surface
+            .vol(self.strike_price, self.forward_price(), self.time_to_maturity())
+    }
     pub fn d1(&self) -> f64 {
         //Black-Scholes-Merton d1 function Parameters
+        let volatility = self.volatility();
         let d1_numerator = (self.underlying_price.value() / self.strike_price).ln()
-            + (self.risk_free_rate() - self.dividend_yield + 0.5 * self.volatility.powi(2))
+            + (self.risk_free_rate() - self.dividend_yield + 0.5 * volatility.powi(2))
             * self.time_to_maturity();
 
-        let d1_denominator = self.volatility * (self.time_to_maturity().sqrt());
+        let d1_denominator = volatility * (self.time_to_maturity().sqrt());
         return d1_numerator / d1_denominator;
     }
     pub fn d2(&self) -> f64 {
-        let d2 = self.d1() - self.volatility * self.time_to_maturity().powf(0.5);
+        let d2 = self.d1() - self.volatility() * self.time_to_maturity().powf(0.5);
         return d2;
     }
 }
@@ -227,100 +269,96 @@ impl EquityOption {
         }
     }
     
+    /// Implied Black-Scholes volatility for `option_price` (safeguarded
+    /// Newton with arbitrage-bound checks); does not modify the option.
+    pub fn try_imp_vol(&self, option_price: f64) -> Result<f64, String> {
+        blackscholes::implied_vol_from_price(
+            self.base.underlying_price.value(),
+            self.base.strike_price,
+            self.base.risk_free_rate(),
+            self.base.dividend_yield,
+            self.time_to_maturity(),
+            option_price,
+            *self.payoff.put_or_call(),
+        )
+    }
+    /// Implied vol for `option_price`; leaves the option holding a flat
+    /// surface at the solved vol. Panics on arbitrage-violating prices —
+    /// use [`try_imp_vol`](Self::try_imp_vol) to handle those gracefully.
     pub fn imp_vol(&mut self,option_price:f64) -> f64 {
-        for i in 0..100{
-            let d_sigma = (self.npv()-option_price)/self.vega();
-            self.base.volatility -= d_sigma
-        }
-        self.base.volatility
+        let vol = self.try_imp_vol(option_price).expect("implied vol solve failed");
+        self.set_flat_vol(vol.max(1e-8));
+        vol
     }
     pub fn get_imp_vol(&mut self) -> f64 {
-        for i in 0..100{
-            let d_sigma = (self.npv()-self.base.current_price.value)/self.vega();
-            self.base.volatility -= d_sigma
-        }
-        self.base.volatility
+        let target = self.base.current_price.value;
+        self.imp_vol(target)
+    }
+    fn set_flat_vol(&mut self, vol: f64) {
+        self.base.vol_surface = VolSurface::flat(
+            vol,
+            self.base.vol_surface.reference_date(),
+            self.base.vol_surface.day_count(),
+        )
+        .expect("vol must be positive");
     }
 }
 
 
 impl Instrument for EquityOption  {
     fn npv(&self) -> f64 {
+        let american = matches!(self.payoff.exercise_style(), ContractStyle::American);
         match self.engine {
             Engine::BlackScholes => {
-                let pricer = BlackScholesPricer::new();
-                let value = pricer.npv(&self);
-                value
+                if american {
+                    panic!(
+                        "Analytical engine cannot price American exercise; \
+                         use Binomial, FiniteDifference or MonteCarlo"
+                    );
+                }
+                BlackScholesPricer::new().npv(&self)
             }
-            _ => { 0.0 }
+            Engine::MonteCarlo => montecarlo::npv(&self),
+            Engine::Binomial => binomial::npv(&self),
+            Engine::FiniteDifference => finite_difference::npv(&self),
         }
-        //     Engine::MonteCarlo => {
-        //
-        //         let value = montecarlo::npv(&self,false);
-        //         value
-        //     }
-        //     Engine::Binomial => {
-        //
-        //         let value = binomial::npv(&self);
-        //         value
-        //     }
-        //     Engine::FiniteDifference => {
-        //         let value = finite_difference::npv(&self);
-        //         value
-        //     }
-
     }
 }
 
+/// Greeks: the Monte Carlo engine computes its own bump-and-reprice Greeks
+/// with common random numbers (and so supports American exercise via
+/// Longstaff-Schwartz repricing); the other engines use the analytic
+/// Black-Scholes closed forms, which are the correct European
+/// sensitivities regardless of which engine produced the NPV.
 impl EquityOption {
     pub fn delta(&self) -> f64 {
         match self.engine {
-            Engine::BlackScholes => {
-                let pricer = BlackScholesPricer::new();
-                let value = pricer.delta(&self);
-                value
-            }
-            _ => { 0.0 }
+            Engine::MonteCarlo => montecarlo::delta(&self),
+            _ => BlackScholesPricer::new().delta(&self),
         }
     }
     pub fn gamma(&self) -> f64 {
         match self.engine {
-            Engine::BlackScholes => {
-                let pricer = BlackScholesPricer::new();
-                let value = pricer.gamma(&self);
-                value
-            }
-            _ => { 0.0 }
+            Engine::MonteCarlo => montecarlo::gamma(&self),
+            _ => BlackScholesPricer::new().gamma(&self),
         }
     }
     pub fn vega(&self) -> f64 {
         match self.engine {
-            Engine::BlackScholes => {
-                let pricer = BlackScholesPricer::new();
-                let value = pricer.vega(&self);
-                value
-            }
-            _ => { 0.0 }
+            Engine::MonteCarlo => montecarlo::vega(&self),
+            _ => BlackScholesPricer::new().vega(&self),
         }
     }
     pub fn theta(&self) -> f64 {
         match self.engine {
-            Engine::BlackScholes => {
-                let pricer = BlackScholesPricer::new();
-                let value = pricer.theta(&self);
-                value
-            }
-            _ => { 0.0 }
+            Engine::MonteCarlo => montecarlo::theta(&self),
+            _ => BlackScholesPricer::new().theta(&self),
         }
     }
     pub fn rho(&self) -> f64 {
         match self.engine {
-            Engine::BlackScholes => {
-                let pricer = BlackScholesPricer::new();
-                let value = pricer.rho(&self);
-                value
-            }
-            _ => { 0.0 }
+            Engine::MonteCarlo => montecarlo::rho(&self),
+            _ => BlackScholesPricer::new().rho(&self),
         }
     }
 }

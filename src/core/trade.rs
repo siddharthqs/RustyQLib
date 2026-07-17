@@ -4,7 +4,7 @@ pub enum Transection {
     Sell,
 }
 
-#[derive(PartialEq, Debug,Clone)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum PutOrCall {
     Call,
     Put,

@@ -1,4 +1,5 @@
 pub mod blackscholes;
+pub mod local_vol;
 pub mod vanila_option;
 pub mod montecarlo;
 pub mod forward_start_option;

@@ -1,81 +1,63 @@
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
-use crate::rates::utils::{DayCountConvention};
-use chrono::{NaiveDate};
-use crate::core::trade::PutOrCall;
-use crate::equity::utils::Payoff;
-use super::vanila_option::{EquityOption};
+//! Implied volatility surface construction from quoted options.
+//!
+//! Takes a list of options carrying market prices (`current_price`), solves
+//! each for its Black-Scholes implied vol (robust safeguarded Newton), and
+//! assembles the per-maturity smiles into a canonical
+//! [`crate::core::vols::VolSurface`] on absolute strikes — the same type
+//! the pricers consume, so a built surface can immediately price other
+//! options (including through the Dupire local vol model).
 
-/// Vol Surface is a collection of volatilities for different maturities and strikes
-#[derive(Clone,Debug,Serialize,Deserialize)]
-pub struct VolSurface{
-    pub term_structure: BTreeMap<NaiveDate, Vec<(f64,f64)>>,
-    pub spot: f64,
-    pub spot_date: NaiveDate,
-    pub day_count: DayCountConvention,
-}
+use std::collections::BTreeMap;
+use chrono::NaiveDate;
 
-impl VolSurface {
-    pub fn new(term_structure: BTreeMap<NaiveDate, Vec<(f64,f64)>>,spot:f64,spot_date:NaiveDate,day_count:DayCountConvention) -> VolSurface {
-        VolSurface {
-            term_structure,
-            spot,
-            spot_date,
-            day_count
+use crate::core::curves::Tenor;
+use crate::core::daycount::DayCountConvention;
+use crate::core::vols::VolSurface;
+use super::vanila_option::EquityOption;
+
+/// Build an implied vol surface from quoted options. Quotes without a
+/// positive market price or violating arbitrage bounds are skipped (with a
+/// warning); at least one valid quote is required.
+pub fn build_implied_vol_surface(contracts: &[Box<EquityOption>]) -> Result<VolSurface, String> {
+    if contracts.is_empty() {
+        return Err("no contracts provided".to_string());
+    }
+    let reference_date = contracts[0].base.valuation_date;
+    let mut smiles: BTreeMap<NaiveDate, Vec<(f64, f64)>> = BTreeMap::new();
+    let mut skipped = 0usize;
+
+    for option in contracts {
+        let target = option.base.current_price.value();
+        if target <= 0.0 {
+            skipped += 1;
+            continue;
         }
-    }
-    pub fn get_vol(&self,val_date:NaiveDate,maturity_date:NaiveDate,strike:f64)-> f64{
-        //TODO: Interpolate Vol Surface
-        0.0
-    }
-    pub fn get_year_fraction(&self,val_date:NaiveDate,maturity_date:NaiveDate) -> f64 {
-        self.day_count.get_year_fraction(val_date,maturity_date)
-    }
-    pub fn build_eq_vol(mut contracts:Vec<Box<EquityOption>>) -> VolSurface {
-        let mut vol_tree:BTreeMap<NaiveDate,Vec<(f64,f64)>> = BTreeMap::new();
-        let spot_date = contracts[0].base.valuation_date;
-        let spot_price = contracts[0].base.underlying_price.value;
-        for i in 0..contracts.len(){
-            let mut moneyness=1.0;
-            let mut contract = contracts[i].as_mut();
-            match contract.payoff.put_or_call(){
-                PutOrCall::Call => {
-                    moneyness = contract.base.underlying_price.value / contract.base.strike_price as f64;
-
-                },
-                PutOrCall::Put => {
-                    moneyness = contract.base.strike_price / contract.base.underlying_price.value  as f64;
-                }
-                _ => {
-                    panic!("Option type not supported");
-                }
+        match option.try_imp_vol(target) {
+            Ok(vol) => smiles
+                .entry(option.base.maturity_date)
+                .or_default()
+                .push((option.base.strike_price, vol)),
+            Err(err) => {
+                eprintln!(
+                    "skipping quote {} K={} T={}: {err}",
+                    option.base.symbol, option.base.strike_price, option.base.maturity_date
+                );
+                skipped += 1;
             }
-            let volatility = contract.get_imp_vol();
-            let maturity = contract.base.maturity_date;
-            vol_tree.entry(maturity).or_insert(Vec::new()).push((moneyness,volatility));
         }
-        let vol_surface:VolSurface = VolSurface::new(vol_tree, spot_price, spot_date,
-                                                     DayCountConvention::Act365);
-        return vol_surface;
+    }
+    if smiles.is_empty() {
+        return Err(format!("no valid quotes ({skipped} skipped)"));
     }
 
+    let mut tenors = Vec::new();
+    let mut smile_points = Vec::new();
+    for (maturity, mut points) in smiles {
+        points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9);
+        tenors.push(Tenor::Date(maturity));
+        smile_points.push(points);
+    }
+    VolSurface::from_strike_smiles(&tenors, &smile_points, reference_date, DayCountConvention::Act365)
+        .map_err(|e| e.to_string())
 }
-
-// #[cfg(test)]
-// mod tests{
-//     use super::*;
-//     use crate::core::quotes::Quote;
-//     use crate::core::utils::{Contract,ContractStyle};
-//     use crate::equity::utils::{Engine};
-//     use crate::core::trade::OptionType;
-//     use crate::core::trade::OptionStyle;
-//     use crate::core::trade::OptionStyle::European;
-//
-//     #[test]
-//     fn test_build_eq_vol(){
-//         // write a unit test for this function
-//         let mut contract = C
-//         let mut contracts:Vec<Box<EquityOption>> = Vec::new();
-//
-//
-// }

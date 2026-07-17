@@ -24,7 +24,7 @@ use crate::rates;
 use crate::rates::deposits::Deposit;
 use crate::rates::build_contracts::{build_ir_contracts, build_ir_contracts_from_json, build_term_structure};
 use crate::equity::build_contracts::{build_eq_contracts_from_json};
-use crate::equity::vol_surface::VolSurface;
+use crate::core::vols::VolSurface;
 use crate::equity::handle_equity_contracts::handle_equity_contract;
 
 use rayon::prelude::*;
@@ -54,9 +54,11 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
         panic!("No contracts found in JSON file");
     }
     else if list_contracts.asset=="EQ"{
-        println!("Building volatility surface");
-        let mut contracts:Vec<Box<EquityOption>> = build_eq_contracts_from_json(list_contracts.contracts);
-        let vol_surface = VolSurface::build_eq_vol(contracts);
+        println!("Building implied volatility surface");
+        let contracts:Vec<Box<EquityOption>> = build_eq_contracts_from_json(list_contracts.contracts);
+        let vol_surface = crate::equity::vol_surface::build_implied_vol_surface(&contracts)
+            .expect("Failed to build implied vol surface");
+        println!("{}", vol_surface);
         let serialized_vol_surface = serde_json::to_string(&vol_surface).unwrap();
         let out_dir = save_to_file(output_filename, "vol_surface", "vol_surface.json", &serialized_vol_surface);
         println!("Volatility surface saved to {}", out_dir);

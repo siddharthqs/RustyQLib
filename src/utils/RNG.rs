@@ -1,140 +1,109 @@
-use rand::Rng;
-use rand::distributions::{Standard,Uniform};
-use rand::distributions::Distribution;
+//! Normal draw generation for Monte Carlo pricing.
+//!
+//! Two samplers:
+//! - **Seeded pseudo-random** (PCG64): reproducible across runs, with
+//!   antithetic pairing and moment matching as variance reduction.
+//! - **Low-discrepancy** (1-D Sobol, i.e. the van der Corput base-2
+//!   sequence) mapped through the inverse normal CDF — near-O(1/n)
+//!   convergence for terminal-value (single-dimension) simulation.
+//!
+//! Multi-dimensional (path-wise) draws use the seeded pseudo-random
+//! generator; proper multi-dimensional Sobol with a Brownian bridge is
+//! future work.
+
+use rand::{Rng, SeedableRng};
 use rand_distr::StandardNormal;
-use std::f64::consts::PI;
-use libm::cos;
-use libm::sin;
-use std::io::Write; // bring trait into scope
-use byteorder::{ByteOrder, LittleEndian,BigEndian};
-use byteorder::WriteBytesExt;
-use byteorder::ReadBytesExt;
-use std::fs::File;
-use std::io::prelude::*;
-use std::fs;
-use std::path::Path;
-use std::env::temp_dir;
-/// Random Number Generator using marsaglia polar method
-fn generate_standard_normal_marsaglia_polar() -> (f64, f64) {
-    let mut rng = rand::thread_rng();
+use rand_pcg::Pcg64;
+
+use crate::core::utils::inv_N;
+
+/// Radical inverse in base 2 (van der Corput sequence) — the 1-D Sobol
+/// sequence. `i >= 1`; returns a value in (0, 1).
+fn van_der_corput_base2(mut i: u64) -> f64 {
+    let mut f = 0.5;
     let mut x = 0.0;
-    let mut y = 0.0;
-    let mut s = 0.0f64;
+    while i > 0 {
+        if i & 1 == 1 {
+            x += f;
+        }
+        i >>= 1;
+        f *= 0.5;
+    }
+    x
+}
 
-    while true {
-        x = Uniform::new(0.0,1.0).sample(&mut rng)*2.0 -1.0;
-        y = Uniform::new(0.0,1.0).sample(&mut rng)*2.0 -1.0;
-        s = x*x + y*y;
-        if s<1.0f64 && s != 0.0f64 {
-            break;
+/// `n` low-discrepancy standard normal draws (1-D Sobol through the
+/// inverse normal CDF). Deterministic.
+pub fn sobol_normals(n: usize) -> Vec<f64> {
+    (1..=n as u64).map(|i| inv_N(van_der_corput_base2(i))).collect()
+}
+
+/// `n` seeded pseudo-random standard normals with antithetic pairing and
+/// moment matching (mean 0, variance 1 exactly). Deterministic per seed.
+pub fn pseudo_normals(n: usize, seed: u64) -> Vec<f64> {
+    let mut rng = Pcg64::seed_from_u64(seed);
+    let mut draws = Vec::with_capacity(n + 1);
+    while draws.len() < n {
+        let z: f64 = rng.sample(StandardNormal);
+        draws.push(z);
+        draws.push(-z);
+    }
+    draws.truncate(n);
+    moment_match(&mut draws);
+    draws
+}
+
+/// `paths x steps` matrix of seeded pseudo-random standard normals for
+/// path-wise simulation. Deterministic per seed.
+pub fn pseudo_normal_matrix(paths: usize, steps: usize, seed: u64) -> Vec<Vec<f64>> {
+    let mut rng = Pcg64::seed_from_u64(seed);
+    (0..paths)
+        .map(|_| (0..steps).map(|_| rng.sample(StandardNormal)).collect())
+        .collect()
+}
+
+fn moment_match(draws: &mut [f64]) {
+    let n = draws.len() as f64;
+    let mean = draws.iter().sum::<f64>() / n;
+    let var = draws.iter().map(|z| (z - mean) * (z - mean)).sum::<f64>() / n;
+    let std = var.sqrt();
+    if std > 0.0 {
+        for z in draws.iter_mut() {
+            *z = (*z - mean) / std;
         }
     }
-    let i = ((-2.0 * s.ln()) / s).sqrt();
-    (i*x,i*y)
-
-}
-/// Random Number Generator using Box Muller method
-fn generate_standard_normal_box() -> (f64, f64) {
-    let mut rng = rand::thread_rng();
-
-    let r:f64 = Uniform::new(0.0,1.0).sample(&mut rng);
-    let p:f64 = Uniform::new(0.0,1.0).sample(&mut rng);
-
-    let tmp:f64 = (-2.0*r.ln()).sqrt();
-    (tmp*cos(p*2.0*PI),tmp*sin(p*2.0*PI))
-
 }
 
-pub struct MonteCarloSimulation{
-    pub antithetic:bool,
-    pub moment_matching:bool,
-    pub dimentation: u64,
-    pub size: u64,
-    pub standard_normal_vector: Vec<f64>,
-    pub standard_normal_matrix: Vec<Vec<f64>>
-}
-impl MonteCarloSimulation{
-    pub fn set_standard_normal_vector(&mut self) {
-        let mut dir = temp_dir();
-        dir.push("rng1d");
-        let rng_dir = dir.as_path();
-        if !rng_dir.exists() {
-            let _ = fs::create_dir(rng_dir);
-        }
-        dir.push("1dt.bin");
-        let path = dir.as_path();
-        let mut rn_vec:Vec<f64> = Vec::new();
-        if path.exists() {
-            rn_vec = read_from_file_byteorder(path).unwrap();
-            self.standard_normal_vector = rn_vec;
-        }
-        else{
-            let mut rng = rand::thread_rng();
-            let mut rn_vec:Vec<f64> = Vec::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            for i in 0..self.size{
-                let rn = rng.sample(StandardNormal);
-                rn_vec.push(rn);
-                if self.antithetic{
-                    rn_vec.push(-rn)
-                }
-            }
-            if self.moment_matching{
-                let sum = rn_vec.iter().sum::<f64>() as f64;
-                let mean = sum / rn_vec.len() as f64;
-                let variance = rn_vec.iter().map(|x| {
-                    let diff = mean -(*x as f64);
-                    diff*diff
-                }).sum::<f64>()/rn_vec.len() as f64;
-                let std_dev = variance.sqrt();
-                let mut mo_rn_vec = vec![];
-                for i in 0..rn_vec.len() {
-                    let mo_rn = (rn_vec[i]-mean)/std_dev as f64;
-                    mo_rn_vec.push(mo_rn)
-                }
-                rn_vec = mo_rn_vec;
-            }
-            self.standard_normal_vector = rn_vec.clone();
-            write_to_file_byteorder(&rn_vec, path).unwrap();
+    #[test]
+    fn van_der_corput_first_values() {
+        // 1/2, 1/4, 3/4, 1/8, 5/8, ...
+        let expected = [0.5, 0.25, 0.75, 0.125, 0.625];
+        for (i, want) in expected.iter().enumerate() {
+            assert_eq!(van_der_corput_base2(i as u64 + 1), *want);
         }
     }
-    pub fn get_standard_normal_vector(&self) ->&Vec<f64>{
-        let ptr = &self.standard_normal_vector;
-        ptr
+
+    #[test]
+    fn pseudo_normals_are_reproducible_and_standardized() {
+        let a = pseudo_normals(10_000, 42);
+        let b = pseudo_normals(10_000, 42);
+        assert_eq!(a, b);
+        let mean: f64 = a.iter().sum::<f64>() / a.len() as f64;
+        let var: f64 = a.iter().map(|z| z * z).sum::<f64>() / a.len() as f64;
+        assert!(mean.abs() < 1e-12);
+        assert!((var - 1.0).abs() < 1e-12);
     }
 
-}
-
-pub fn get_matrix_standard_normal(size_n:u64,size_m:u64)-> Vec<Vec<f64>> {
-    // let mut dir = temp_dir();
-    // dir.push("rng2d");
-    // dir.push("1dt.bin");
-    // let path = dir.as_path();
-
-    let mut rng = rand::thread_rng();
-    let mut rn_vec_n:Vec<Vec<f64>> = Vec::new();
-    for i in 0..size_n{
-        let mut rn_vec_m:Vec<f64> = Vec::new();
-        for j in 0..size_m{
-            rn_vec_m.push(rng.sample(StandardNormal));
-        }
-        rn_vec_n.push(rn_vec_m);
+    #[test]
+    fn sobol_normals_have_near_perfect_moments() {
+        let draws = sobol_normals(65_536);
+        let mean: f64 = draws.iter().sum::<f64>() / draws.len() as f64;
+        let var: f64 = draws.iter().map(|z| z * z).sum::<f64>() / draws.len() as f64;
+        assert!(mean.abs() < 1e-3, "mean {mean}");
+        assert!((var - 1.0).abs() < 1e-2, "var {var}");
     }
-    rn_vec_n
-}
-/// Write a vector of f64 to a file using BigEndian byte order
-fn write_to_file_byteorder<P: AsRef<Path>>(data: &[f64], path: P) -> std::io::Result<()> {
-    let mut file = File::create(path)?;
-    for f in data {
-        file.write_f64::<BigEndian>(*f)?;
-    }
-    Ok(())
-}
-/// Read a vector of f64 from a file using BigEndian byte order
-fn read_from_file_byteorder<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<f64>> {
-    let mut file = File::open(path)?;
-    let buf_len = file.metadata()?.len() / 8; // 8 bytes for one f64
-    let mut buf: Vec<f64> = vec![0.0; buf_len.try_into().unwrap()];
-    file.read_f64_into::<BigEndian>(&mut buf)?;
-    Ok(buf)
 }
