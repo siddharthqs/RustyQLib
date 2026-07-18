@@ -1,4 +1,7 @@
+pub mod asian;
+pub mod barrier;
 pub mod blackscholes;
+pub mod heston;
 pub mod local_vol;
 pub mod vanila_option;
 pub mod montecarlo;

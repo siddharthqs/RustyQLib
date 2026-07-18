@@ -1,0 +1,84 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "asian",
+        "averaging_type": "geometric",
+        "asian_strike_type": "fixed",
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-17",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "pricer": "Analytical"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "asian",
+        "averaging_type": "arithmetic",
+        "asian_strike_type": "fixed",
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-17",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "pricer": "Analytical"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "asian",
+        "averaging_type": "arithmetic",
+        "asian_strike_type": "fixed",
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-17",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "mc_time_steps": 252,
+        "pricer": "MC"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "P",
+        "payoff_type": "asian",
+        "averaging_type": "arithmetic",
+        "asian_strike_type": "floating",
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-17",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "pricer": "MC"
+      }
+    }
+  ]
+}

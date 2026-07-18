@@ -3,79 +3,176 @@
 ![Crates.io](https://img.shields.io/crates/dr/rustyqlib)
 ![Crates.io](https://img.shields.io/crates/v/rustyqlib)
 [![codecov](https://codecov.io/gh/siddharthqs/RustyQLib/graph/badge.svg?token=879K6LTTR4)](https://codecov.io/gh/siddharthqs/RustyQLib)
-# RUSTYQLib :Pricing Options with Confidence using JSON
-RustyQLib is a lightweight yet robust quantitative finance library designed for pricing options.
-Built entirely in Rust, it offers a unique combination of safety, performance, and expressiveness that is crucial
-for handling financial data and complex calculations. RustyQlib simplifies option pricing without compromising
-on safety, speed, or usability. It uses JSON to make distributed computing easier and integration with other systems or your websites.
-## License
-RustyQlib is distributed under the terms of both the MIT license and the Apache License (Version 2.0).
-See LICENSE-APACHE and LICENSE-MIT for details.
-## Running
-After cloning the repository and building you can run the following command:
+
+# RustyQLib — Pricing Options with Confidence using JSON
+
+RustyQLib is a lightweight quantitative finance library written entirely in Rust.
+It prices equity derivatives through JSON contracts (a stateless pricing service in a
+single binary) or as a Rust library, with an emphasis on numerically validated
+implementations: every pricer is cross-checked against independent oracles,
+put-call parity, replication identities and cross-engine agreement in the test suite.
+
+## Highlights
+
+- **Four pricing engines** — analytic closed forms, binomial tree, finite difference
+  (log-spot Crank-Nicolson with Rannacher smoothing), and parallel Monte Carlo —
+  behind one dispatch, so the same contract prices on any suitable engine.
+- **Three models** — Black-Scholes, **Dupire local volatility** (calibrated
+  non-parametrically from an implied vol surface), and **Heston stochastic
+  volatility** (semi-analytic characteristic-function pricing + Monte Carlo).
+- **Market-standard infrastructure** — discount curves with discount factors as the
+  source of truth (flat / zero rates / discount factors / forward rates in, any
+  compounding), volatility surfaces (flat, strike x expiry, moneyness, FX-style
+  delta quotes), robust implied vol, day counts, term-structure-consistent PDE
+  discounting.
+- **Payoffs**: European & American vanillas, cash- and asset-or-nothing binaries,
+  all eight barrier types (knock-in/out, up/down), Asian options (arithmetic /
+  geometric, fixed / floating strike).
+
+## Products and engines
+
+| Payoff | Analytic | Binomial | Finite difference | Monte Carlo |
+|---|---|---|---|---|
+| Vanilla European | Black-Scholes / Heston CF | yes | yes (grid Greeks) | yes (+ stderr) |
+| Vanilla American | — | yes | Brennan-Schwartz | two-pass Longstaff-Schwartz |
+| Binary (cash / asset) | closed form / Heston CF | yes | yes (Rannacher + cell averaging) | yes |
+| Barrier (8 types) | Reiner-Rubinstein | — | absorbing boundary / parity | Brownian-bridge corrected |
+| Asian (arith / geo, fixed / floating) | Turnbull-Wakeman / exact geometric | — | — | geometric control variate |
+
+Model availability: local vol runs on the FD and MC engines; Heston runs on the
+analytic (vanilla + binary) and MC engines (all payoffs above except American).
+
+### Engine details
+
+- **Finite difference**: theta-scheme in log-spot with per-node, per-step
+  coefficients (local vol ready), forward rates from the discount curve per time
+  step, cell-averaged terminal conditions for digitals, barrier-aligned absorbing
+  boundaries, and delta/gamma/theta read directly off the grid. Grid sizes are
+  configurable per contract.
+- **Monte Carlo**: deterministic per-path RNG streams (bit-reproducible under
+  rayon parallelism), low-discrepancy sampling through a Brownian bridge,
+  exact/Euler/Milstein stepping, antithetic + moment matching, geometric control
+  variates for Asians, Brownian-bridge barrier monitoring, and standard errors
+  reported with every price. Greeks via common-random-number bumps.
+- **Calibration workflow**: quoted option prices -> robust implied vols
+  (safeguarded Newton with arbitrage bounds) -> implied surface -> Dupire local
+  vol -> reprice anything, including barriers under smile dynamics.
+
+## Running the CLI
+
 ```bash
-rustyqlib file --input <FILE> --output <FILE>
-````
-and for pricing all contracts in a directory
-```bash
-rustyqlib dir --input <DIR> --output <DIR>
-```
-and for interactive mode
-```bash
+cargo build --release
+# price a single JSON file of contracts
+rustyqlib file --input contracts.json --output results.json
+# price every JSON file in a directory (parallel)
+rustyqlib dir --input contracts/ --output results/
+# build an implied vol surface from quoted options
+rustyqlib build --input quotes.json --output out/
+# guided pricing in the terminal
 rustyqlib interactive
 ```
-and for build mode to build vol surface or interest rate curve
-```bash
-rustyqlib build --input <FILE> --output <DIR>
+
+### Contract examples
+
+Vanilla European call priced analytically (a flat rate builds a flat curve):
+
+```json
+{
+  "asset": "EQ",
+  "contracts": [{
+    "action": "PV", "asset": "EQ",
+    "product_type": {
+      "product_type": "option", "symbol": "ABC",
+      "underlying_price": 100.0, "put_or_call": "C", "payoff_type": "vanilla",
+      "strike_price": 100.0, "volatility": 0.3, "maturity": "2027-07-17",
+      "risk_free_rate": 0.05, "dividend": 0.0, "pricer": "Analytical"
+    }
+  }]
+}
 ```
-Sample input file is provided in the repository (src\input\equity_option.json)
-Files are in JSON format and can be easily edited with any text editor.
-## Features
 
-### JSON Simplicity:
+The same contract can carry richer market data and model choices:
 
-- Ease of Use: Providing input data in JSON format is straightforward and human-readable.
-- Portability: JSON is a platform-independent format, so you can use it on any operating system.
-- Flexibility: JSON accommodates various data types and structures, enabling you to define not only the option details but also additional market data, historical information, and risk parameters as needed.
-- Integration-Ready: You can seamlessly connect it to data sources, trading platforms, or other financial systems, simplifying your workflow and enhancing automation.
+```json
+{
+  "discount_curve": { "type": "zero_rates", "tenors": [0.25, 1.0, "2029-07-17"],
+                      "rates": [0.045, 0.05, 0.055], "compounding": "continuous" },
+  "vol_surface":    { "type": "strike_expiry", "expiries": [0.5, 1.0],
+                      "strikes": [90.0, 100.0, 110.0],
+                      "vols": [[0.32, 0.30, 0.28], [0.33, 0.31, 0.30]] },
+  "mc_model": "heston",
+  "heston": { "v0": 0.09, "kappa": 2.0, "theta": 0.09, "vol_of_vol": 0.4, "rho": -0.7 },
+  "pricer": "MC", "simulation": 100000
+}
+```
 
-### Stypes:
-- [x] European
-- [x] American
-- [ ] Bermudan
-- [ ] Asian
+Selected fields (all optional unless noted):
 
-### Instruments:
-#### Equity
-- [x] Equity Forward
-- [x] Equity Future
-- [x] Equity Option
-- [ ] Equity Forward Start Option
-- [ ] Equity Basket
-- [ ] Equity Barrier
-- [ ] Equity Lookback
-- [ ] Equity Asian
-- [ ] Equity Rainbow
-- [ ] Equity Chooser
-#### Interest Rate
-- [x] Deposit
-- [ ] FRA
-- [ ] Interest Rate Swap
-#### Commodities
-- [x] Commodity Option
-- [ ] Commodity Forward Start Option
-- [ ] Commodity Barrier
-- [ ] Commodity Lookback
+| Field | Meaning |
+|---|---|
+| `pricer` | `Analytical`, `Binomial`, `FD`, `MC` |
+| `payoff_type` | `vanilla`, `binary`, `barrier`, `asian` |
+| `exercise_style` | `European` (default), `American` |
+| `binary_type`, `cash_amount` | `cash` / `asset`, cash paid when ITM |
+| `barrier_type`, `barrier_level` | `up_in`, `up_out`, `down_in`, `down_out` |
+| `averaging_type`, `asian_strike_type` | `arithmetic`/`geometric`, `fixed`/`floating` |
+| `discount_curve` | `flat`, `zero_rates`, `discount_factors`, `forward_rates` |
+| `vol_surface` | `flat`, `strike_expiry`, `moneyness_expiry`, `delta_expiry` |
+| `mc_model` | `gbm` (default), `local_vol`, `heston` (needs `heston` params) |
+| `simulation`, `mc_time_steps`, `mc_scheme`, `mc_sampler`, `mc_seed` | Monte Carlo controls |
+| `fd_spot_steps`, `fd_time_steps` | finite difference grid |
 
-### Pricing engines:
-- [x] Black Scholes
-- [x] Binomial Tree
-- [x] Monte Carlo
-- [ ] Finite Difference
-- [ ] Longstaff-Schwartz
-- [ ] Heston
-- [ ] Local Volatility
-- [ ] Stochastic Volatility
-- [ ] Jump Diffusion
+Working examples for every product live in [`src/examples/EQ/`](src/examples/EQ/).
+Monte Carlo outputs include the standard error (`std_err`) alongside price and Greeks.
 
+## Using it as a library
 
+```rust
+use rustyqlib::equity::vanila_option::EquityOption;
+use rustyqlib::core::data_models::EquityOptionData;
+use rustyqlib::Instrument;
+
+let contract: EquityOptionData = serde_json::from_str(r#"{
+    "symbol": "ABC", "underlying_price": 100.0,
+    "put_or_call": "C", "payoff_type": "vanilla",
+    "strike_price": 100.0, "volatility": 0.3,
+    "maturity": "2027-07-17", "risk_free_rate": 0.05,
+    "pricer": "Analytical"
+}"#).unwrap();
+
+let option = EquityOption::from_json(&contract);
+println!("pv {:.6}  delta {:.4}", option.npv(), option.delta());
+```
+
+Lower-level building blocks are exported directly: `YieldCurve`, `VolSurface`,
+`DayCountConvention`, the `Payoff` trait, Dupire `LocalVol`, `HestonParams`, and
+the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo`).
+
+## Design principles
+
+- **Discount factors are state, rates are views** — curves store pillar dfs;
+  zero/forward rates in any compounding are derived on demand. Vol surfaces
+  canonicalize every quoting style into per-expiry smiles with total-variance
+  time interpolation.
+- **One payoff trait, every engine** — payoffs implement `payoff(spot, strike)`
+  and (for path dependence) `path_payoff(path, strike)`; adding a payoff makes it
+  price on every compatible engine without engine changes.
+- **Validated numerics** — golden values against independently coded oracles,
+  parity and replication identities at 1e-10, cross-engine agreement tests, and
+  bit-reproducible Monte Carlo. Engines refuse unsupported combinations with a
+  clear error instead of silently mispricing.
+
+## Roadmap
+
+- Andersen QE scheme and American exercise (LSMC) under Heston; 2-D ADI finite
+  difference for stochastic vol
+- Barrier rebates, double/window barriers, seasoned Asians
+- Rates: curve bootstrapping from deposits/FRAs/swaps onto the core curve type,
+  swaps and swaptions; FX (Garman-Kohlhagen)
+- SVI smile parameterization with no-arbitrage checks; pathwise / likelihood-ratio
+  Greeks; multi-asset payoffs
+- `Result`-based error API for the library surface
+
+## License
+
+MIT — see [License](License).

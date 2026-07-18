@@ -1,0 +1,74 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "barrier",
+        "barrier_type": "down_out",
+        "barrier_level": 90.0,
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-17",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "pricer": "Analytical"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "barrier",
+        "barrier_type": "down_out",
+        "barrier_level": 90.0,
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-17",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "pricer": "MC"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "P",
+        "payoff_type": "barrier",
+        "barrier_type": "up_in",
+        "barrier_level": 115.0,
+        "strike_price": 100.0,
+        "maturity": "2027-07-17",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "mc_model": "local_vol",
+        "pricer": "MC",
+        "vol_surface": {
+          "type": "strike_expiry",
+          "expiries": [0.5, 1.0, 2.0],
+          "strikes": [80.0, 90.0, 100.0, 110.0, 120.0],
+          "vols": [
+            [0.34, 0.32, 0.30, 0.29, 0.28],
+            [0.34, 0.32, 0.30, 0.29, 0.28],
+            [0.34, 0.32, 0.30, 0.29, 0.28]
+          ]
+        }
+      }
+    }
+  ]
+}

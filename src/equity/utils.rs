@@ -49,15 +49,22 @@ impl FromStr for PayoffType {
 /// [`path_payoff`](Payoff::path_payoff), which defaults to evaluating the
 /// terminal payoff on the last point of the path. Engines only ever call
 /// these two methods, so a new payoff plugs into every engine at once.
-pub trait Payoff: Debug {
+pub trait Payoff: Debug + Send + Sync {
     /// Payoff for a given level of the underlying: the terminal spot for
     /// European exercise, or the exercise spot for American.
     fn payoff(&self, spot: f64, strike: f64) -> f64;
 
     /// Payoff for a full simulated path (used by Monte Carlo). Terminal
     /// payoffs default to the last point; Asian/Barrier override this.
+    /// The path excludes the initial spot (it starts at the first step).
     fn path_payoff(&self, path: &[f64], strike: f64) -> f64 {
         self.payoff(*path.last().expect("empty path"), strike)
+    }
+
+    /// True when the payoff depends on the whole path (Asian, Barrier), so
+    /// engines must simulate paths rather than terminal values.
+    fn is_path_dependent(&self) -> bool {
+        false
     }
 
     /// Intrinsic value at the option's current underlying price.
@@ -68,4 +75,9 @@ pub trait Payoff: Debug {
     fn payoff_kind(&self) -> PayoffType;
     fn put_or_call(&self) -> &PutOrCall;
     fn exercise_style(&self)->&ContractStyle;
+
+    /// Downcast hook so pricers that need payoff-specific details (e.g. the
+    /// analytic pricer distinguishing cash- from asset-or-nothing binaries)
+    /// can recover the concrete payoff type.
+    fn as_any(&self) -> &dyn std::any::Any;
 }

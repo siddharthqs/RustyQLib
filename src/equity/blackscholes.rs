@@ -7,7 +7,9 @@ use chrono::{Datelike, Local, NaiveDate};
 //use vanila_option::{EquityOption,OptionType};
 use crate::core::utils::{ContractStyle, dN, N};
 use crate::core::trade::{PutOrCall, Transection};
-use super::vanila_option::{EquityOption, EquityOptionBase, VanillaPayoff};
+use super::asian::{self, AsianStrikeType, AveragingType};
+use super::barrier;
+use super::vanila_option::{AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityOption, EquityOptionBase, VanillaPayoff};
 use super::utils::{Engine, PayoffType, Payoff, LongShort};
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
@@ -26,6 +28,8 @@ impl BlackScholesPricer {
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.npv_vanilla(bsd_option),
             PayoffType::Binary => self.npv_binary(bsd_option),
+            PayoffType::Barrier => self.npv_barrier(bsd_option),
+            PayoffType::Asian => self.npv_asian(bsd_option),
             _ => {0.0}
         }
     }
@@ -36,6 +40,8 @@ impl BlackScholesPricer {
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.delta_vanilla(bsd_option),
             PayoffType::Binary => self.delta_binary(bsd_option),
+            PayoffType::Barrier => self.delta_barrier(bsd_option),
+            PayoffType::Asian => self.delta_asian(bsd_option),
             _ => {0.0}
         }
     }
@@ -43,6 +49,8 @@ impl BlackScholesPricer {
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.gamma_vanilla(bsd_option),
             PayoffType::Binary => self.gamma_binary(bsd_option),
+            PayoffType::Barrier => self.gamma_barrier(bsd_option),
+            PayoffType::Asian => self.gamma_asian(bsd_option),
             _ => {0.0}
         }
     }
@@ -50,6 +58,8 @@ impl BlackScholesPricer {
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.vega_vanilla(bsd_option),
             PayoffType::Binary => self.vega_binary(bsd_option),
+            PayoffType::Barrier => self.vega_barrier(bsd_option),
+            PayoffType::Asian => self.vega_asian(bsd_option),
             _ => {0.0}
         }
     }
@@ -57,6 +67,8 @@ impl BlackScholesPricer {
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.theta_vanilla(bsd_option),
             PayoffType::Binary => self.theta_binary(bsd_option),
+            PayoffType::Barrier => self.theta_barrier(bsd_option),
+            PayoffType::Asian => self.theta_asian(bsd_option),
             _ => {0.0}
         }
     }
@@ -64,6 +76,8 @@ impl BlackScholesPricer {
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.rho_vanilla(bsd_option),
             PayoffType::Binary => self.rho_binary(bsd_option),
+            PayoffType::Barrier => self.rho_barrier(bsd_option),
+            PayoffType::Asian => self.rho_asian(bsd_option),
             _ => {0.0}
         }
     }
@@ -147,75 +161,301 @@ impl BlackScholesPricer {
         }
     }
 
-    // ── Cash-or-nothing binary (unit cash) ─────────────────────────────
-    // call: e^{-rT} N(d2); put: e^{-rT} N(-d2)
+    // ── Binary (digital) options ───────────────────────────────────────
+    // cash-or-nothing:  cash * e^{-rT} N(+-d2)
+    // asset-or-nothing: S e^{-qT} N(+-d1)
+    // All asset-or-nothing Greeks are implemented directly (not via the
+    // vanilla replication identity), so the replication tests are a real
+    // cross-check.
+
+    fn binary_details(bsd_option: &EquityOption) -> (BinaryType, f64) {
+        let payoff = bsd_option
+            .payoff
+            .as_any()
+            .downcast_ref::<BinaryPayoff>()
+            .expect("payoff of kind Binary must be a BinaryPayoff");
+        (payoff.binary_type, payoff.cash)
+    }
 
     fn npv_binary(&self, bsd_option: &EquityOption) -> f64 {
+        let (binary_type, cash) = Self::binary_details(bsd_option);
         let df_r = bsd_option.base.maturity_discount_factor();
-        match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => df_r * N(bsd_option.base.d2()),
-            PutOrCall::Put => df_r * N(-bsd_option.base.d2()),
+        let df_q = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
+        let s = bsd_option.base.underlying_price.value();
+        match (binary_type, bsd_option.payoff.put_or_call()) {
+            (BinaryType::CashOrNothing, PutOrCall::Call) => cash * df_r * N(bsd_option.base.d2()),
+            (BinaryType::CashOrNothing, PutOrCall::Put) => cash * df_r * N(-bsd_option.base.d2()),
+            (BinaryType::AssetOrNothing, PutOrCall::Call) => s * df_q * N(bsd_option.base.d1()),
+            (BinaryType::AssetOrNothing, PutOrCall::Put) => s * df_q * N(-bsd_option.base.d1()),
         }
     }
     fn delta_binary(&self, bsd_option: &EquityOption) -> f64 {
-        // +- e^{-rT} dN(d2) / (S sigma sqrt(T))
-        let df_r = bsd_option.base.maturity_discount_factor();
-        let s = bsd_option.base.underlying_price.value();
+        let (binary_type, cash) = Self::binary_details(bsd_option);
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let delta_call = df_r * dN(bsd_option.base.d2()) / (s * sigma * t.sqrt());
-        match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => delta_call,
-            PutOrCall::Put => -delta_call,
+        let s = bsd_option.base.underlying_price.value();
+        let vol_sqrt_t = sigma * t.sqrt();
+        match binary_type {
+            BinaryType::CashOrNothing => {
+                // +- cash e^{-rT} dN(d2) / (S sigma sqrt(T))
+                let df_r = bsd_option.base.maturity_discount_factor();
+                let delta_call = cash * df_r * dN(bsd_option.base.d2()) / (s * vol_sqrt_t);
+                match bsd_option.payoff.put_or_call() {
+                    PutOrCall::Call => delta_call,
+                    PutOrCall::Put => -delta_call,
+                }
+            }
+            BinaryType::AssetOrNothing => {
+                // e^{-qT} (N(+-d1) +- dN(d1)/(sigma sqrt(T)))
+                let df_q = exp(-bsd_option.base.dividend_yield * t);
+                let d1 = bsd_option.base.d1();
+                match bsd_option.payoff.put_or_call() {
+                    PutOrCall::Call => df_q * (N(d1) + dN(d1) / vol_sqrt_t),
+                    PutOrCall::Put => df_q * (N(-d1) - dN(d1) / vol_sqrt_t),
+                }
+            }
         }
     }
     fn gamma_binary(&self, bsd_option: &EquityOption) -> f64 {
-        // -+ e^{-rT} dN(d2) d1 / (S^2 sigma^2 T)
-        let df_r = bsd_option.base.maturity_discount_factor();
-        let s = bsd_option.base.underlying_price.value();
+        let (binary_type, cash) = Self::binary_details(bsd_option);
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let gamma_call =
-            -df_r * dN(bsd_option.base.d2()) * bsd_option.base.d1() / (s * s * sigma * sigma * t);
+        let s = bsd_option.base.underlying_price.value();
+        let vol_sqrt_t = sigma * t.sqrt();
+        let gamma_call = match binary_type {
+            BinaryType::CashOrNothing => {
+                // - cash e^{-rT} dN(d2) d1 / (S^2 sigma^2 T)
+                let df_r = bsd_option.base.maturity_discount_factor();
+                -cash * df_r * dN(bsd_option.base.d2()) * bsd_option.base.d1()
+                    / (s * s * sigma * sigma * t)
+            }
+            BinaryType::AssetOrNothing => {
+                // e^{-qT} dN(d1) (1 - d1/(sigma sqrt(T))) / (S sigma sqrt(T))
+                let df_q = exp(-bsd_option.base.dividend_yield * t);
+                let d1 = bsd_option.base.d1();
+                df_q * dN(d1) * (1.0 - d1 / vol_sqrt_t) / (s * vol_sqrt_t)
+            }
+        };
         match bsd_option.payoff.put_or_call() {
             PutOrCall::Call => gamma_call,
             PutOrCall::Put => -gamma_call,
         }
     }
     fn vega_binary(&self, bsd_option: &EquityOption) -> f64 {
-        // -+ e^{-rT} dN(d2) d1 / sigma
-        let df_r = bsd_option.base.maturity_discount_factor();
+        let (binary_type, cash) = Self::binary_details(bsd_option);
+        let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let vega_call = -df_r * dN(bsd_option.base.d2()) * bsd_option.base.d1() / sigma;
+        let s = bsd_option.base.underlying_price.value();
+        let vega_call = match binary_type {
+            BinaryType::CashOrNothing => {
+                // - cash e^{-rT} dN(d2) d1 / sigma
+                let df_r = bsd_option.base.maturity_discount_factor();
+                -cash * df_r * dN(bsd_option.base.d2()) * bsd_option.base.d1() / sigma
+            }
+            BinaryType::AssetOrNothing => {
+                // - S e^{-qT} dN(d1) d2 / sigma
+                let df_q = exp(-bsd_option.base.dividend_yield * t);
+                -s * df_q * dN(bsd_option.base.d1()) * bsd_option.base.d2() / sigma
+            }
+        };
         match bsd_option.payoff.put_or_call() {
             PutOrCall::Call => vega_call,
             PutOrCall::Put => -vega_call,
         }
     }
     fn theta_binary(&self, bsd_option: &EquityOption) -> f64 {
-        // theta = -dV/dT with dd2/dT = (r - q - sigma^2/2)/(sigma sqrt(T)) - d2/(2T)
-        let df_r = bsd_option.base.maturity_discount_factor();
+        let (binary_type, cash) = Self::binary_details(bsd_option);
         let r = bsd_option.base.risk_free_rate();
         let q = bsd_option.base.dividend_yield;
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let d2 = bsd_option.base.d2();
-        let dd2_dt = (r - q - 0.5 * sigma * sigma) / (sigma * t.sqrt()) - d2 / (2.0 * t);
-        match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => r * df_r * N(d2) - df_r * dN(d2) * dd2_dt,
-            PutOrCall::Put => r * df_r * N(-d2) + df_r * dN(d2) * dd2_dt,
+        let s = bsd_option.base.underlying_price.value();
+        match binary_type {
+            BinaryType::CashOrNothing => {
+                // dd2/dT = (r - q - sigma^2/2)/(sigma sqrt(T)) - d2/(2T)
+                let df_r = bsd_option.base.maturity_discount_factor();
+                let d2 = bsd_option.base.d2();
+                let dd2_dt = (r - q - 0.5 * sigma * sigma) / (sigma * t.sqrt()) - d2 / (2.0 * t);
+                match bsd_option.payoff.put_or_call() {
+                    PutOrCall::Call => cash * (r * df_r * N(d2) - df_r * dN(d2) * dd2_dt),
+                    PutOrCall::Put => cash * (r * df_r * N(-d2) + df_r * dN(d2) * dd2_dt),
+                }
+            }
+            BinaryType::AssetOrNothing => {
+                // dd1/dT = (r - q + sigma^2/2)/(sigma sqrt(T)) - d1/(2T)
+                let df_q = exp(-q * t);
+                let d1 = bsd_option.base.d1();
+                let dd1_dt = (r - q + 0.5 * sigma * sigma) / (sigma * t.sqrt()) - d1 / (2.0 * t);
+                match bsd_option.payoff.put_or_call() {
+                    PutOrCall::Call => q * s * df_q * N(d1) - s * df_q * dN(d1) * dd1_dt,
+                    PutOrCall::Put => q * s * df_q * N(-d1) + s * df_q * dN(d1) * dd1_dt,
+                }
+            }
         }
     }
     fn rho_binary(&self, bsd_option: &EquityOption) -> f64 {
-        // call: -T e^{-rT} N(d2) + e^{-rT} dN(d2) sqrt(T)/sigma
-        let df_r = bsd_option.base.maturity_discount_factor();
+        let (binary_type, cash) = Self::binary_details(bsd_option);
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let d2 = bsd_option.base.d2();
-        match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => -t * df_r * N(d2) + df_r * dN(d2) * t.sqrt() / sigma,
-            PutOrCall::Put => -t * df_r * N(-d2) - df_r * dN(d2) * t.sqrt() / sigma,
+        let s = bsd_option.base.underlying_price.value();
+        match binary_type {
+            BinaryType::CashOrNothing => {
+                let df_r = bsd_option.base.maturity_discount_factor();
+                let d2 = bsd_option.base.d2();
+                match bsd_option.payoff.put_or_call() {
+                    PutOrCall::Call => cash * (-t * df_r * N(d2) + df_r * dN(d2) * t.sqrt() / sigma),
+                    PutOrCall::Put => cash * (-t * df_r * N(-d2) - df_r * dN(d2) * t.sqrt() / sigma),
+                }
+            }
+            BinaryType::AssetOrNothing => {
+                // +- S e^{-qT} dN(d1) sqrt(T)/sigma
+                let df_q = exp(-bsd_option.base.dividend_yield * t);
+                let rho_call = s * df_q * dN(bsd_option.base.d1()) * t.sqrt() / sigma;
+                match bsd_option.payoff.put_or_call() {
+                    PutOrCall::Call => rho_call,
+                    PutOrCall::Put => -rho_call,
+                }
+            }
         }
+    }
+
+    // ── Barrier options (Reiner-Rubinstein) ────────────────────────────
+    // NPV is the closed form; Greeks are central-difference bumps of it
+    // (the standard approach — the analytic derivatives are long and easy
+    // to get wrong, and near the barrier bumped Greeks are what desks use).
+
+    /// Reprice the barrier with additive bumps to (spot, vol, rate, expiry).
+    fn barrier_price_with(
+        bsd_option: &EquityOption,
+        ds: f64,
+        dsigma: f64,
+        dr: f64,
+        dt_shift: f64,
+    ) -> f64 {
+        let payoff = bsd_option
+            .payoff
+            .as_any()
+            .downcast_ref::<BarrierPayoff>()
+            .expect("payoff of kind Barrier must be a BarrierPayoff");
+        barrier::barrier_price(
+            bsd_option.base.underlying_price.value() + ds,
+            bsd_option.base.strike_price,
+            payoff.barrier,
+            bsd_option.base.risk_free_rate() + dr,
+            bsd_option.base.dividend_yield,
+            bsd_option.base.volatility() + dsigma,
+            bsd_option.time_to_maturity() + dt_shift,
+            payoff.direction,
+            payoff.knock,
+            *bsd_option.payoff.put_or_call(),
+        )
+    }
+    fn npv_barrier(&self, bsd_option: &EquityOption) -> f64 {
+        Self::barrier_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+    }
+    fn delta_barrier(&self, bsd_option: &EquityOption) -> f64 {
+        let h = bsd_option.base.underlying_price.value() * 1e-4;
+        (Self::barrier_price_with(bsd_option, h, 0.0, 0.0, 0.0)
+            - Self::barrier_price_with(bsd_option, -h, 0.0, 0.0, 0.0))
+            / (2.0 * h)
+    }
+    fn gamma_barrier(&self, bsd_option: &EquityOption) -> f64 {
+        let h = bsd_option.base.underlying_price.value() * 1e-3;
+        (Self::barrier_price_with(bsd_option, h, 0.0, 0.0, 0.0)
+            - 2.0 * Self::barrier_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+            + Self::barrier_price_with(bsd_option, -h, 0.0, 0.0, 0.0))
+            / (h * h)
+    }
+    fn vega_barrier(&self, bsd_option: &EquityOption) -> f64 {
+        let h = 1e-4;
+        (Self::barrier_price_with(bsd_option, 0.0, h, 0.0, 0.0)
+            - Self::barrier_price_with(bsd_option, 0.0, -h, 0.0, 0.0))
+            / (2.0 * h)
+    }
+    fn theta_barrier(&self, bsd_option: &EquityOption) -> f64 {
+        let h = (1.0 / 365.0_f64).min(0.5 * bsd_option.time_to_maturity());
+        -(Self::barrier_price_with(bsd_option, 0.0, 0.0, 0.0, h)
+            - Self::barrier_price_with(bsd_option, 0.0, 0.0, 0.0, -h))
+            / (2.0 * h)
+    }
+    fn rho_barrier(&self, bsd_option: &EquityOption) -> f64 {
+        let h = 1e-5;
+        (Self::barrier_price_with(bsd_option, 0.0, 0.0, h, 0.0)
+            - Self::barrier_price_with(bsd_option, 0.0, 0.0, -h, 0.0))
+            / (2.0 * h)
+    }
+
+    // ── Asian options ──────────────────────────────────────────────────
+    // geometric average price: exact closed form (continuous averaging)
+    // arithmetic average price: Turnbull-Wakeman approximation
+    // floating strike: Monte Carlo only
+    // Greeks by central-difference bumps, like barriers.
+
+    fn asian_price_with(
+        bsd_option: &EquityOption,
+        ds: f64,
+        dsigma: f64,
+        dr: f64,
+        dt_shift: f64,
+    ) -> f64 {
+        let payoff = bsd_option
+            .payoff
+            .as_any()
+            .downcast_ref::<AsianPayoff>()
+            .expect("payoff of kind Asian must be an AsianPayoff");
+        if payoff.strike_type == AsianStrikeType::FloatingStrike {
+            panic!(
+                "Floating-strike Asian options have no analytic pricer; \
+                 use the MonteCarlo engine"
+            );
+        }
+        let s = bsd_option.base.underlying_price.value() + ds;
+        let k = bsd_option.base.strike_price;
+        let r = bsd_option.base.risk_free_rate() + dr;
+        let q = bsd_option.base.dividend_yield;
+        let sigma = bsd_option.base.volatility() + dsigma;
+        let t = bsd_option.time_to_maturity() + dt_shift;
+        let pc = *bsd_option.payoff.put_or_call();
+        match payoff.averaging {
+            AveragingType::Geometric => {
+                asian::geometric_asian_price(s, k, r, q, sigma, t, None, pc)
+            }
+            AveragingType::Arithmetic => asian::turnbull_wakeman_price(s, k, r, q, sigma, t, pc),
+        }
+    }
+    fn npv_asian(&self, bsd_option: &EquityOption) -> f64 {
+        Self::asian_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+    }
+    fn delta_asian(&self, bsd_option: &EquityOption) -> f64 {
+        let h = bsd_option.base.underlying_price.value() * 1e-4;
+        (Self::asian_price_with(bsd_option, h, 0.0, 0.0, 0.0)
+            - Self::asian_price_with(bsd_option, -h, 0.0, 0.0, 0.0))
+            / (2.0 * h)
+    }
+    fn gamma_asian(&self, bsd_option: &EquityOption) -> f64 {
+        let h = bsd_option.base.underlying_price.value() * 1e-3;
+        (Self::asian_price_with(bsd_option, h, 0.0, 0.0, 0.0)
+            - 2.0 * Self::asian_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+            + Self::asian_price_with(bsd_option, -h, 0.0, 0.0, 0.0))
+            / (h * h)
+    }
+    fn vega_asian(&self, bsd_option: &EquityOption) -> f64 {
+        let h = 1e-4;
+        (Self::asian_price_with(bsd_option, 0.0, h, 0.0, 0.0)
+            - Self::asian_price_with(bsd_option, 0.0, -h, 0.0, 0.0))
+            / (2.0 * h)
+    }
+    fn theta_asian(&self, bsd_option: &EquityOption) -> f64 {
+        let h = (1.0 / 365.0_f64).min(0.5 * bsd_option.time_to_maturity());
+        -(Self::asian_price_with(bsd_option, 0.0, 0.0, 0.0, h)
+            - Self::asian_price_with(bsd_option, 0.0, 0.0, 0.0, -h))
+            / (2.0 * h)
+    }
+    fn rho_asian(&self, bsd_option: &EquityOption) -> f64 {
+        let h = 1e-5;
+        (Self::asian_price_with(bsd_option, 0.0, 0.0, h, 0.0)
+            - Self::asian_price_with(bsd_option, 0.0, 0.0, -h, 0.0))
+            / (2.0 * h)
     }
 
 }
@@ -413,7 +653,9 @@ pub fn option_pricing() {
         base: option,
         payoff:payoff,
         engine:Engine::BlackScholes,
-        mc: crate::equity::montecarlo::MonteCarloConfig::default()
+        mc: crate::equity::montecarlo::MonteCarloConfig::default(),
+        fd: crate::equity::finite_difference::FdConfig::default(),
+        heston: None
     };
     println!("Theoretical Price ${}", option.npv());
     println!("Premium at risk ${}", option.get_premium_at_risk());
@@ -551,6 +793,8 @@ mod tests {
             payoff,
             engine: Engine::BlackScholes,
             mc: crate::equity::montecarlo::MonteCarloConfig::default(),
+            fd: crate::equity::finite_difference::FdConfig::default(),
+            heston: None,
         }
     }
 
@@ -561,14 +805,24 @@ mod tests {
         )
     }
 
-    fn binary_option(put_or_call: PutOrCall) -> EquityOption {
+    fn binary_option_of(
+        put_or_call: PutOrCall,
+        binary_type: BinaryType,
+        cash: f64,
+    ) -> EquityOption {
         test_option_with(
-            Box::new(super::super::vanila_option::BinaryPayoff {
+            Box::new(BinaryPayoff {
                 put_or_call,
                 exercise_style: ContractStyle::European,
+                binary_type,
+                cash,
             }),
             flat_5pct(),
         )
+    }
+
+    fn binary_option(put_or_call: PutOrCall) -> EquityOption {
+        binary_option_of(put_or_call, BinaryType::CashOrNothing, 1.0)
     }
 
     fn flat_5pct() -> YieldCurve {
@@ -641,6 +895,133 @@ mod tests {
         let call = binary_option(PutOrCall::Call);
         let put = binary_option(PutOrCall::Put);
         assert_approx_eq!(call.npv() + put.npv(), call.base.maturity_discount_factor(), 1e-12);
+    }
+
+    #[test]
+    fn cash_amount_scales_cash_or_nothing_linearly() {
+        let unit = binary_option(PutOrCall::Call);
+        let sized = binary_option_of(PutOrCall::Call, BinaryType::CashOrNothing, 1000.0);
+        assert_approx_eq!(sized.npv(), 1000.0 * unit.npv(), 1e-9);
+        assert_approx_eq!(sized.delta(), 1000.0 * unit.delta(), 1e-9);
+        assert_approx_eq!(sized.vega(), 1000.0 * unit.vega(), 1e-9);
+    }
+
+    // Asset-or-nothing goldens computed independently and bump-verified,
+    // with q = 2% so the dividend terms are exercised
+    #[test]
+    fn golden_asset_or_nothing_call_npv_and_greeks() {
+        let mut option = binary_option_of(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0);
+        option.base.dividend_yield = 0.02;
+        assert_approx_eq!(option.npv(), 58.6851146135, 1e-8);
+        assert_approx_eq!(option.delta(), 1.8502230631, 1e-8);
+        assert_approx_eq!(option.gamma(), 0.0021056199, 1e-8);
+        assert_approx_eq!(option.vega(), 6.3168595850, 1e-8);
+        assert_approx_eq!(option.theta(), -3.5639423965, 1e-8);
+        assert_approx_eq!(option.rho(), 126.3371917001, 1e-8);
+    }
+
+    #[test]
+    fn golden_asset_or_nothing_put_npv_and_greeks() {
+        let mut option = binary_option_of(PutOrCall::Put, BinaryType::AssetOrNothing, 0.0);
+        option.base.dividend_yield = 0.02;
+        assert_approx_eq!(option.npv(), 39.3347527172, 1e-8);
+        assert_approx_eq!(option.delta(), -0.8700243898, 1e-8);
+        assert_approx_eq!(option.gamma(), -0.0021056199, 1e-8);
+        assert_approx_eq!(option.vega(), -6.3168595850, 1e-8);
+        assert_approx_eq!(option.theta(), 5.5243397431, 1e-8);
+        assert_approx_eq!(option.rho(), -126.3371917001, 1e-8);
+    }
+
+    #[test]
+    fn asset_call_plus_put_equals_forward_leg() {
+        let call = binary_option_of(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0);
+        let put = binary_option_of(PutOrCall::Put, BinaryType::AssetOrNothing, 0.0);
+        // A_c + A_p = S e^{-qT}; q = 0 in the test setup
+        assert_approx_eq!(call.npv() + put.npv(), 100.0, 1e-10);
+    }
+
+    /// Replication: an asset-or-nothing call is a long vanilla call plus
+    /// K cash-or-nothing calls — payoff-wise S·1{S>K} = (S-K)^+ + K·1{S>K}.
+    /// Both sides are implemented independently, so this checks the closed
+    /// forms (price and every Greek) against each other.
+    #[test]
+    fn asset_digital_replicated_by_call_plus_cash_digitals() {
+        let k = 100.0;
+        let asset = binary_option_of(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0);
+        let vanilla = test_option(PutOrCall::Call, flat_5pct());
+        let cash = binary_option_of(PutOrCall::Call, BinaryType::CashOrNothing, k);
+
+        assert_approx_eq!(asset.npv(), vanilla.npv() + cash.npv(), 1e-10);
+        assert_approx_eq!(asset.delta(), vanilla.delta() + cash.delta(), 1e-10);
+        assert_approx_eq!(asset.gamma(), vanilla.gamma() + cash.gamma(), 1e-10);
+        assert_approx_eq!(asset.vega(), vanilla.vega() + cash.vega(), 1e-10);
+        assert_approx_eq!(asset.theta(), vanilla.theta() + cash.theta(), 1e-10);
+        assert_approx_eq!(asset.rho(), vanilla.rho() + cash.rho(), 1e-10);
+    }
+
+    /// The same replication must hold on the numerical engines, which see
+    /// only the payoff function.
+    #[test]
+    fn asset_digital_replication_holds_across_engines() {
+        let k = 100.0;
+        let priced = |engine: Engine, payoff: Box<dyn Payoff>| {
+            let mut option = test_option_with(payoff, flat_5pct());
+            option.engine = engine.clone();
+            option.npv()
+        };
+        let asset_payoff = || -> Box<dyn Payoff> {
+            Box::new(BinaryPayoff {
+                put_or_call: PutOrCall::Call,
+                exercise_style: ContractStyle::European,
+                binary_type: BinaryType::AssetOrNothing,
+                cash: 0.0,
+            })
+        };
+        let cash_payoff = || -> Box<dyn Payoff> {
+            Box::new(BinaryPayoff {
+                put_or_call: PutOrCall::Call,
+                exercise_style: ContractStyle::European,
+                binary_type: BinaryType::CashOrNothing,
+                cash: k,
+            })
+        };
+        let vanilla_payoff = || -> Box<dyn Payoff> {
+            Box::new(VanillaPayoff {
+                put_or_call: PutOrCall::Call,
+                exercise_style: ContractStyle::European,
+            })
+        };
+        for (engine, tol) in [
+            (Engine::FiniteDifference, 0.01),
+            (Engine::Binomial, 0.05),
+            (Engine::MonteCarlo, 0.05),
+        ] {
+            let asset = priced(engine.clone(), asset_payoff());
+            let replicated =
+                priced(engine.clone(), vanilla_payoff()) + priced(engine.clone(), cash_payoff());
+            assert!(
+                (asset - replicated).abs() < tol,
+                "{engine:?}: asset={asset} replicated={replicated}"
+            );
+        }
+    }
+
+    #[test]
+    fn asset_digital_matches_analytic_across_engines() {
+        let analytic = binary_option_of(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0).npv();
+        for (engine, tol) in [
+            (Engine::FiniteDifference, 0.05),
+            (Engine::Binomial, 2.0), // digitals on a CRR tree oscillate; jump size is ~K
+            (Engine::MonteCarlo, 0.05),
+        ] {
+            let mut option = binary_option_of(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0);
+            option.engine = engine.clone();
+            let value = option.npv();
+            assert!(
+                (value - analytic).abs() < tol,
+                "{engine:?}: {value} vs analytic {analytic}"
+            );
+        }
     }
 
     // ── Cross-engine agreement ──────────────────────────────────────────
@@ -923,6 +1304,452 @@ mod tests {
         let expected = bs_price(100.0, 100.0, 0.05, 0.0, 0.25, 1.0, PutOrCall::Call);
         let lv_price = local_vol_option(surface, 100.0).npv();
         assert!((lv_price - expected).abs() < 0.3, "{lv_price} vs {expected}");
+    }
+
+    // ── Barrier options ─────────────────────────────────────────────────
+
+    fn barrier_option(
+        put_or_call: PutOrCall,
+        direction: crate::equity::barrier::BarrierDirection,
+        knock: crate::equity::barrier::KnockType,
+        barrier: f64,
+    ) -> EquityOption {
+        let mut option = test_option_with(
+            Box::new(BarrierPayoff {
+                put_or_call,
+                exercise_style: ContractStyle::European,
+                direction,
+                knock,
+                barrier,
+            }),
+            flat_5pct(),
+        );
+        option.base.dividend_yield = 0.02; // match the oracle setup
+        option
+    }
+
+    #[test]
+    fn golden_barrier_prices_all_eight_types() {
+        use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+        // independently generated Reiner-Rubinstein oracle values
+        // (S=100, K=100, r=5%, q=2%, sigma=30%, T=1)
+        let cases = [
+            (Down, In, PutOrCall::Call, 90.0, 4.5095197744),
+            (Down, Out, PutOrCall::Call, 90.0, 8.5107614943),
+            (Down, In, PutOrCall::Put, 90.0, 10.0710164338),
+            (Down, Out, PutOrCall::Put, 90.0, 0.0523399543),
+            (Up, In, PutOrCall::Call, 120.0, 12.5974705742),
+            (Up, Out, PutOrCall::Call, 120.0, 0.4228106946),
+            (Up, In, PutOrCall::Put, 120.0, 1.4297711810),
+            (Up, Out, PutOrCall::Put, 120.0, 8.6935852071),
+        ];
+        for (direction, knock, pc, h, expected) in cases {
+            let option = barrier_option(pc, direction, knock, h);
+            assert_approx_eq!(option.npv(), expected, 1e-8);
+        }
+    }
+
+    #[test]
+    fn barrier_greeks_satisfy_in_out_parity() {
+        use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+        // KI + KO = vanilla holds for the Greeks too (no rebate)
+        let ki = barrier_option(PutOrCall::Call, Down, In, 90.0);
+        let ko = barrier_option(PutOrCall::Call, Down, Out, 90.0);
+        let mut vanilla = test_option(PutOrCall::Call, flat_5pct());
+        vanilla.base.dividend_yield = 0.02;
+        assert_approx_eq!(ki.npv() + ko.npv(), vanilla.npv(), 1e-10);
+        assert_approx_eq!(ki.delta() + ko.delta(), vanilla.delta(), 1e-5);
+        assert_approx_eq!(ki.gamma() + ko.gamma(), vanilla.gamma(), 1e-4);
+        assert_approx_eq!(ki.vega() + ko.vega(), vanilla.vega(), 1e-4);
+        assert_approx_eq!(ki.theta() + ko.theta(), vanilla.theta(), 1e-4);
+        assert_approx_eq!(ki.rho() + ko.rho(), vanilla.rho(), 1e-4);
+    }
+
+    #[test]
+    fn monte_carlo_barrier_matches_analytic() {
+        use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+        let cases = [
+            (Down, Out, PutOrCall::Call, 90.0),
+            (Down, In, PutOrCall::Put, 90.0),
+            (Up, Out, PutOrCall::Put, 120.0),
+            (Up, In, PutOrCall::Call, 110.0),
+        ];
+        for (direction, knock, pc, h) in cases {
+            let analytic = barrier_option(pc, direction, knock, h).npv();
+            let mut option = barrier_option(pc, direction, knock, h);
+            option.engine = Engine::MonteCarlo;
+            option.mc.paths = 50_000;
+            let mc = option.npv();
+            assert!(
+                (mc - analytic).abs() < 0.3,
+                "{direction:?} {knock:?} {pc:?} H={h}: mc={mc} analytic={analytic}"
+            );
+        }
+    }
+
+    // ── Asian options ───────────────────────────────────────────────────
+
+    fn asian_option(
+        put_or_call: PutOrCall,
+        averaging: crate::equity::asian::AveragingType,
+        strike_type: crate::equity::asian::AsianStrikeType,
+    ) -> EquityOption {
+        let mut option = test_option_with(
+            Box::new(AsianPayoff {
+                put_or_call,
+                exercise_style: ContractStyle::European,
+                averaging,
+                strike_type,
+            }),
+            flat_5pct(),
+        );
+        option.base.dividend_yield = 0.02; // match the oracle setup
+        option
+    }
+
+    #[test]
+    fn golden_asian_analytic_prices() {
+        use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
+        // independently generated oracle values (S=100 K=100 r=5% q=2% sigma=30% T=1)
+        let geo = asian_option(PutOrCall::Call, Geometric, FixedStrike);
+        assert_approx_eq!(geo.npv(), 6.953600, 1e-5);
+        let arith = asian_option(PutOrCall::Call, Arithmetic, FixedStrike);
+        assert_approx_eq!(arith.npv(), 7.409272, 1e-5);
+    }
+
+    #[test]
+    fn geometric_asian_mc_matches_discrete_closed_form() {
+        use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
+        let mut option = asian_option(PutOrCall::Call, Geometric, FixedStrike);
+        option.engine = Engine::MonteCarlo;
+        option.mc.paths = 50_000;
+        let mc = option.npv(); // generic path route, 100 monitoring steps
+        let closed = crate::equity::asian::geometric_asian_price(
+            100.0, 100.0, 0.05, 0.02, 0.3, 1.0, Some(100), PutOrCall::Call,
+        );
+        assert!((mc - closed).abs() < 0.15, "mc={mc} closed={closed}");
+    }
+
+    #[test]
+    fn arithmetic_asian_cv_mc_close_to_turnbull_wakeman() {
+        use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
+        let analytic = asian_option(PutOrCall::Call, Arithmetic, FixedStrike).npv();
+        let mut option = asian_option(PutOrCall::Call, Arithmetic, FixedStrike);
+        option.engine = Engine::MonteCarlo;
+        option.mc.paths = 50_000;
+        let mc = option.npv(); // control-variate route
+        // TW is a moment-matching approximation and the MC monitors
+        // discretely, so agreement is at the approximation level, not
+        // sampler noise level
+        assert!((mc - analytic).abs() < 0.08, "cv-mc={mc} tw={analytic}");
+    }
+
+    #[test]
+    fn arithmetic_average_dominates_geometric_on_same_paths() {
+        use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
+        let price_mc = |averaging| {
+            let mut option = asian_option(PutOrCall::Call, averaging, FixedStrike);
+            option.engine = Engine::MonteCarlo;
+            option.mc.paths = 20_000;
+            // force the generic path route for both by disabling the CV's
+            // exact-scheme precondition
+            option.mc.scheme = crate::equity::montecarlo::DiscretizationScheme::Euler;
+            option.mc.time_steps = 100;
+            option.npv()
+        };
+        assert!(price_mc(Arithmetic) > price_mc(Geometric), "AM-GM inequality");
+    }
+
+    #[test]
+    fn floating_strike_asian_prices_on_mc_only() {
+        use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
+        let mut option = asian_option(PutOrCall::Call, Arithmetic, FloatingStrike);
+        option.engine = Engine::MonteCarlo;
+        option.mc.paths = 20_000;
+        let price = option.npv();
+        // floating-strike call: pays (S_T - average)^+; positive, below vanilla
+        let vanilla = test_option(PutOrCall::Call, flat_5pct()).npv();
+        assert!(price > 0.0 && price < vanilla, "{price}");
+    }
+
+    #[test]
+    #[should_panic(expected = "no analytic pricer")]
+    fn analytic_engine_rejects_floating_strike_asian() {
+        use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
+        asian_option(PutOrCall::Call, Arithmetic, FloatingStrike).npv();
+    }
+
+    // ── FD upgrades: grid Greeks, barriers, local vol, config ───────────
+
+    #[test]
+    fn fd_grid_greeks_match_analytic_for_european() {
+        let mut option = test_option(PutOrCall::Call, flat_5pct());
+        option.engine = Engine::FiniteDifference;
+        assert!((option.delta() - 0.6242517279).abs() < 1e-3, "delta {}", option.delta());
+        assert!((option.gamma() - 0.0126477644).abs() < 1e-4, "gamma {}", option.gamma());
+        assert!((option.theta() - -8.1011898970).abs() < 0.03, "theta {}", option.theta());
+        assert!((option.vega() - 37.9432933117).abs() < 0.05, "vega {}", option.vega());
+        assert!((option.rho() - 48.1939180046).abs() < 0.05, "rho {}", option.rho());
+    }
+
+    #[test]
+    fn fd_american_put_greeks_differ_from_european_correctly() {
+        let mut american = test_option_with(
+            Box::new(VanillaPayoff {
+                put_or_call: PutOrCall::Put,
+                exercise_style: ContractStyle::American,
+            }),
+            flat_5pct(),
+        );
+        american.engine = Engine::FiniteDifference;
+        let european_delta = -0.3757482721; // analytic European put delta
+        // early exercise makes the American put delta more negative and
+        // theta less negative than the European
+        assert!(
+            american.delta() < european_delta,
+            "american delta {} vs european {european_delta}",
+            american.delta()
+        );
+        assert!(american.npv() > test_option(PutOrCall::Put, flat_5pct()).npv());
+    }
+
+    #[test]
+    fn fd_brennan_schwartz_american_matches_tree() {
+        let mut fd = test_option_with(
+            Box::new(VanillaPayoff {
+                put_or_call: PutOrCall::Put,
+                exercise_style: ContractStyle::American,
+            }),
+            flat_5pct(),
+        );
+        fd.engine = Engine::FiniteDifference;
+        let mut tree = test_option_with(
+            Box::new(VanillaPayoff {
+                put_or_call: PutOrCall::Put,
+                exercise_style: ContractStyle::American,
+            }),
+            flat_5pct(),
+        );
+        tree.engine = Engine::Binomial;
+        assert!((fd.npv() - tree.npv()).abs() < 0.02, "fd={} tree={}", fd.npv(), tree.npv());
+    }
+
+    #[test]
+    fn fd_barrier_matches_reiner_rubinstein() {
+        use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+        for (direction, knock, pc, h) in [
+            (Down, Out, PutOrCall::Call, 90.0),
+            (Down, In, PutOrCall::Call, 90.0),
+            (Up, Out, PutOrCall::Put, 120.0),
+            (Up, In, PutOrCall::Put, 120.0),
+        ] {
+            let analytic = barrier_option(pc, direction, knock, h).npv();
+            let mut option = barrier_option(pc, direction, knock, h);
+            option.engine = Engine::FiniteDifference;
+            let fd = option.npv();
+            assert!(
+                (fd - analytic).abs() < 0.02,
+                "{direction:?} {knock:?} {pc:?} H={h}: fd={fd} analytic={analytic}"
+            );
+        }
+    }
+
+    #[test]
+    fn fd_barrier_in_out_parity_on_grid() {
+        use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+        let mut ki = barrier_option(PutOrCall::Call, Down, In, 90.0);
+        let mut ko = barrier_option(PutOrCall::Call, Down, Out, 90.0);
+        ki.engine = Engine::FiniteDifference;
+        ko.engine = Engine::FiniteDifference;
+        let mut vanilla = test_option(PutOrCall::Call, flat_5pct());
+        vanilla.base.dividend_yield = 0.02;
+        vanilla.engine = Engine::FiniteDifference;
+        assert!((ki.npv() + ko.npv() - vanilla.npv()).abs() < 1e-9);
+        assert!((ki.delta() + ko.delta() - vanilla.delta()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fd_local_vol_flat_surface_matches_black_scholes() {
+        let mut option = test_option(PutOrCall::Call, flat_5pct());
+        option.engine = Engine::FiniteDifference;
+        option.mc.model = crate::equity::montecarlo::McModel::LocalVol;
+        // flat surface: local vol == implied vol, FD-LV must equal FD-GBM
+        assert_approx_eq!(option.npv(), 14.2312547860, 5e-3);
+    }
+
+    #[test]
+    fn fd_grid_is_configurable() {
+        let mut coarse = test_option(PutOrCall::Call, flat_5pct());
+        coarse.engine = Engine::FiniteDifference;
+        coarse.fd.spot_steps = 100;
+        coarse.fd.time_steps = 50;
+        // still accurate at a quarter of the resolution
+        assert!((coarse.npv() - 14.2312547860).abs() < 0.02, "{}", coarse.npv());
+    }
+
+    // ── MC upgrades: QMC paths, stats, determinism ──────────────────────
+
+    #[test]
+    fn qmc_path_wise_prices_accurately() {
+        // multi-step path simulation through the Brownian bridge + QMC
+        let mut option = test_option(PutOrCall::Call, flat_5pct());
+        option.engine = Engine::MonteCarlo;
+        option.mc.time_steps = 64;
+        option.mc.paths = 20_000;
+        let qmc = option.npv();
+        assert!((qmc - 14.2312547860).abs() < 0.05, "qmc path-wise {qmc}");
+    }
+
+    #[test]
+    fn mc_stats_reports_consistent_standard_error() {
+        let mut option = test_option(PutOrCall::Call, flat_5pct());
+        option.engine = Engine::MonteCarlo;
+        option.mc.sampler = crate::equity::montecarlo::Sampler::PseudoRandom;
+        let stats = crate::equity::montecarlo::npv_with_stats(&option);
+        assert!(stats.std_err > 0.0 && stats.std_err < 1.0);
+        assert!(stats.paths == 100_000 && stats.steps == 1);
+        // iid pseudo draws: the analytic value must sit within a few
+        // standard errors of the estimate
+        assert!(
+            (stats.pv - 14.2312547860).abs() < 5.0 * stats.std_err,
+            "pv={} stderr={}",
+            stats.pv,
+            stats.std_err
+        );
+    }
+
+    #[test]
+    fn parallel_paths_are_bit_reproducible() {
+        for sampler in
+            [crate::equity::montecarlo::Sampler::Sobol, crate::equity::montecarlo::Sampler::PseudoRandom]
+        {
+            let mut option = test_option(PutOrCall::Call, flat_5pct());
+            option.engine = Engine::MonteCarlo;
+            option.mc.sampler = sampler;
+            option.mc.time_steps = 32;
+            option.mc.paths = 30_000;
+            assert_eq!(option.npv(), option.npv());
+        }
+    }
+
+    // ── Heston stochastic vol ───────────────────────────────────────────
+
+    fn heston_option(payoff: Box<dyn Payoff>) -> EquityOption {
+        let mut option = test_option_with(payoff, flat_5pct());
+        option.base.dividend_yield = 0.02;
+        option.mc.model = crate::equity::montecarlo::McModel::Heston;
+        option.heston = Some(crate::equity::heston::HestonParams {
+            v0: 0.09,
+            kappa: 2.0,
+            theta: 0.09,
+            vol_of_vol: 0.4,
+            rho: -0.7,
+        });
+        option
+    }
+
+    fn heston_vanilla(pc: PutOrCall) -> EquityOption {
+        heston_option(Box::new(VanillaPayoff {
+            put_or_call: pc,
+            exercise_style: ContractStyle::European,
+        }))
+    }
+
+    #[test]
+    fn heston_mc_matches_semi_analytic() {
+        for pc in [PutOrCall::Call, PutOrCall::Put] {
+            let analytic = heston_vanilla(pc).npv();
+            let mut mc = heston_vanilla(pc);
+            mc.engine = Engine::MonteCarlo;
+            mc.mc.paths = 50_000;
+            let mc_price = mc.npv();
+            // full-truncation Euler bias + sampler noise at 50k x 250
+            assert!(
+                (mc_price - analytic).abs() < 0.15,
+                "{pc:?}: mc={mc_price} analytic={analytic}"
+            );
+        }
+    }
+
+    #[test]
+    fn heston_binary_mc_matches_semi_analytic() {
+        let payoff = || -> Box<dyn Payoff> {
+            Box::new(BinaryPayoff {
+                put_or_call: PutOrCall::Call,
+                exercise_style: ContractStyle::European,
+                binary_type: BinaryType::CashOrNothing,
+                cash: 1.0,
+            })
+        };
+        let analytic = heston_option(payoff()).npv();
+        let mut mc = heston_option(payoff());
+        mc.engine = Engine::MonteCarlo;
+        mc.mc.paths = 50_000;
+        assert!((mc.npv() - analytic).abs() < 0.01, "mc={} analytic={analytic}", mc.npv());
+    }
+
+    #[test]
+    fn heston_greeks_are_consistent() {
+        let call = heston_vanilla(PutOrCall::Call);
+        let put = heston_vanilla(PutOrCall::Put);
+        // parity: delta_call - delta_put = e^{-qT}
+        let dfq = (-0.02_f64).exp();
+        assert!((call.delta() - put.delta() - dfq).abs() < 1e-4);
+        // same gamma and vega for call and put by parity
+        assert!((call.gamma() - put.gamma()).abs() < 1e-6);
+        assert!((call.vega() - put.vega()).abs() < 1e-4);
+        assert!(call.vega() > 0.0);
+    }
+
+    #[test]
+    fn heston_barrier_and_asian_price_on_mc() {
+        // knock-out <= vanilla under the same dynamics; asian < vanilla
+        use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+        let vanilla = {
+            let mut o = heston_vanilla(PutOrCall::Call);
+            o.engine = Engine::MonteCarlo;
+            o.mc.paths = 20_000;
+            o.npv()
+        };
+        let mut ko = heston_option(Box::new(BarrierPayoff {
+            put_or_call: PutOrCall::Call,
+            exercise_style: ContractStyle::European,
+            direction: Down,
+            knock: Out,
+            barrier: 90.0,
+        }));
+        ko.engine = Engine::MonteCarlo;
+        ko.mc.paths = 20_000;
+        let ko_price = ko.npv();
+        assert!(ko_price > 0.0 && ko_price < vanilla, "ko={ko_price} vanilla={vanilla}");
+
+        let mut asian = heston_option(Box::new(AsianPayoff {
+            put_or_call: PutOrCall::Call,
+            exercise_style: ContractStyle::European,
+            averaging: crate::equity::asian::AveragingType::Arithmetic,
+            strike_type: crate::equity::asian::AsianStrikeType::FixedStrike,
+        }));
+        asian.engine = Engine::MonteCarlo;
+        asian.mc.paths = 20_000;
+        let asian_price = asian.npv();
+        assert!(asian_price > 0.0 && asian_price < vanilla);
+    }
+
+    #[test]
+    #[should_panic(expected = "Heston model is supported on the Analytical and MonteCarlo")]
+    fn fd_engine_rejects_heston() {
+        let mut option = heston_vanilla(PutOrCall::Call);
+        option.engine = Engine::FiniteDifference;
+        option.npv();
+    }
+
+    #[test]
+    #[should_panic(expected = "not supported on the Binomial engine")]
+    fn tree_engine_rejects_barrier_options() {
+        use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+        let mut option = barrier_option(PutOrCall::Call, Down, Out, 90.0);
+        option.engine = Engine::Binomial;
+        option.npv();
     }
 
     #[test]

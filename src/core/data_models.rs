@@ -54,6 +54,17 @@ pub struct EquityOptionData {
     pub base: EquityInstrumentBase,
     pub put_or_call: String, // "Call"/"Put"
     pub payoff_type: String, // Vanilla/Barrier/Binary
+    /// Binary settlement: "cash" (default) or "asset".
+    pub binary_type: Option<String>,
+    /// Amount paid by a cash-or-nothing binary (default 1.0).
+    pub cash_amount: Option<f64>,
+    /// Barrier variant: "up_in" | "up_out" | "down_in" | "down_out".
+    pub barrier_type: Option<String>,
+    pub barrier_level: Option<f64>,
+    /// Asian averaging: "arithmetic" (default) | "geometric".
+    pub averaging_type: Option<String>,
+    /// Asian strike: "fixed" (default, average price) | "floating" (average strike).
+    pub asian_strike_type: Option<String>,
     pub strike_price: f64,
     /// Constant volatility; the simple alternative to `vol_surface`.
     pub volatility: Option<f64>,
@@ -72,8 +83,15 @@ pub struct EquityOptionData {
     pub mc_sampler: Option<String>,
     pub mc_seed: Option<u64>,
     /// "gbm" (default, constant vol) | "local_vol" (Dupire from the
-    /// option's vol surface)
+    /// option's vol surface). Applies to the MonteCarlo and
+    /// FiniteDifference engines.
     pub mc_model: Option<String>,
+    /// Finite difference grid nodes in spot (default 400).
+    pub fd_spot_steps: Option<usize>,
+    /// Finite difference time steps (default 400).
+    pub fd_time_steps: Option<usize>,
+    /// Heston parameters; required when `mc_model` is "heston".
+    pub heston: Option<crate::equity::heston::HestonParams>,
     pub exercise_style: Option<String>, //European, American,
     pub pricer:Option<String>,
     /// Optional discount curve; when absent a flat curve is built from

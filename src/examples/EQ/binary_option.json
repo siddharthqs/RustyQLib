@@ -45,12 +45,32 @@
         "underlying_price": 100.0,
         "put_or_call": "P",
         "payoff_type": "binary",
+        "binary_type": "cash",
+        "cash_amount": 1000.0,
         "strike_price": 95.0,
         "volatility": 0.4,
         "maturity": "2027-12-31",
         "dividend": 0.01,
         "risk_free_rate": 0.06,
         "pricer": "FD"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "binary",
+        "binary_type": "asset",
+        "strike_price": 100.0,
+        "volatility": 0.4,
+        "maturity": "2027-12-31",
+        "dividend": 0.01,
+        "risk_free_rate": 0.06,
+        "pricer": "Analytical"
       }
     }
   ]

@@ -98,6 +98,9 @@ pub struct ContractOutput {
     pub vega: f64,
     pub theta: f64,
     pub rho: f64,
+    /// Monte Carlo standard error of `pv` (None for deterministic engines).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub std_err: Option<f64>,
     pub error: Option<String>
 }
 

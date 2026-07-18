@@ -8,13 +8,21 @@ pub fn handle_equity_contract(data: &Contract) -> String {
     match &data.product_type {
         ProductData::Option(opt) => {
             let option = EquityOption::from_json(opt);
+            let (pv, std_err) = match option.engine {
+                crate::equity::utils::Engine::MonteCarlo => {
+                    let stats = crate::equity::montecarlo::npv_with_stats(&option);
+                    (stats.pv, Some(stats.std_err))
+                }
+                _ => (option.npv(), None),
+            };
             let contract_output = ContractOutput {
-                pv: option.npv(),
+                pv,
                 delta: option.delta(),
                 gamma: option.gamma(),
                 vega: option.vega(),
                 theta: option.theta(),
                 rho: option.rho(),
+                std_err,
                 error: None
             };
             println!("Theoretical Price ${}", contract_output.pv);
@@ -34,6 +42,7 @@ pub fn handle_equity_contract(data: &Contract) -> String {
                 vega: future.vega(),
                 theta: future.theta(),
                 rho: future.rho(),
+                std_err: None,
                 error: None
             };
             println!("Equity Future Price: {}", contract_output.pv);
@@ -52,6 +61,7 @@ pub fn handle_equity_contract(data: &Contract) -> String {
                 vega: future.vega(),
                 theta: future.theta(),
                 rho: future.rho(),
+                std_err: None,
                 error: None
             };
             println!("Equity Forward Price: {}", contract_output.pv);

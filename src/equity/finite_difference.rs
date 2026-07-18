@@ -1,147 +1,348 @@
-//! Finite difference pricer for the Black-Scholes PDE.
+//! Finite difference pricer for the backward pricing PDE in log-spot.
 //!
-//! Solves the log-spot PDE
-//! `V_t + (r - q - sigma^2/2) V_x + (sigma^2/2) V_xx - r V = 0`, `x = ln S`,
-//! backwards from the terminal payoff on a uniform log-spot grid with a
-//! theta-scheme: Crank-Nicolson (`theta = 1/2`) with the first four steps
-//! fully implicit (Rannacher smoothing), which damps the oscillations CN
-//! produces on kinked/discontinuous payoffs such as binaries.
+//! Features:
+//! - theta-scheme (Crank-Nicolson with a Rannacher fully-implicit start),
+//!   cell-averaged terminal conditions (kinks and digital jumps), generic
+//!   Dirichlet boundaries.
+//! - **Per-node, per-step coefficient assembly**: supports the Dupire local
+//!   vol model (`mc_model: "local_vol"` applies to this engine too) and
+//!   term-structure-consistent rates (each time step discounts and drifts
+//!   at the curve's forward rate for its own calendar interval). This
+//!   assembly structure is the 1-D basis a stochastic vol (ADI) solver
+//!   will extend.
+//! - **American exercise via Brennan-Schwartz** (projection inside the
+//!   tridiagonal solve, swept from the out-of-the-money side).
+//! - **Barrier options**: knock-out via an absorbing boundary with the grid
+//!   edge placed exactly at the barrier; knock-in by parity (European).
+//! - **Greeks from the grid**: delta/gamma from a local quadratic fit at
+//!   the spot, theta from the last two time layers — one solve yields
+//!   npv/delta/gamma/theta; vega and rho are bump-and-resolve.
 //!
-//! The payoff enters only through the [`Payoff`](crate::equity::utils::Payoff)
-//! trait, so any terminal payoff prices without changes here:
-//! - terminal condition: cell average of the payoff (integrates kinks and
-//!   digital jumps correctly instead of sampling them at a node),
-//! - Dirichlet boundaries: `V(S_b, tau) = e^{-r tau} * payoff(S_b e^{(r-q) tau})`,
-//!   which reduces to the familiar conditions for calls, puts and binaries,
-//! - American exercise: projection `V = max(V, payoff)` after each step.
+//! Grid sizes are configurable per contract (`fd_spot_steps`,
+//! `fd_time_steps` in JSON).
 
-use super::vanila_option::EquityOption;
+use crate::core::curves::Compounding;
+use crate::core::data_models::EquityOptionData;
+use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
+use crate::equity::barrier::{BarrierDirection, KnockType};
+use crate::equity::local_vol::LocalVol;
+use crate::equity::montecarlo::McModel;
 use crate::equity::utils::Payoff;
+use crate::equity::vanila_option::{BarrierPayoff, EquityOption};
 
-const SPOT_STEPS: usize = 400; // grid nodes in x (even, so ln(S0) is a node)
-const TIME_STEPS: usize = 400;
 const RANNACHER_STEPS: usize = 4;
-const GRID_STDEVS: f64 = 5.0;
 const CELL_AVG_POINTS: usize = 16;
 
+#[derive(Debug, Clone, Copy)]
+pub struct FdConfig {
+    pub spot_steps: usize,
+    pub time_steps: usize,
+    pub grid_stdevs: f64,
+}
+
+impl Default for FdConfig {
+    fn default() -> Self {
+        FdConfig { spot_steps: 400, time_steps: 400, grid_stdevs: 5.0 }
+    }
+}
+
+impl FdConfig {
+    pub fn from_data(data: &EquityOptionData) -> Self {
+        let defaults = FdConfig::default();
+        FdConfig {
+            spot_steps: data.fd_spot_steps.unwrap_or(defaults.spot_steps).max(10),
+            time_steps: data.fd_time_steps.unwrap_or(defaults.time_steps).max(10),
+            grid_stdevs: defaults.grid_stdevs,
+        }
+    }
+}
+
+/// One solve returns the value and the grid Greeks.
+#[derive(Debug, Clone, Copy)]
+pub struct FdSolution {
+    pub npv: f64,
+    pub delta: f64,
+    pub gamma: f64,
+    pub theta: f64,
+}
+
+impl FdSolution {
+    fn zero() -> Self {
+        FdSolution { npv: 0.0, delta: 0.0, gamma: 0.0, theta: 0.0 }
+    }
+    fn minus(self, other: FdSolution) -> Self {
+        FdSolution {
+            npv: self.npv - other.npv,
+            delta: self.delta - other.delta,
+            gamma: self.gamma - other.gamma,
+            theta: self.theta - other.theta,
+        }
+    }
+}
+
 pub fn npv(option: &EquityOption) -> f64 {
-    let s0 = option.base.underlying_price.value();
-    let strike = option.base.strike_price;
+    solution(option).npv
+}
+pub fn delta(option: &EquityOption) -> f64 {
+    solution(option).delta
+}
+pub fn gamma(option: &EquityOption) -> f64 {
+    solution(option).gamma
+}
+pub fn theta(option: &EquityOption) -> f64 {
+    solution(option).theta
+}
+pub fn vega(option: &EquityOption) -> f64 {
+    // parallel vol bump: constant-vol solves shift sigma, local vol solves
+    // shift the implied surface before the Dupire transform
+    let h = 1e-3;
+    (solve_dispatch(option, h, 0.0).npv - solve_dispatch(option, -h, 0.0).npv) / (2.0 * h)
+}
+pub fn rho(option: &EquityOption) -> f64 {
+    let h = 1e-4;
+    (solve_dispatch(option, 0.0, h).npv - solve_dispatch(option, 0.0, -h).npv) / (2.0 * h)
+}
+
+/// Value and grid Greeks in a single solve (two for knock-ins).
+pub fn solution(option: &EquityOption) -> FdSolution {
+    solve_dispatch(option, 0.0, 0.0)
+}
+
+fn solve_dispatch(option: &EquityOption, sigma_bump: f64, r_bump: f64) -> FdSolution {
     let t = option.time_to_maturity();
-    let sigma = option.base.volatility();
-    let r = option.base.risk_free_rate();
-    let q = option.base.dividend_yield;
-    assert!(sigma > 0.0, "volatility must be positive");
     assert!(t >= 0.0, "Option is expired or negative time");
+    let s0 = option.base.underlying_price.value();
     assert!(s0 > 0.0, "underlying price must be positive");
     if t == 0.0 {
-        return option.payoff.payoff(s0, strike);
+        let mut sol = FdSolution::zero();
+        sol.npv = option.payoff.payoff(s0, option.base.strike_price);
+        return sol;
     }
-    solve(option.payoff.as_ref(), s0, strike, r, q, sigma, t)
+
+    if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+        let down = barrier.direction == BarrierDirection::Down;
+        let knocked = if down { s0 <= barrier.barrier } else { s0 >= barrier.barrier };
+        return match barrier.knock {
+            KnockType::Out => {
+                if knocked {
+                    FdSolution::zero()
+                } else {
+                    solve(option, sigma_bump, r_bump, Some(barrier))
+                }
+            }
+            KnockType::In => {
+                // knock-in by parity (European only; guarded upstream):
+                // KI = vanilla leg - KO, which is linear in all Greeks
+                let vanilla = solve(option, sigma_bump, r_bump, None);
+                if knocked {
+                    vanilla
+                } else {
+                    vanilla.minus(solve(option, sigma_bump, r_bump, Some(barrier)))
+                }
+            }
+        };
+    }
+    solve(option, sigma_bump, r_bump, None)
+}
+
+/// Volatility field used to assemble the PDE coefficients.
+enum FdVol<'a> {
+    Const(f64),
+    Local(LocalVol<'a>),
+}
+
+impl FdVol<'_> {
+    fn vol(&self, s: f64, calendar_t: f64) -> f64 {
+        match self {
+            FdVol::Const(v) => *v,
+            FdVol::Local(lv) => lv.vol(s, calendar_t),
+        }
+    }
 }
 
 fn solve(
-    payoff: &dyn Payoff,
-    s0: f64,
-    strike: f64,
-    r: f64,
-    q: f64,
-    sigma: f64,
-    t: f64,
-) -> f64 {
+    option: &EquityOption,
+    sigma_bump: f64,
+    r_bump: f64,
+    knock_out: Option<&BarrierPayoff>,
+) -> FdSolution {
+    let cfg = &option.fd;
+    let payoff = option.payoff.as_ref();
+    let strike = option.base.strike_price;
+    let s0 = option.base.underlying_price.value();
+    let q = option.base.dividend_yield;
+    let t = option.time_to_maturity();
+    let sigma_ref = option.base.volatility() + sigma_bump;
+    assert!(sigma_ref > 0.0, "volatility must be positive");
     let american = matches!(payoff.exercise_style(), ContractStyle::American);
-    let x0 = s0.ln();
-    // grid wide enough that the boundaries are asymptotic for both the spot
-    // and the strike region
-    let drift = (r - q - 0.5 * sigma * sigma) * t;
-    let half_width =
-        GRID_STDEVS * sigma * t.sqrt() + drift.abs() + (strike / s0).ln().abs().max(1e-2);
-    let n = SPOT_STEPS; // nodes 0..=n, x0 at node n/2
-    let dx = 2.0 * half_width / n as f64;
-    let x_min = x0 - half_width;
-    let x_at = |i: usize| x_min + i as f64 * dx;
+    let put = matches!(payoff.put_or_call(), PutOrCall::Put);
 
-    // terminal condition: cell-averaged payoff (handles kinks and digital
-    // jumps at nodes without O(dx) sampling error)
+    let vol_field = match option.mc.model {
+        McModel::Gbm => FdVol::Const(sigma_ref),
+        McModel::LocalVol => FdVol::Local(LocalVol::new(
+            &option.base.vol_surface,
+            &option.base.discount_curve,
+            s0,
+            q,
+            sigma_bump,
+        )),
+        McModel::Heston => panic!(
+            "The Heston model needs a 2-D (ADI) FD solver, which is future \
+             work; use the Analytical or MonteCarlo engines"
+        ),
+    };
+
+    // ── Grid geometry (log-spot). A knock-out barrier becomes the exact
+    // grid edge (absorbing boundary); otherwise the grid centers on x0.
+    let x0 = s0.ln();
+    let r_flat = option.base.risk_free_rate() + r_bump;
+    let drift_width = ((r_flat - q - 0.5 * sigma_ref * sigma_ref) * t).abs();
+    let half_width =
+        cfg.grid_stdevs * sigma_ref * t.sqrt() + drift_width + (strike / s0).ln().abs().max(1e-2);
+    let (x_min, x_max, barrier_low, barrier_high) = match knock_out {
+        Some(b) if b.direction == BarrierDirection::Down => {
+            (b.barrier.ln(), x0 + half_width, true, false)
+        }
+        Some(b) => (x0 - half_width, b.barrier.ln(), false, true),
+        None => (x0 - half_width, x0 + half_width, false, false),
+    };
+    let n = cfg.spot_steps;
+    let dx = (x_max - x_min) / n as f64;
+    let x_at = |i: usize| x_min + i as f64 * dx;
+    let s_grid: Vec<f64> = (0..=n).map(|i| x_at(i).exp()).collect();
+    let exercise: Vec<f64> = s_grid.iter().map(|&s| payoff.payoff(s, strike)).collect();
+
+    // ── Per-step forward rates from the discount curve (term-structure
+    // consistent drift and discounting), plus any rho bump.
+    let steps = cfg.time_steps;
+    let dt = t / steps as f64;
+    let curve = &option.base.discount_curve;
+    let step_rates: Vec<f64> = (0..steps)
+        .map(|k| {
+            // step k advances time-to-expiry tau from k*dt to (k+1)*dt,
+            // i.e. calendar time from t - k*dt back to t - (k+1)*dt
+            let t2 = t - k as f64 * dt;
+            let t1 = t - (k + 1) as f64 * dt;
+            let fwd = if t1 <= 0.0 {
+                curve.zero_rate_with(t2.max(1e-8), Compounding::Continuous)
+            } else {
+                curve
+                    .forward_rate_with(t1, t2, Compounding::Continuous)
+                    .unwrap_or_else(|_| curve.zero_rate_with(t2, Compounding::Continuous))
+            };
+            fwd + r_bump
+        })
+        .collect();
+
+    // terminal condition: cell-averaged payoff
     let mut v: Vec<f64> = (0..=n)
         .map(|i| cell_average_payoff(payoff, strike, x_at(i), dx))
         .collect();
+    if barrier_low {
+        v[0] = 0.0;
+    }
+    if barrier_high {
+        v[n] = 0.0;
+    }
 
-    // constant PDE coefficients in log-spot
-    let mu = r - q - 0.5 * sigma * sigma;
-    let s2 = 0.5 * sigma * sigma;
-    let lower = s2 / (dx * dx) - mu / (2.0 * dx);
-    let diag = -2.0 * s2 / (dx * dx) - r;
-    let upper = s2 / (dx * dx) + mu / (2.0 * dx);
-
-    let dt = t / TIME_STEPS as f64;
-    // interior unknowns are nodes 1..=n-1
-    let m = n - 1;
-
-    let mut rhs = vec![0.0; m];
+    let m = n - 1; // interior unknowns
     let mut sub = vec![0.0; m - 1];
     let mut dia = vec![0.0; m];
     let mut sup = vec![0.0; m - 1];
+    let mut rhs = vec![0.0; m];
+    let mut lower = vec![0.0; n + 1];
+    let mut diag = vec![0.0; n + 1];
+    let mut upper = vec![0.0; n + 1];
 
-    for step in 0..TIME_STEPS {
-        // Rannacher: first steps after expiry fully implicit, then CN
-        let theta = if step < RANNACHER_STEPS { 1.0 } else { 0.5 };
-        let tau_new = (step + 1) as f64 * dt; // time to expiry after this step
+    // cumulative discount and forward growth to the current time layer,
+    // for the generic Dirichlet boundary V(S_b, tau) = D * payoff(S_b * G)
+    let mut cum_df = 1.0;
+    let mut cum_growth = 1.0;
+    let mut theta_layer_value = 0.0; // value at spot one step before the end
 
-        // boundary values at the new time level
-        let fwd_growth = ((r - q) * tau_new).exp();
-        let disc = (-r * tau_new).exp();
-        let boundary = |x: f64| -> f64 {
-            let s_b = x.exp();
-            let mut val = disc * payoff.payoff(s_b * fwd_growth, strike);
+    for step in 0..steps {
+        let theta_w = if step < RANNACHER_STEPS { 1.0 } else { 0.5 };
+        let r_step = step_rates[step];
+        let calendar_mid = (t - (step as f64 + 0.5) * dt).max(0.0);
+        cum_df *= (-r_step * dt).exp();
+        cum_growth *= ((r_step - q) * dt).exp();
+
+        // per-node coefficients at this time layer
+        for i in 0..=n {
+            let sigma = vol_field.vol(s_grid[i], calendar_mid);
+            let s2 = 0.5 * sigma * sigma;
+            let mu = r_step - q - s2;
+            lower[i] = s2 / (dx * dx) - mu / (2.0 * dx);
+            diag[i] = -2.0 * s2 / (dx * dx) - r_step;
+            upper[i] = s2 / (dx * dx) + mu / (2.0 * dx);
+        }
+
+        // boundary values at the new time layer
+        let boundary = |i: usize, is_barrier: bool| -> f64 {
+            if is_barrier {
+                return 0.0;
+            }
+            let mut val = cum_df * payoff.payoff(s_grid[i] * cum_growth, strike);
             if american {
-                val = val.max(payoff.payoff(s_b, strike));
+                val = val.max(exercise[i]);
             }
             val
         };
-        let v_low = boundary(x_at(0));
-        let v_high = boundary(x_at(n));
+        let v_low = boundary(0, barrier_low);
+        let v_high = boundary(n, barrier_high);
 
-        // rhs = (I + (1-theta) dt A) v  restricted to interior nodes
         for i in 1..n {
-            let av = lower * v[i - 1] + diag * v[i] + upper * v[i + 1];
-            rhs[i - 1] = v[i] + (1.0 - theta) * dt * av;
+            let av = lower[i] * v[i - 1] + diag[i] * v[i] + upper[i] * v[i + 1];
+            rhs[i - 1] = v[i] + (1.0 - theta_w) * dt * av;
         }
-        // move the implicit boundary terms to the rhs
-        rhs[0] += theta * dt * lower * v_low;
-        rhs[m - 1] += theta * dt * upper * v_high;
-
-        // lhs = (I - theta dt A)
-        for i in 0..m {
-            dia[i] = 1.0 - theta * dt * diag;
+        rhs[0] += theta_w * dt * lower[1] * v_low;
+        rhs[m - 1] += theta_w * dt * upper[n - 1] * v_high;
+        for i in 1..n {
+            dia[i - 1] = 1.0 - theta_w * dt * diag[i];
         }
-        for i in 0..m - 1 {
-            sub[i] = -theta * dt * lower;
-            sup[i] = -theta * dt * upper;
+        for i in 1..n - 1 {
+            sub[i - 1] = -theta_w * dt * lower[i + 1];
+            sup[i - 1] = -theta_w * dt * upper[i];
         }
 
-        let interior = thomas_algorithm(&sub, &dia, &sup, &rhs);
+        let interior = if american {
+            // Brennan-Schwartz: apply the exercise constraint inside the
+            // back-substitution, sweeping from the out-of-the-money side
+            // toward the exercise region (low spot for puts, high for calls)
+            brennan_schwartz(&sub, &dia, &sup, &rhs, &exercise[1..n], put)
+        } else {
+            thomas_algorithm(&sub, &dia, &sup, &rhs)
+        };
         v[0] = v_low;
         v[n] = v_high;
         v[1..n].copy_from_slice(&interior);
 
-        if american {
-            for i in 0..=n {
-                let exercise = payoff.payoff(x_at(i).exp(), strike);
-                if v[i] < exercise {
-                    v[i] = exercise;
-                }
-            }
+        if step + 1 == steps.saturating_sub(1) {
+            theta_layer_value = read_grid(&v, x_min, dx, x0).0;
         }
     }
 
-    v[n / 2]
+    let (npv, delta_x, gamma_x) = read_grid(&v, x_min, dx, x0);
+    // chain rule from log-spot: V_S = V_x / S, V_SS = (V_xx - V_x) / S^2
+    let delta = delta_x / s0;
+    let gamma = (gamma_x - delta_x) / (s0 * s0);
+    let theta = if steps >= 2 { (theta_layer_value - npv) / dt } else { 0.0 };
+    FdSolution { npv, delta, gamma, theta }
 }
 
-/// Average of the payoff over the grid cell `[x - dx/2, x + dx/2]` (midpoint
-/// sampling in log-spot). For smooth regions this is second-order accurate;
-/// at a digital jump it assigns the node the correct cell fraction.
+/// Quadratic fit through the three nodes nearest `x0`:
+/// returns (value, dV/dx, d2V/dx2) at x0.
+fn read_grid(v: &[f64], x_min: f64, dx: f64, x0: f64) -> (f64, f64, f64) {
+    let n = v.len() - 1;
+    let i = (((x0 - x_min) / dx).round() as usize).clamp(1, n - 1);
+    let e = x0 - (x_min + i as f64 * dx);
+    let b = (v[i + 1] - v[i - 1]) / (2.0 * dx);
+    let c = (v[i + 1] - 2.0 * v[i] + v[i - 1]) / (2.0 * dx * dx);
+    (v[i] + b * e + c * e * e, b + 2.0 * c * e, 2.0 * c)
+}
+
+/// Average of the payoff over the grid cell `[x - dx/2, x + dx/2]`.
 fn cell_average_payoff(payoff: &dyn Payoff, strike: f64, x: f64, dx: f64) -> f64 {
     let k = CELL_AVG_POINTS;
     let mut sum = 0.0;
@@ -182,6 +383,66 @@ pub fn thomas_algorithm(a: &[f64], b: &[f64], c: &[f64], d: &[f64]) -> Vec<f64> 
     x
 }
 
+/// Brennan-Schwartz solve of the linear complementarity problem
+/// `Ax = d, x >= exercise`: standard Thomas elimination with the constraint
+/// applied during back-substitution. The substitution must sweep *toward*
+/// the exercise region, so puts (exercise at low spot) use the natural
+/// high-to-low sweep and calls are solved on the reversed system.
+fn brennan_schwartz(
+    a: &[f64],
+    b: &[f64],
+    c: &[f64],
+    d: &[f64],
+    exercise: &[f64],
+    exercise_at_low_spot: bool,
+) -> Vec<f64> {
+    if exercise_at_low_spot {
+        brennan_schwartz_sweep(a, b, c, d, exercise)
+    } else {
+        // reverse the system: row order flips, sub- and super-diagonals swap
+        let n = d.len();
+        let ar: Vec<f64> = c.iter().rev().copied().collect();
+        let br: Vec<f64> = b.iter().rev().copied().collect();
+        let cr: Vec<f64> = a.iter().rev().copied().collect();
+        let dr: Vec<f64> = d.iter().rev().copied().collect();
+        let er: Vec<f64> = exercise.iter().rev().copied().collect();
+        let mut x = brennan_schwartz_sweep(&ar, &br, &cr, &dr, &er);
+        x.reverse();
+        debug_assert_eq!(x.len(), n);
+        x
+    }
+}
+
+fn brennan_schwartz_sweep(
+    a: &[f64],
+    b: &[f64],
+    c: &[f64],
+    d: &[f64],
+    exercise: &[f64],
+) -> Vec<f64> {
+    let n = d.len();
+    if n == 1 {
+        return vec![(d[0] / b[0]).max(exercise[0])];
+    }
+    let mut c_ = c.to_vec();
+    let mut d_ = d.to_vec();
+    let mut x = vec![0.0; n];
+    c_[0] = c_[0] / b[0];
+    d_[0] = d_[0] / b[0];
+    for i in 1..n - 1 {
+        let id = 1.0 / (b[i] - a[i - 1] * c_[i - 1]);
+        c_[i] = c_[i] * id;
+        d_[i] = (d_[i] - a[i - 1] * d_[i - 1]) * id;
+    }
+    d_[n - 1] = (d_[n - 1] - a[n - 2] * d_[n - 2]) / (b[n - 1] - a[n - 2] * c_[n - 2]);
+
+    x[n - 1] = d_[n - 1].max(exercise[n - 1]);
+    for i in (0..n - 1).rev() {
+        x[i] = (d_[i] - c_[i] * x[i + 1]).max(exercise[i]);
+    }
+    x
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +454,32 @@ mod tests {
         for (got, want) in x.iter().zip(&[1.0, 2.0, 3.0]) {
             assert!((got - want).abs() < 1e-12, "{x:?}");
         }
+    }
+
+    #[test]
+    fn brennan_schwartz_reduces_to_thomas_when_unconstrained() {
+        let a = [1.0, 1.0];
+        let b = [3.0, 3.0, 3.0];
+        let c = [1.0, 1.0];
+        let d = [5.0, 10.0, 11.0];
+        let free = thomas_algorithm(&a, &b, &c, &d);
+        let low = [-1e9, -1e9, -1e9];
+        for dir in [true, false] {
+            let constrained = brennan_schwartz(&a, &b, &c, &d, &low, dir);
+            for (x, y) in free.iter().zip(&constrained) {
+                assert!((x - y).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn brennan_schwartz_enforces_floor() {
+        let a = [1.0, 1.0];
+        let b = [3.0, 3.0, 3.0];
+        let c = [1.0, 1.0];
+        let d = [5.0, 10.0, 11.0];
+        let floor = [10.0, 10.0, 10.0];
+        let x = brennan_schwartz(&a, &b, &c, &d, &floor, true);
+        assert!(x.iter().all(|&v| v >= 10.0 - 1e-12), "{x:?}");
     }
 }

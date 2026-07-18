@@ -4,6 +4,9 @@ use crate::equity::{binomial,finite_difference,montecarlo};
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::vols::VolSurface;
+use crate::equity::asian::{AsianStrikeType, AveragingType};
+use crate::equity::barrier::{BarrierDirection, KnockType};
+use crate::equity::heston;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::{Instrument,Greeks};
 use super::blackscholes;
@@ -20,20 +23,128 @@ pub struct VanillaPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
 }
+
+/// Binary (digital) settlement style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryType {
+    /// Pays a fixed cash amount when in the money.
+    CashOrNothing,
+    /// Delivers the underlying (pays its level) when in the money.
+    AssetOrNothing,
+}
+
 #[derive(Debug)]
 pub struct BinaryPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
+    pub binary_type: BinaryType,
+    /// Amount paid by a cash-or-nothing binary (ignored for asset-or-nothing).
+    pub cash: f64,
 }
 #[derive(Debug)]
 pub struct BarrierPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
+    pub direction: BarrierDirection,
+    pub knock: KnockType,
+    pub barrier: f64,
+}
+
+/// Barrier payoff: `payoff` is the underlying vanilla leg (used by the
+/// analytic building blocks and as the terminal leg of path pricing);
+/// `path_payoff` applies discretely monitored knock logic to a full path.
+/// The Monte Carlo engine additionally applies a Brownian-bridge crossing
+/// correction, so its effective monitoring is continuous.
+impl Payoff for BarrierPayoff {
+    fn payoff(&self, spot: f64, strike: f64) -> f64 {
+        match &self.put_or_call {
+            PutOrCall::Call => (spot - strike).max(0.0),
+            PutOrCall::Put => (strike - spot).max(0.0),
+        }
+    }
+    fn path_payoff(&self, path: &[f64], strike: f64) -> f64 {
+        let crossed = path.iter().any(|&s| match self.direction {
+            BarrierDirection::Up => s >= self.barrier,
+            BarrierDirection::Down => s <= self.barrier,
+        });
+        let alive = match self.knock {
+            KnockType::Out => !crossed,
+            KnockType::In => crossed,
+        };
+        if alive {
+            self.payoff(*path.last().expect("empty path"), strike)
+        } else {
+            0.0
+        }
+    }
+    fn is_path_dependent(&self) -> bool {
+        true
+    }
+    fn payoff_kind(&self) -> PayoffType {
+        PayoffType::Barrier
+    }
+    fn put_or_call(&self) -> &PutOrCall {
+        &self.put_or_call
+    }
+    fn exercise_style(&self) -> &ContractStyle {
+        &self.exercise_style
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 #[derive(Debug)]
 pub struct AsianPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
+    pub averaging: AveragingType,
+    pub strike_type: AsianStrikeType,
+}
+
+/// Asian payoff: the average is taken over the monitored path points
+/// (equally spaced, spot excluded). Fixed strike pays on the average
+/// against the strike; floating strike pays on the terminal spot against
+/// the average.
+impl Payoff for AsianPayoff {
+    /// Degenerate single-point average (used for intrinsic display only;
+    /// engines route Asians through `path_payoff`).
+    fn payoff(&self, spot: f64, strike: f64) -> f64 {
+        match &self.put_or_call {
+            PutOrCall::Call => (spot - strike).max(0.0),
+            PutOrCall::Put => (strike - spot).max(0.0),
+        }
+    }
+    fn path_payoff(&self, path: &[f64], strike: f64) -> f64 {
+        let n = path.len() as f64;
+        let average = match self.averaging {
+            AveragingType::Arithmetic => path.iter().sum::<f64>() / n,
+            AveragingType::Geometric => (path.iter().map(|s| s.ln()).sum::<f64>() / n).exp(),
+        };
+        let terminal = *path.last().expect("empty path");
+        let (long_leg, short_leg) = match self.strike_type {
+            AsianStrikeType::FixedStrike => (average, strike),
+            AsianStrikeType::FloatingStrike => (terminal, average),
+        };
+        match &self.put_or_call {
+            PutOrCall::Call => (long_leg - short_leg).max(0.0),
+            PutOrCall::Put => (short_leg - long_leg).max(0.0),
+        }
+    }
+    fn is_path_dependent(&self) -> bool {
+        true
+    }
+    fn payoff_kind(&self) -> PayoffType {
+        PayoffType::Asian
+    }
+    fn put_or_call(&self) -> &PutOrCall {
+        &self.put_or_call
+    }
+    fn exercise_style(&self) -> &ContractStyle {
+        &self.exercise_style
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 impl Payoff for VanillaPayoff {
     fn payoff(&self, spot: f64, strike: f64) -> f64 {
@@ -51,18 +162,27 @@ impl Payoff for VanillaPayoff {
     fn exercise_style(&self) -> &ContractStyle {
         &self.exercise_style
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
 }
 
-/// Cash-or-nothing binary: pays one unit of currency if the option finishes
-/// in the money (strictly beyond the strike), nothing otherwise.
+/// Binary (digital) payoff, strictly in the money beyond the strike:
+/// cash-or-nothing pays `cash`, asset-or-nothing pays the underlying level.
 impl Payoff for BinaryPayoff {
     fn payoff(&self, spot: f64, strike: f64) -> f64 {
         let in_the_money = match &self.put_or_call {
             PutOrCall::Call => spot > strike,
             PutOrCall::Put => spot < strike,
         };
-        if in_the_money { 1.0 } else { 0.0 }
+        if !in_the_money {
+            return 0.0;
+        }
+        match self.binary_type {
+            BinaryType::CashOrNothing => self.cash,
+            BinaryType::AssetOrNothing => spot,
+        }
     }
     fn payoff_kind(&self) -> PayoffType {
         PayoffType::Binary
@@ -72,6 +192,9 @@ impl Payoff for BinaryPayoff {
     }
     fn exercise_style(&self) -> &ContractStyle {
         &self.exercise_style
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -107,9 +230,14 @@ pub struct EquityOption {
     pub base: EquityOptionBase,
     pub payoff: Box<dyn Payoff>,
     pub engine: Engine,
-    /// Monte Carlo settings (paths, time steps, scheme, sampler, seed);
-    /// only consulted when `engine` is [`Engine::MonteCarlo`].
+    /// Monte Carlo settings (paths, time steps, scheme, sampler, seed).
+    /// `mc.model` (GBM vs local vol) also applies to the FD engine.
     pub mc: montecarlo::MonteCarloConfig,
+    /// Finite difference grid settings; only consulted when `engine` is
+    /// [`Engine::FiniteDifference`].
+    pub fd: finite_difference::FdConfig,
+    /// Heston parameters; required when the model is Heston.
+    pub heston: Option<crate::equity::heston::HestonParams>,
 }
 impl EquityOption{
     pub fn time_to_maturity(&self) -> f64{
@@ -191,10 +319,86 @@ impl EquityOption {
             PayoffType::Vanilla => Box::new(VanillaPayoff{
                 put_or_call:side,
                 exercise_style:style}),
-            PayoffType::Binary => Box::new(BinaryPayoff{
-                put_or_call:side,
-                exercise_style:style}),
-            _ => panic!("Payoff type not implemented yet (supported: vanilla, binary)"),
+            PayoffType::Binary => {
+                let binary_type = match data
+                    .binary_type
+                    .as_deref()
+                    .unwrap_or("cash")
+                    .trim()
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "cash" | "cash_or_nothing" | "cash-or-nothing" => BinaryType::CashOrNothing,
+                    "asset" | "asset_or_nothing" | "asset-or-nothing" => BinaryType::AssetOrNothing,
+                    other => panic!("Invalid binary_type '{other}' (use 'cash' or 'asset')"),
+                };
+                Box::new(BinaryPayoff {
+                    put_or_call: side,
+                    exercise_style: style,
+                    binary_type,
+                    cash: data.cash_amount.unwrap_or(1.0),
+                })
+            }
+            PayoffType::Barrier => {
+                let barrier = data
+                    .barrier_level
+                    .expect("barrier_level is required for barrier options");
+                let (direction, knock) = match data
+                    .barrier_type
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "up_in" | "up-in" | "ui" => (BarrierDirection::Up, KnockType::In),
+                    "up_out" | "up-out" | "uo" => (BarrierDirection::Up, KnockType::Out),
+                    "down_in" | "down-in" | "di" => (BarrierDirection::Down, KnockType::In),
+                    "down_out" | "down-out" | "do" => (BarrierDirection::Down, KnockType::Out),
+                    other => panic!(
+                        "barrier_type must be up_in/up_out/down_in/down_out, got '{other}'"
+                    ),
+                };
+                Box::new(BarrierPayoff {
+                    put_or_call: side,
+                    exercise_style: style,
+                    direction,
+                    knock,
+                    barrier,
+                })
+            }
+            PayoffType::Asian => {
+                let averaging = match data
+                    .averaging_type
+                    .as_deref()
+                    .unwrap_or("arithmetic")
+                    .trim()
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "arithmetic" | "arith" => AveragingType::Arithmetic,
+                    "geometric" | "geo" => AveragingType::Geometric,
+                    other => panic!("averaging_type must be arithmetic or geometric, got '{other}'"),
+                };
+                let strike_type = match data
+                    .asian_strike_type
+                    .as_deref()
+                    .unwrap_or("fixed")
+                    .trim()
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "fixed" | "average_price" => AsianStrikeType::FixedStrike,
+                    "floating" | "average_strike" => AsianStrikeType::FloatingStrike,
+                    other => panic!("asian_strike_type must be fixed or floating, got '{other}'"),
+                };
+                Box::new(AsianPayoff {
+                    put_or_call: side,
+                    exercise_style: style,
+                    averaging,
+                    strike_type,
+                })
+            }
         };
 
         let equityoption = EquityOption {
@@ -209,8 +413,17 @@ impl EquityOption {
                     panic!("Invalid pricer");
                 }
             },
-            mc: montecarlo::MonteCarloConfig::from_data(data)
+            mc: montecarlo::MonteCarloConfig::from_data(data),
+            fd: finite_difference::FdConfig::from_data(data),
+            heston: data.heston
         };
+        if equityoption.mc.model == montecarlo::McModel::Heston {
+            equityoption
+                .heston
+                .expect("heston parameters are required when mc_model = heston")
+                .validate()
+                .expect("invalid heston parameters");
+        }
         Box::new(equityoption)
     }
 }
@@ -308,6 +521,29 @@ impl EquityOption {
 impl Instrument for EquityOption  {
     fn npv(&self) -> f64 {
         let american = matches!(self.payoff.exercise_style(), ContractStyle::American);
+        if self.payoff.is_path_dependent() {
+            if american {
+                panic!("American path-dependent options are not supported yet");
+            }
+            if matches!(self.engine, Engine::Binomial) {
+                panic!("Path-dependent payoffs are not supported on the Binomial engine");
+            }
+            if matches!(self.engine, Engine::FiniteDifference)
+                && matches!(self.payoff.payoff_kind(), PayoffType::Asian)
+            {
+                panic!(
+                    "Asian options are supported on the Analytical and MonteCarlo \
+                     engines only (the FD engine prices barriers, not Asians)"
+                );
+            }
+        }
+        let heston = self.mc.model == montecarlo::McModel::Heston;
+        if heston && matches!(self.engine, Engine::Binomial | Engine::FiniteDifference) {
+            panic!(
+                "The Heston model is supported on the Analytical and MonteCarlo \
+                 engines only (a 2-D ADI FD solver is future work)"
+            );
+        }
         match self.engine {
             Engine::BlackScholes => {
                 if american {
@@ -316,7 +552,11 @@ impl Instrument for EquityOption  {
                          use Binomial, FiniteDifference or MonteCarlo"
                     );
                 }
-                BlackScholesPricer::new().npv(&self)
+                if heston {
+                    heston::analytic_npv(&self)
+                } else {
+                    BlackScholesPricer::new().npv(&self)
+                }
             }
             Engine::MonteCarlo => montecarlo::npv(&self),
             Engine::Binomial => binomial::npv(&self),
@@ -325,39 +565,53 @@ impl Instrument for EquityOption  {
     }
 }
 
-/// Greeks: the Monte Carlo engine computes its own bump-and-reprice Greeks
-/// with common random numbers (and so supports American exercise via
-/// Longstaff-Schwartz repricing); the other engines use the analytic
-/// Black-Scholes closed forms, which are the correct European
-/// sensitivities regardless of which engine produced the NPV.
+/// Greeks per engine: Monte Carlo uses bump-and-reprice with common random
+/// numbers (supporting American via Longstaff-Schwartz repricing); the FD
+/// engine reads delta/gamma/theta off its own grid (so American and barrier
+/// sensitivities are engine-consistent) with vega/rho by re-solving; the
+/// remaining engines use the analytic Black-Scholes closed forms.
 impl EquityOption {
+    fn analytic_heston(&self) -> bool {
+        matches!(self.engine, Engine::BlackScholes | Engine::Binomial)
+            && self.mc.model == montecarlo::McModel::Heston
+    }
     pub fn delta(&self) -> f64 {
         match self.engine {
             Engine::MonteCarlo => montecarlo::delta(&self),
+            Engine::FiniteDifference => finite_difference::delta(&self),
+            _ if self.analytic_heston() => heston::analytic_delta(&self),
             _ => BlackScholesPricer::new().delta(&self),
         }
     }
     pub fn gamma(&self) -> f64 {
         match self.engine {
             Engine::MonteCarlo => montecarlo::gamma(&self),
+            Engine::FiniteDifference => finite_difference::gamma(&self),
+            _ if self.analytic_heston() => heston::analytic_gamma(&self),
             _ => BlackScholesPricer::new().gamma(&self),
         }
     }
     pub fn vega(&self) -> f64 {
         match self.engine {
             Engine::MonteCarlo => montecarlo::vega(&self),
+            Engine::FiniteDifference => finite_difference::vega(&self),
+            _ if self.analytic_heston() => heston::analytic_vega(&self),
             _ => BlackScholesPricer::new().vega(&self),
         }
     }
     pub fn theta(&self) -> f64 {
         match self.engine {
             Engine::MonteCarlo => montecarlo::theta(&self),
+            Engine::FiniteDifference => finite_difference::theta(&self),
+            _ if self.analytic_heston() => heston::analytic_theta(&self),
             _ => BlackScholesPricer::new().theta(&self),
         }
     }
     pub fn rho(&self) -> f64 {
         match self.engine {
             Engine::MonteCarlo => montecarlo::rho(&self),
+            Engine::FiniteDifference => finite_difference::rho(&self),
+            _ if self.analytic_heston() => heston::analytic_rho(&self),
             _ => BlackScholesPricer::new().rho(&self),
         }
     }
