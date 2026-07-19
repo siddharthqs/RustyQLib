@@ -262,10 +262,10 @@ fn price_with(option: &EquityOption, ds: f64, dvol: f64, dr: f64, dt_shift: f64)
         .heston
         .expect("heston parameters are required for the Heston model")
         .with_vol_shift(dvol);
-    let s = option.base.underlying_price.value() + ds;
+    let s = option.base.effective_spot() + ds;
     let k = option.base.strike_price;
     let r = option.base.risk_free_rate() + dr;
-    let q = option.base.dividend_yield;
+    let q = option.base.carry_yield();
     let t = option.time_to_maturity() + dt_shift;
     let pc = *option.payoff.put_or_call();
     match option.payoff.payoff_kind() {

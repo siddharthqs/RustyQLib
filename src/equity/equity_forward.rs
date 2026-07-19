@@ -22,6 +22,8 @@ pub struct EquityForward {
     pub forward_price: Quote, //Forward price you actually locked in.
     pub risk_free_rate: f64,
     pub dividend_yield: f64,
+    /// Continuous stock borrow (repo) cost; part of the carry.
+    pub borrow_cost: f64,
     pub maturity_date: NaiveDate,
     pub valuation_date: NaiveDate,
     pub long_short:LongShort,
@@ -60,6 +62,7 @@ impl EquityForward  {
             forward_price:entry_quote,
             risk_free_rate: risk_free_rate,
             dividend_yield: dividend,
+            borrow_cost: data.base.borrow_cost.unwrap_or(0.0),
             maturity_date: maturity_date,
             valuation_date: today,
             notional:data.notional.unwrap_or(1.0),
@@ -76,7 +79,7 @@ impl EquityForward  {
     }
     fn forward(&self)->f64{
         let discount_df = 1.0/(self.risk_free_rate*self.time_to_maturity()).exp();
-        let dividend_df = 1.0/(self.dividend_yield*self.time_to_maturity()).exp();
+        let dividend_df = 1.0/((self.dividend_yield + self.borrow_cost)*self.time_to_maturity()).exp();
         let forward = self.underlying_price.value()*dividend_df/discount_df;
         forward
     }

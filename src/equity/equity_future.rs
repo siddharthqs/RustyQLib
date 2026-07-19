@@ -23,6 +23,8 @@ pub struct EquityFuture {
     pub multiplier: f64,
     pub risk_free_rate: f64,
     pub dividend_yield: f64,
+    /// Continuous stock borrow (repo) cost; part of the carry.
+    pub borrow_cost: f64,
     pub maturity_date: NaiveDate,
     pub valuation_date: NaiveDate,
     pub long_short:LongShort,
@@ -62,6 +64,7 @@ impl EquityFuture {
             multiplier: data.multiplier.unwrap_or(1.0),
             risk_free_rate: risk_free_rate.unwrap_or(0.0),
             dividend_yield: dividend.unwrap_or(0.0),
+            borrow_cost: data.base.borrow_cost.unwrap_or(0.0),
             maturity_date: maturity_date,
             valuation_date: today,
             long_short:position
@@ -87,7 +90,7 @@ impl EquityFuture {
     }
     fn forward_price(&self)->f64{
         let discount_df = 1.0/(self.risk_free_rate*self.time_to_maturity()).exp();
-        let dividend_df = 1.0/(self.dividend_yield*self.time_to_maturity()).exp();
+        let dividend_df = 1.0/((self.dividend_yield + self.borrow_cost)*self.time_to_maturity()).exp();
         let forward = self.underlying_price.value()*dividend_df/discount_df;
         forward
     }

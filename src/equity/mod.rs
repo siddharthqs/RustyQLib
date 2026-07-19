@@ -1,8 +1,11 @@
 pub mod asian;
+pub mod autocallable;
 pub mod barrier;
 pub mod blackscholes;
+pub mod builder;
 pub mod heston;
 pub mod local_vol;
+pub mod rainbow;
 pub mod vanila_option;
 pub mod montecarlo;
 pub mod forward_start_option;

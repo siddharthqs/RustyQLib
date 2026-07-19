@@ -1,0 +1,82 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "rainbow_option",
+        "symbol": "WORST2",
+        "rainbow_type": "worst_of",
+        "put_or_call": "C",
+        "assets": [
+          { "symbol": "AAA", "spot": 100.0, "volatility": 0.30, "dividend": 0.02 },
+          { "symbol": "BBB", "spot": 95.0, "volatility": 0.25, "dividend": 0.01 }
+        ],
+        "correlations": [[1.0, 0.6], [0.6, 1.0]],
+        "strike_price": 95.0,
+        "maturity": "2027-07-18",
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "pricer": "MC"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "rainbow_option",
+        "symbol": "XCHG",
+        "rainbow_type": "exchange",
+        "assets": [
+          { "symbol": "AAA", "spot": 100.0, "volatility": 0.30, "dividend": 0.02 },
+          { "symbol": "BBB", "spot": 95.0, "volatility": 0.25, "dividend": 0.01 }
+        ],
+        "correlations": [[1.0, 0.6], [0.6, 1.0]],
+        "maturity": "2027-07-18",
+        "risk_free_rate": 0.05,
+        "pricer": "Analytical"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "rainbow_option",
+        "symbol": "SPRD",
+        "rainbow_type": "spread",
+        "put_or_call": "C",
+        "assets": [
+          { "symbol": "AAA", "spot": 100.0, "volatility": 0.30, "dividend": 0.02 },
+          { "symbol": "BBB", "spot": 95.0, "volatility": 0.25, "dividend": 0.01 }
+        ],
+        "correlations": [[1.0, 0.6], [0.6, 1.0]],
+        "strike_price": 5.0,
+        "maturity": "2027-07-18",
+        "risk_free_rate": 0.05,
+        "pricer": "Analytical"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "rainbow_option",
+        "symbol": "BSKT3",
+        "rainbow_type": "basket",
+        "put_or_call": "C",
+        "assets": [
+          { "symbol": "AAA", "spot": 100.0, "volatility": 0.30 },
+          { "symbol": "BBB", "spot": 90.0, "volatility": 0.25 },
+          { "symbol": "CCC", "spot": 110.0, "volatility": 0.35 }
+        ],
+        "correlations": [[1.0, 0.5, 0.3], [0.5, 1.0, 0.4], [0.3, 0.4, 1.0]],
+        "weights": [0.4, 0.3, 0.3],
+        "strike_price": 100.0,
+        "maturity": "2027-07-18",
+        "risk_free_rate": 0.05,
+        "pricer": "Analytical"
+      }
+    }
+  ]
+}

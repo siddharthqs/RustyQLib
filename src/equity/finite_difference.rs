@@ -171,7 +171,7 @@ fn solve(
     let payoff = option.payoff.as_ref();
     let strike = option.base.strike_price;
     let s0 = option.base.underlying_price.value();
-    let q = option.base.dividend_yield;
+    let q = option.base.carry_yield();
     let t = option.time_to_maturity();
     let sigma_ref = option.base.volatility() + sigma_bump;
     assert!(sigma_ref > 0.0, "volatility must be positive");
@@ -232,6 +232,17 @@ fn solve(
                     .unwrap_or_else(|_| curve.zero_rate_with(t2, Compounding::Continuous))
             };
             fwd + r_bump
+        })
+        .collect();
+
+    // cash dividend ex-dates as year fractions inside the option's life
+    let cash_divs: Vec<(f64, f64)> = option
+        .base
+        .cash_dividends
+        .iter()
+        .filter_map(|(date, amount)| {
+            let td = (*date - option.base.valuation_date).num_days() as f64 / 365.0;
+            (td > 0.0 && td <= t).then_some((td, *amount))
         })
         .collect();
 
@@ -317,6 +328,42 @@ fn solve(
         v[0] = v_low;
         v[n] = v_high;
         v[1..n].copy_from_slice(&interior);
+
+        // cash dividend jump condition: when the backward induction crosses
+        // an ex-date, V(S, t_ex^-) = V(S - D, t_ex^+)
+        if !cash_divs.is_empty() {
+            let cal_old = t - step as f64 * dt;
+            let cal_new = t - (step + 1) as f64 * dt;
+            let crossing: f64 = cash_divs
+                .iter()
+                .filter(|(td, _)| *td < cal_old && *td >= cal_new)
+                .map(|(_, amount)| *amount)
+                .sum();
+            if crossing > 0.0 {
+                let shifted: Vec<f64> = (0..=n)
+                    .map(|i| {
+                        let s_target = s_grid[i] - crossing;
+                        if s_target <= s_grid[0] {
+                            v[0]
+                        } else {
+                            let x_target = s_target.ln();
+                            let j =
+                                (((x_target - x_min) / dx).floor() as usize).min(n - 1);
+                            let w = ((x_target - x_at(j)) / dx).clamp(0.0, 1.0);
+                            v[j] * (1.0 - w) + v[j + 1] * w
+                        }
+                    })
+                    .collect();
+                v = shifted;
+                if american {
+                    for i in 0..=n {
+                        if v[i] < exercise[i] {
+                            v[i] = exercise[i];
+                        }
+                    }
+                }
+            }
+        }
 
         if step + 1 == steps.saturating_sub(1) {
             theta_layer_value = read_grid(&v, x_min, dx, x0).0;

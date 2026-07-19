@@ -213,6 +213,14 @@ pub struct EquityOptionBase {
     pub current_price: Quote,
     pub strike_price: f64,
     pub dividend_yield: f64,
+    /// Continuous stock borrow (repo) cost; part of the carry alongside
+    /// the dividend yield.
+    pub borrow_cost: f64,
+    /// Discrete cash dividends (ex-date, amount per share). Analytic,
+    /// tree and terminal Monte Carlo engines use the escrowed model
+    /// (spot minus PV of dividends); path-wise Monte Carlo and finite
+    /// difference apply the jumps at the ex-dates.
+    pub cash_dividends: Vec<(NaiveDate, f64)>,
     /// Volatility surface; a flat surface represents a single constant vol.
     pub vol_surface: VolSurface,
     pub maturity_date: NaiveDate,
@@ -273,6 +281,27 @@ impl EquityOption {
             .expect("Invalid volatility"),
         };
         let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d").expect("Invalid date format");
+        let payoff_type = data.payoff_type.parse::<PayoffType>().unwrap();
+        let strike_price = match payoff_type {
+            // strike is set by the contract mechanics for these payoffs
+            PayoffType::ForwardStart | PayoffType::Autocallable => {
+                data.strike_price.unwrap_or(0.0)
+            }
+            _ => data.strike_price.expect("strike_price is required for this payoff"),
+        };
+        let cash_dividends: Vec<(NaiveDate, f64)> = data
+            .cash_dividends
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|d| {
+                (
+                    NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")
+                        .expect("Invalid cash dividend date"),
+                    d.amount,
+                )
+            })
+            .collect();
         let base_option = EquityOptionBase {
             symbol:data.base.symbol.clone(),
             currency: data.base.currency.clone(),
@@ -284,17 +313,19 @@ impl EquityOption {
 
             underlying_price: Quote::new(data.base.underlying_price),
             current_price: Quote::new(data.current_price.unwrap_or(0.0)),
-            strike_price: data.strike_price,
+            strike_price,
             vol_surface,
             maturity_date,
             discount_curve,
             entry_price: data.entry_price.unwrap_or(0.0),
             long_short: LongShort::LONG,
             dividend_yield: data.dividend.unwrap_or(0.0),
+            borrow_cost: data.base.borrow_cost.unwrap_or(0.0),
+            cash_dividends,
             valuation_date,
             multiplier: data.multiplier.unwrap_or(1.0),
         };
-        let payoff_type = &data.payoff_type.parse::<PayoffType>().unwrap();
+        let payoff_type = &payoff_type;
         let side: PutOrCall;
         let put_or_call = data.put_or_call.clone();
         match put_or_call.trim() {
@@ -399,6 +430,41 @@ impl EquityOption {
                     strike_type,
                 })
             }
+            PayoffType::ForwardStart => {
+                let start_date_str = data
+                    .forward_start_date
+                    .as_ref()
+                    .expect("forward_start_date is required for forward-start options");
+                let start_date = NaiveDate::parse_from_str(start_date_str, "%Y-%m-%d")
+                    .expect("Invalid forward_start_date");
+                assert!(
+                    start_date > valuation_date && start_date < maturity_date,
+                    "forward_start_date must lie between valuation and maturity"
+                );
+                let start_fraction = (start_date - valuation_date).num_days() as f64
+                    / (maturity_date - valuation_date).num_days() as f64;
+                Box::new(crate::equity::forward_start_option::ForwardStartPayoff {
+                    put_or_call: side,
+                    exercise_style: style,
+                    strike_fraction: data.strike_fraction.unwrap_or(1.0),
+                    start_fraction,
+                })
+            }
+            PayoffType::Autocallable => {
+                Box::new(crate::equity::autocallable::AutocallablePayoff {
+                    exercise_style: style,
+                    autocall_barrier: data
+                        .autocall_barrier
+                        .expect("autocall_barrier is required for autocallables"),
+                    protection_barrier: data
+                        .protection_barrier
+                        .expect("protection_barrier is required for autocallables"),
+                    coupon: data.autocall_coupon.unwrap_or(0.0),
+                    observations: data.autocall_observations.unwrap_or(4).max(1),
+                    notional: data.notional.unwrap_or(100.0),
+                    initial_fixing: data.base.underlying_price,
+                })
+            }
         };
 
         let equityoption = EquityOption {
@@ -444,11 +510,36 @@ impl EquityOptionBase {
         self.discount_curve
             .zero_rate_with(self.time_to_maturity(), Compounding::Continuous)
     }
-    /// Forward price of the underlying at maturity implied by the discount
-    /// curve and dividend yield: `S * exp((r - q) * T)`.
+    /// Total continuous carry on the underlying: dividend yield plus
+    /// borrow cost. This is the "q" every pricing formula uses.
+    pub fn carry_yield(&self) -> f64 {
+        self.dividend_yield + self.borrow_cost
+    }
+    /// Present value of the cash dividends with ex-dates inside the
+    /// option's life, discounted on the option's curve.
+    pub fn pv_cash_dividends(&self) -> f64 {
+        self.cash_dividends
+            .iter()
+            .filter(|(date, _)| *date > self.valuation_date && *date <= self.maturity_date)
+            .map(|(date, amount)| {
+                let t = (*date - self.valuation_date).num_days() as f64 / 365.0;
+                amount * self.discount_curve.df(t)
+            })
+            .sum()
+    }
+    /// Escrowed-model spot: the quoted spot minus the PV of cash dividends
+    /// paid over the option's life. This is the lognormal driver for the
+    /// analytic and terminal-simulation engines.
+    pub fn effective_spot(&self) -> f64 {
+        let s = self.underlying_price.value() - self.pv_cash_dividends();
+        assert!(s > 0.0, "cash dividends exceed the spot price");
+        s
+    }
+    /// Forward price of the underlying at maturity: escrowed spot grown at
+    /// the carry-adjusted rate, `(S - PV(divs)) * exp((r - q - b) * T)`.
     pub fn forward_price(&self) -> f64 {
         let t = self.time_to_maturity();
-        self.underlying_price.value() * ((self.risk_free_rate() - self.dividend_yield) * t).exp()
+        self.effective_spot() * ((self.risk_free_rate() - self.carry_yield()) * t).exp()
     }
     /// Black volatility for this option's strike and expiry, read off the
     /// surface (a flat surface returns its single vol).
@@ -457,10 +548,10 @@ impl EquityOptionBase {
             .vol(self.strike_price, self.forward_price(), self.time_to_maturity())
     }
     pub fn d1(&self) -> f64 {
-        //Black-Scholes-Merton d1 function Parameters
+        // Black-Scholes-Merton d1 on the escrowed spot and total carry
         let volatility = self.volatility();
-        let d1_numerator = (self.underlying_price.value() / self.strike_price).ln()
-            + (self.risk_free_rate() - self.dividend_yield + 0.5 * volatility.powi(2))
+        let d1_numerator = (self.effective_spot() / self.strike_price).ln()
+            + (self.risk_free_rate() - self.carry_yield() + 0.5 * volatility.powi(2))
             * self.time_to_maturity();
 
         let d1_denominator = volatility * (self.time_to_maturity().sqrt());
@@ -486,10 +577,10 @@ impl EquityOption {
     /// Newton with arbitrage-bound checks); does not modify the option.
     pub fn try_imp_vol(&self, option_price: f64) -> Result<f64, String> {
         blackscholes::implied_vol_from_price(
-            self.base.underlying_price.value(),
+            self.base.effective_spot(),
             self.base.strike_price,
             self.base.risk_free_rate(),
-            self.base.dividend_yield,
+            self.base.carry_yield(),
             self.time_to_maturity(),
             option_price,
             *self.payoff.put_or_call(),
@@ -529,12 +620,17 @@ impl Instrument for EquityOption  {
                 panic!("Path-dependent payoffs are not supported on the Binomial engine");
             }
             if matches!(self.engine, Engine::FiniteDifference)
-                && matches!(self.payoff.payoff_kind(), PayoffType::Asian)
+                && !matches!(self.payoff.payoff_kind(), PayoffType::Barrier)
             {
                 panic!(
-                    "Asian options are supported on the Analytical and MonteCarlo \
-                     engines only (the FD engine prices barriers, not Asians)"
+                    "Of the path-dependent payoffs only barriers price on the FD \
+                     engine; use MonteCarlo"
                 );
+            }
+            if matches!(self.engine, Engine::BlackScholes)
+                && matches!(self.payoff.payoff_kind(), PayoffType::Autocallable)
+            {
+                panic!("Autocallables price on the MonteCarlo engine only");
             }
         }
         let heston = self.mc.model == montecarlo::McModel::Heston;

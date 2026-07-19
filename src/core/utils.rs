@@ -101,6 +101,12 @@ pub struct ContractOutput {
     /// Monte Carlo standard error of `pv` (None for deterministic engines).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub std_err: Option<f64>,
+    /// Per-asset deltas for multi-asset (rainbow) products.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deltas: Option<Vec<f64>>,
+    /// Per-asset vegas for multi-asset (rainbow) products.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vegas: Option<Vec<f64>>,
     pub error: Option<String>
 }
 

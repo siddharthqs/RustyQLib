@@ -30,6 +30,7 @@ impl BlackScholesPricer {
             PayoffType::Binary => self.npv_binary(bsd_option),
             PayoffType::Barrier => self.npv_barrier(bsd_option),
             PayoffType::Asian => self.npv_asian(bsd_option),
+            PayoffType::ForwardStart => self.npv_forward_start(bsd_option),
             _ => {0.0}
         }
     }
@@ -42,6 +43,7 @@ impl BlackScholesPricer {
             PayoffType::Binary => self.delta_binary(bsd_option),
             PayoffType::Barrier => self.delta_barrier(bsd_option),
             PayoffType::Asian => self.delta_asian(bsd_option),
+            PayoffType::ForwardStart => self.delta_forward_start(bsd_option),
             _ => {0.0}
         }
     }
@@ -51,6 +53,7 @@ impl BlackScholesPricer {
             PayoffType::Binary => self.gamma_binary(bsd_option),
             PayoffType::Barrier => self.gamma_barrier(bsd_option),
             PayoffType::Asian => self.gamma_asian(bsd_option),
+            PayoffType::ForwardStart => self.gamma_forward_start(bsd_option),
             _ => {0.0}
         }
     }
@@ -60,6 +63,7 @@ impl BlackScholesPricer {
             PayoffType::Binary => self.vega_binary(bsd_option),
             PayoffType::Barrier => self.vega_barrier(bsd_option),
             PayoffType::Asian => self.vega_asian(bsd_option),
+            PayoffType::ForwardStart => self.vega_forward_start(bsd_option),
             _ => {0.0}
         }
     }
@@ -69,6 +73,7 @@ impl BlackScholesPricer {
             PayoffType::Binary => self.theta_binary(bsd_option),
             PayoffType::Barrier => self.theta_barrier(bsd_option),
             PayoffType::Asian => self.theta_asian(bsd_option),
+            PayoffType::ForwardStart => self.theta_forward_start(bsd_option),
             _ => {0.0}
         }
     }
@@ -78,6 +83,7 @@ impl BlackScholesPricer {
             PayoffType::Binary => self.rho_binary(bsd_option),
             PayoffType::Barrier => self.rho_barrier(bsd_option),
             PayoffType::Asian => self.rho_asian(bsd_option),
+            PayoffType::ForwardStart => self.rho_forward_start(bsd_option),
             _ => {0.0}
         }
     }
@@ -85,14 +91,14 @@ impl BlackScholesPricer {
 
         let n_d1 = N(bsd_option.base.d1());
         let n_d2 = N(bsd_option.base.d2());
-        let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
+        let df_d = exp(-bsd_option.base.carry_yield() * bsd_option.time_to_maturity());
         let df_r = bsd_option.base.maturity_discount_factor();
         match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => {bsd_option.base.underlying_price.value()*n_d1 *df_d
+            PutOrCall::Call => {bsd_option.base.effective_spot()*n_d1 *df_d
                 -bsd_option.base.strike_price*n_d2*df_r
             }
             PutOrCall::Put => {bsd_option.base.strike_price*N(-bsd_option.base.d2())*df_r-
-                bsd_option.base.underlying_price.value()*N(-bsd_option.base.d1()) *df_d
+                bsd_option.base.effective_spot()*N(-bsd_option.base.d1()) *df_d
                 }
 
         }
@@ -100,7 +106,7 @@ impl BlackScholesPricer {
     fn delta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // spot delta: e^{-qT} N(d1) for a call, e^{-qT}(N(d1)-1) for a put
         let n_d1 = N(bsd_option.base.d1());
-        let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
+        let df_d = exp(-bsd_option.base.carry_yield() * bsd_option.time_to_maturity());
 
         match bsd_option.payoff.put_or_call() {
             PutOrCall::Call => {n_d1 * df_d }
@@ -110,22 +116,22 @@ impl BlackScholesPricer {
     fn gamma_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // e^{-qT} dN(d1) / (S sigma sqrt(T))
         let dn_d1 = dN(bsd_option.base.d1());
-        let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
+        let df_d = exp(-bsd_option.base.carry_yield() * bsd_option.time_to_maturity());
         let var_sqrt = bsd_option.base.volatility() * (bsd_option.time_to_maturity().sqrt());
-        dn_d1 * df_d / (bsd_option.base.underlying_price.value() * var_sqrt)
+        dn_d1 * df_d / (bsd_option.base.effective_spot() * var_sqrt)
     }
     fn vega_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // S e^{-qT} dN(d1) sqrt(T)
         let dn_d1 = dN(bsd_option.base.d1());
-        let df_d = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
-        let df_S = bsd_option.base.underlying_price.value() * df_d;
+        let df_d = exp(-bsd_option.base.carry_yield() * bsd_option.time_to_maturity());
+        let df_S = bsd_option.base.effective_spot() * df_d;
         let vega = df_S * dn_d1 * bsd_option.time_to_maturity().sqrt();
         vega
     }
     fn theta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // call: -S e^{-qT} dN(d1) sigma/(2 sqrt(T)) + q S e^{-qT} N(d1) - r K e^{-rT} N(d2)
         // put:  -S e^{-qT} dN(d1) sigma/(2 sqrt(T)) - q S e^{-qT} N(-d1) + r K e^{-rT} N(-d2)
-        let q = bsd_option.base.dividend_yield;
+        let q = bsd_option.base.carry_yield();
         let r = bsd_option.base.risk_free_rate();
         let k = bsd_option.base.strike_price;
         let dn_d1 = dN(bsd_option.base.d1());
@@ -133,7 +139,7 @@ impl BlackScholesPricer {
         let n_d2 = N(bsd_option.base.d2());
         let df_d = exp(-q * bsd_option.time_to_maturity());
         let df_r = bsd_option.base.maturity_discount_factor();
-        let df_S = bsd_option.base.underlying_price.value() * df_d;
+        let df_S = bsd_option.base.effective_spot() * df_d;
         let t1 = -df_S * dn_d1 * bsd_option.base.volatility()
             / (2.0 * bsd_option.time_to_maturity().sqrt());
 
@@ -180,8 +186,8 @@ impl BlackScholesPricer {
     fn npv_binary(&self, bsd_option: &EquityOption) -> f64 {
         let (binary_type, cash) = Self::binary_details(bsd_option);
         let df_r = bsd_option.base.maturity_discount_factor();
-        let df_q = exp(-bsd_option.base.dividend_yield * bsd_option.time_to_maturity());
-        let s = bsd_option.base.underlying_price.value();
+        let df_q = exp(-bsd_option.base.carry_yield() * bsd_option.time_to_maturity());
+        let s = bsd_option.base.effective_spot();
         match (binary_type, bsd_option.payoff.put_or_call()) {
             (BinaryType::CashOrNothing, PutOrCall::Call) => cash * df_r * N(bsd_option.base.d2()),
             (BinaryType::CashOrNothing, PutOrCall::Put) => cash * df_r * N(-bsd_option.base.d2()),
@@ -193,7 +199,7 @@ impl BlackScholesPricer {
         let (binary_type, cash) = Self::binary_details(bsd_option);
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let s = bsd_option.base.underlying_price.value();
+        let s = bsd_option.base.effective_spot();
         let vol_sqrt_t = sigma * t.sqrt();
         match binary_type {
             BinaryType::CashOrNothing => {
@@ -220,7 +226,7 @@ impl BlackScholesPricer {
         let (binary_type, cash) = Self::binary_details(bsd_option);
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let s = bsd_option.base.underlying_price.value();
+        let s = bsd_option.base.effective_spot();
         let vol_sqrt_t = sigma * t.sqrt();
         let gamma_call = match binary_type {
             BinaryType::CashOrNothing => {
@@ -245,7 +251,7 @@ impl BlackScholesPricer {
         let (binary_type, cash) = Self::binary_details(bsd_option);
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let s = bsd_option.base.underlying_price.value();
+        let s = bsd_option.base.effective_spot();
         let vega_call = match binary_type {
             BinaryType::CashOrNothing => {
                 // - cash e^{-rT} dN(d2) d1 / sigma
@@ -266,10 +272,10 @@ impl BlackScholesPricer {
     fn theta_binary(&self, bsd_option: &EquityOption) -> f64 {
         let (binary_type, cash) = Self::binary_details(bsd_option);
         let r = bsd_option.base.risk_free_rate();
-        let q = bsd_option.base.dividend_yield;
+        let q = bsd_option.base.carry_yield();
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let s = bsd_option.base.underlying_price.value();
+        let s = bsd_option.base.effective_spot();
         match binary_type {
             BinaryType::CashOrNothing => {
                 // dd2/dT = (r - q - sigma^2/2)/(sigma sqrt(T)) - d2/(2T)
@@ -297,7 +303,7 @@ impl BlackScholesPricer {
         let (binary_type, cash) = Self::binary_details(bsd_option);
         let t = bsd_option.time_to_maturity();
         let sigma = bsd_option.base.volatility();
-        let s = bsd_option.base.underlying_price.value();
+        let s = bsd_option.base.effective_spot();
         match binary_type {
             BinaryType::CashOrNothing => {
                 let df_r = bsd_option.base.maturity_discount_factor();
@@ -338,11 +344,11 @@ impl BlackScholesPricer {
             .downcast_ref::<BarrierPayoff>()
             .expect("payoff of kind Barrier must be a BarrierPayoff");
         barrier::barrier_price(
-            bsd_option.base.underlying_price.value() + ds,
+            bsd_option.base.effective_spot() + ds,
             bsd_option.base.strike_price,
             payoff.barrier,
             bsd_option.base.risk_free_rate() + dr,
-            bsd_option.base.dividend_yield,
+            bsd_option.base.carry_yield(),
             bsd_option.base.volatility() + dsigma,
             bsd_option.time_to_maturity() + dt_shift,
             payoff.direction,
@@ -409,10 +415,10 @@ impl BlackScholesPricer {
                  use the MonteCarlo engine"
             );
         }
-        let s = bsd_option.base.underlying_price.value() + ds;
+        let s = bsd_option.base.effective_spot() + ds;
         let k = bsd_option.base.strike_price;
         let r = bsd_option.base.risk_free_rate() + dr;
-        let q = bsd_option.base.dividend_yield;
+        let q = bsd_option.base.carry_yield();
         let sigma = bsd_option.base.volatility() + dsigma;
         let t = bsd_option.time_to_maturity() + dt_shift;
         let pc = *bsd_option.payoff.put_or_call();
@@ -455,6 +461,67 @@ impl BlackScholesPricer {
         let h = 1e-5;
         (Self::asian_price_with(bsd_option, 0.0, 0.0, h, 0.0)
             - Self::asian_price_with(bsd_option, 0.0, 0.0, -h, 0.0))
+            / (2.0 * h)
+    }
+
+    // -- Forward-start options (Rubinstein closed form, GBM) ------------
+
+    fn forward_start_price_with(
+        bsd_option: &EquityOption,
+        ds: f64,
+        dsigma: f64,
+        dr: f64,
+        dt_shift: f64,
+    ) -> f64 {
+        let payoff = bsd_option
+            .payoff
+            .as_any()
+            .downcast_ref::<crate::equity::forward_start_option::ForwardStartPayoff>()
+            .expect("payoff of kind ForwardStart must be a ForwardStartPayoff");
+        let t = bsd_option.time_to_maturity() + dt_shift;
+        crate::equity::forward_start_option::forward_start_price(
+            bsd_option.base.effective_spot() + ds,
+            payoff.strike_fraction,
+            bsd_option.base.risk_free_rate() + dr,
+            bsd_option.base.carry_yield(),
+            bsd_option.base.volatility() + dsigma,
+            payoff.start_fraction * t,
+            t,
+            *bsd_option.payoff.put_or_call(),
+        )
+    }
+    fn npv_forward_start(&self, bsd_option: &EquityOption) -> f64 {
+        Self::forward_start_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+    }
+    fn delta_forward_start(&self, bsd_option: &EquityOption) -> f64 {
+        let h = bsd_option.base.underlying_price.value() * 1e-4;
+        (Self::forward_start_price_with(bsd_option, h, 0.0, 0.0, 0.0)
+            - Self::forward_start_price_with(bsd_option, -h, 0.0, 0.0, 0.0))
+            / (2.0 * h)
+    }
+    fn gamma_forward_start(&self, bsd_option: &EquityOption) -> f64 {
+        let h = bsd_option.base.underlying_price.value() * 1e-3;
+        (Self::forward_start_price_with(bsd_option, h, 0.0, 0.0, 0.0)
+            - 2.0 * Self::forward_start_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+            + Self::forward_start_price_with(bsd_option, -h, 0.0, 0.0, 0.0))
+            / (h * h)
+    }
+    fn vega_forward_start(&self, bsd_option: &EquityOption) -> f64 {
+        let h = 1e-4;
+        (Self::forward_start_price_with(bsd_option, 0.0, h, 0.0, 0.0)
+            - Self::forward_start_price_with(bsd_option, 0.0, -h, 0.0, 0.0))
+            / (2.0 * h)
+    }
+    fn theta_forward_start(&self, bsd_option: &EquityOption) -> f64 {
+        let h = (1.0 / 365.0_f64).min(0.25 * bsd_option.time_to_maturity());
+        -(Self::forward_start_price_with(bsd_option, 0.0, 0.0, 0.0, h)
+            - Self::forward_start_price_with(bsd_option, 0.0, 0.0, 0.0, -h))
+            / (2.0 * h)
+    }
+    fn rho_forward_start(&self, bsd_option: &EquityOption) -> f64 {
+        let h = 1e-5;
+        (Self::forward_start_price_with(bsd_option, 0.0, 0.0, h, 0.0)
+            - Self::forward_start_price_with(bsd_option, 0.0, 0.0, -h, 0.0))
             / (2.0 * h)
     }
 
@@ -643,6 +710,8 @@ pub fn option_pricing() {
         maturity_date: future_date,
         discount_curve,
         dividend_yield: div.trim().parse::<f64>().unwrap(),
+        borrow_cost: 0.0,
+        cash_dividends: vec![],
         valuation_date,
         multiplier: 1.0,
     };
@@ -779,6 +848,8 @@ mod tests {
             current_price: Quote::new(0.0),
             strike_price: 100.0,
             dividend_yield: 0.0,
+            borrow_cost: 0.0,
+            cash_dividends: vec![],
             vol_surface: VolSurface::flat(0.3, valuation_date, DayCountConvention::Act365)
                 .unwrap(),
             maturity_date: NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
@@ -1733,6 +1804,214 @@ mod tests {
         asian.mc.paths = 20_000;
         let asian_price = asian.npv();
         assert!(asian_price > 0.0 && asian_price < vanilla);
+    }
+
+    // ── Borrow cost and dividends ───────────────────────────────────────
+
+    #[test]
+    fn borrow_cost_is_equivalent_to_extra_dividend_yield() {
+        for engine in [Engine::BlackScholes, Engine::FiniteDifference, Engine::MonteCarlo] {
+            let mut with_borrow = test_option(PutOrCall::Call, flat_5pct());
+            with_borrow.base.dividend_yield = 0.01;
+            with_borrow.base.borrow_cost = 0.03;
+            with_borrow.engine = engine.clone();
+            let mut with_yield = test_option(PutOrCall::Call, flat_5pct());
+            with_yield.base.dividend_yield = 0.04;
+            with_yield.engine = engine.clone();
+            assert!(
+                (with_borrow.npv() - with_yield.npv()).abs() < 1e-12,
+                "{engine:?}: borrow {} vs yield {}",
+                with_borrow.npv(),
+                with_yield.npv()
+            );
+        }
+    }
+
+    fn dividend_paying_option(pc: PutOrCall) -> EquityOption {
+        let mut option = test_option(pc, flat_5pct());
+        option.base.cash_dividends =
+            vec![(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), 3.0)];
+        option
+    }
+
+    #[test]
+    fn cash_dividend_prices_as_escrowed_spot_analytically() {
+        let option = dividend_paying_option(PutOrCall::Call);
+        let t_div = (NaiveDate::from_ymd_opt(2026, 7, 1).unwrap()
+            - NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+        .num_days() as f64
+            / 365.0;
+        let s_eff = 100.0 - 3.0 * (-0.05 * t_div).exp();
+        assert!((option.base.effective_spot() - s_eff).abs() < 1e-10);
+        let expected = bs_price(s_eff, 100.0, 0.05, 0.0, 0.3, 1.0, PutOrCall::Call);
+        assert_approx_eq!(option.npv(), expected, 1e-10);
+    }
+
+    #[test]
+    fn put_call_parity_with_dividends_and_borrow() {
+        let mut call = dividend_paying_option(PutOrCall::Call);
+        let mut put = dividend_paying_option(PutOrCall::Put);
+        call.base.borrow_cost = 0.02;
+        put.base.borrow_cost = 0.02;
+        let parity = call.base.effective_spot() * (-call.base.carry_yield()).exp()
+            - 100.0 * (-0.05_f64).exp();
+        assert_approx_eq!(call.npv() - put.npv(), parity, 1e-10);
+    }
+
+    #[test]
+    fn mc_dividend_jumps_close_to_escrowed_analytic() {
+        // the jump model (dividends subtracted on the path) and the
+        // escrowed model differ slightly by construction; they must agree
+        // at the tens-of-basis-points level for moderate dividends
+        let analytic = dividend_paying_option(PutOrCall::Call).npv();
+        let mut mc = dividend_paying_option(PutOrCall::Call);
+        mc.engine = Engine::MonteCarlo;
+        mc.mc.time_steps = 100;
+        mc.mc.paths = 50_000;
+        assert!((mc.npv() - analytic).abs() < 0.3, "mc={} analytic={analytic}", mc.npv());
+    }
+
+    #[test]
+    fn fd_dividend_jump_condition_consistent_with_mc_jump_model() {
+        // FD and path-MC both implement the jump (piecewise lognormal)
+        // dividend model and must agree tightly; both sit a known
+        // ~0.1-0.2 above the escrowed analytic for a call (the classic
+        // escrowed-vs-jump model difference)
+        let mut fd = dividend_paying_option(PutOrCall::Call);
+        fd.engine = Engine::FiniteDifference;
+        let mut mc = dividend_paying_option(PutOrCall::Call);
+        mc.engine = Engine::MonteCarlo;
+        mc.mc.time_steps = 100;
+        mc.mc.paths = 50_000;
+        assert!((fd.npv() - mc.npv()).abs() < 0.1, "fd={} mc={}", fd.npv(), mc.npv());
+        let escrowed = dividend_paying_option(PutOrCall::Call).npv();
+        assert!((fd.npv() - escrowed).abs() < 0.3, "fd={} escrowed={escrowed}", fd.npv());
+    }
+
+    #[test]
+    fn forward_price_reflects_borrow_and_cash_dividends() {
+        let mut option = dividend_paying_option(PutOrCall::Call);
+        option.base.borrow_cost = 0.02;
+        let expected = option.base.effective_spot() * ((0.05 - 0.02) * 1.0_f64).exp();
+        assert_approx_eq!(option.base.forward_price(), expected, 1e-10);
+    }
+
+    // ── Forward-start options ───────────────────────────────────────────
+
+    fn forward_start_option(pc: PutOrCall) -> EquityOption {
+        test_option_with(
+            Box::new(crate::equity::forward_start_option::ForwardStartPayoff {
+                put_or_call: pc,
+                exercise_style: ContractStyle::European,
+                strike_fraction: 1.0,
+                start_fraction: 0.5,
+            }),
+            flat_5pct(),
+        )
+    }
+
+    #[test]
+    fn forward_start_analytic_matches_monte_carlo() {
+        let analytic = forward_start_option(PutOrCall::Call).npv();
+        let mut mc = forward_start_option(PutOrCall::Call);
+        mc.engine = Engine::MonteCarlo;
+        mc.mc.paths = 50_000;
+        assert!((mc.npv() - analytic).abs() < 0.15, "mc={} analytic={analytic}", mc.npv());
+    }
+
+    #[test]
+    fn forward_start_heston_degenerates_to_black_scholes() {
+        let bs = forward_start_option(PutOrCall::Call).npv();
+        let mut heston = forward_start_option(PutOrCall::Call);
+        heston.engine = Engine::MonteCarlo;
+        heston.mc.model = crate::equity::montecarlo::McModel::Heston;
+        heston.mc.paths = 50_000;
+        heston.heston = Some(crate::equity::heston::HestonParams {
+            v0: 0.09,
+            kappa: 1.0,
+            theta: 0.09,
+            vol_of_vol: 1e-3,
+            rho: 0.0,
+        });
+        assert!((heston.npv() - bs).abs() < 0.2, "heston={} bs={bs}", heston.npv());
+    }
+
+    // ── Autocallables ───────────────────────────────────────────────────
+
+    fn autocall_note(autocall_barrier: f64, protection_barrier: f64, coupon: f64) -> EquityOption {
+        let mut option = test_option_with(
+            Box::new(crate::equity::autocallable::AutocallablePayoff {
+                exercise_style: ContractStyle::European,
+                autocall_barrier,
+                protection_barrier,
+                coupon,
+                observations: 4,
+                notional: 100.0,
+                initial_fixing: 100.0,
+            }),
+            flat_5pct(),
+        );
+        option.engine = Engine::MonteCarlo;
+        option.mc.paths = 20_000;
+        option
+    }
+
+    #[test]
+    fn autocall_that_always_calls_pays_coupon_at_first_observation() {
+        // barrier below any reachable spot: every path calls at t1 = T/4
+        let note = autocall_note(1e-9, 50.0, 5.0);
+        let stats = crate::equity::montecarlo::npv_with_stats(&note);
+        let expected = 105.0 * (-0.05 * 0.25_f64).exp();
+        assert_approx_eq!(stats.pv, expected, 1e-9);
+        // identical path values: stderr is pure floating-point cancellation
+        assert!(stats.std_err < 1e-6, "deterministic payoff: stderr {}", stats.std_err);
+    }
+
+    #[test]
+    fn autocall_never_called_with_full_protection_is_a_zero_coupon_bond() {
+        let note = autocall_note(1e12, 1e-9, 5.0);
+        let expected = 100.0 * (-0.05_f64).exp();
+        assert_approx_eq!(note.npv(), expected, 1e-9);
+    }
+
+    #[test]
+    fn autocall_full_downside_is_the_discounted_forward() {
+        // protection always breached, never called: pays N * S_T / S_0,
+        // whose discounted expectation is N (q = 0)
+        let note = autocall_note(1e12, 1e12, 0.0);
+        assert!((note.npv() - 100.0).abs() < 0.3, "{}", note.npv());
+    }
+
+    #[test]
+    fn autocall_value_increases_with_coupon_and_lower_protection() {
+        let base = autocall_note(105.0, 70.0, 5.0).npv();
+        assert!(autocall_note(105.0, 70.0, 8.0).npv() > base, "higher coupon");
+        assert!(autocall_note(105.0, 50.0, 5.0).npv() > base, "lower knock-in barrier");
+    }
+
+    #[test]
+    fn autocall_prices_under_local_vol() {
+        // flat surface: local vol must reproduce the GBM value
+        let gbm = autocall_note(105.0, 70.0, 5.0).npv();
+        let mut lv = autocall_note(105.0, 70.0, 5.0);
+        lv.mc.model = crate::equity::montecarlo::McModel::LocalVol;
+        assert!((lv.npv() - gbm).abs() < 0.5, "lv={} gbm={gbm}", lv.npv());
+    }
+
+    #[test]
+    #[should_panic(expected = "Autocallables price on the MonteCarlo engine only")]
+    fn analytic_engine_rejects_autocallables() {
+        let mut note = autocall_note(105.0, 70.0, 5.0);
+        note.engine = Engine::BlackScholes;
+        note.npv();
+    }
+
+    #[test]
+    #[should_panic(expected = "only barriers price on the FD")]
+    fn fd_engine_rejects_forward_start() {
+        let mut option = forward_start_option(PutOrCall::Call);
+        option.engine = Engine::FiniteDifference;
+        option.npv();
     }
 
     #[test]

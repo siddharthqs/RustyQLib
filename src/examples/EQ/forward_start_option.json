@@ -1,0 +1,44 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "FWDSTART-HESTON",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "forward_start",
+        "forward_start_date": "2027-01-18",
+        "strike_fraction": 1.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-18",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "mc_model": "heston",
+        "heston": { "v0": 0.09, "kappa": 2.0, "theta": 0.09, "vol_of_vol": 0.4, "rho": -0.7 },
+        "pricer": "MC"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "FWDSTART-BS",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "forward_start",
+        "forward_start_date": "2027-01-18",
+        "strike_fraction": 1.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-18",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "pricer": "Analytical"
+      }
+    }
+  ]
+}

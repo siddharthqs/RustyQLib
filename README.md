@@ -27,7 +27,11 @@ put-call parity, replication identities and cross-engine agreement in the test s
   discounting.
 - **Payoffs**: European & American vanillas, cash- and asset-or-nothing binaries,
   all eight barrier types (knock-in/out, up/down), Asian options (arithmetic /
-  geometric, fixed / floating strike).
+  geometric, fixed / floating strike), forward-start options, autocallable
+  notes with coupons and knock-in protection, and **multi-asset rainbow
+  options** (best-of, worst-of, spread, basket, exchange) on n correlated
+  assets. Carry handles dividend yield, discrete cash dividends and stock
+  borrow cost.
 
 ## Products and engines
 
@@ -38,9 +42,15 @@ put-call parity, replication identities and cross-engine agreement in the test s
 | Binary (cash / asset) | closed form / Heston CF | yes | yes (Rannacher + cell averaging) | yes |
 | Barrier (8 types) | Reiner-Rubinstein | — | absorbing boundary / parity | Brownian-bridge corrected |
 | Asian (arith / geo, fixed / floating) | Turnbull-Wakeman / exact geometric | — | — | geometric control variate |
+| Forward-start | Rubinstein (BS) | — | — | yes (incl. Heston forward smile) |
+| Autocallable (coupon/rebate, knock-in protection) | — | — | — | multi-date discounting; GBM / local vol / Heston |
+| Rainbow (best/worst-of, spread, basket, exchange) | Margrabe / Kirk / moment matching | — | — | correlated terminal GBM |
 
 Model availability: local vol runs on the FD and MC engines; Heston runs on the
-analytic (vanilla + binary) and MC engines (all payoffs above except American).
+analytic (vanilla + binary) and MC engines (all payoffs above except American
+and rainbow). Rainbow options are a separate product type
+(`"product_type": "rainbow_option"`) with per-asset spots/vols/dividends and a
+correlation matrix; outputs include per-asset `deltas` and `vegas`.
 
 ### Engine details
 
@@ -111,11 +121,16 @@ Selected fields (all optional unless noted):
 | Field | Meaning |
 |---|---|
 | `pricer` | `Analytical`, `Binomial`, `FD`, `MC` |
-| `payoff_type` | `vanilla`, `binary`, `barrier`, `asian` |
+| `payoff_type` | `vanilla`, `binary`, `barrier`, `asian`, `forward_start`, `autocallable` |
 | `exercise_style` | `European` (default), `American` |
 | `binary_type`, `cash_amount` | `cash` / `asset`, cash paid when ITM |
 | `barrier_type`, `barrier_level` | `up_in`, `up_out`, `down_in`, `down_out` |
 | `averaging_type`, `asian_strike_type` | `arithmetic`/`geometric`, `fixed`/`floating` |
+| `rainbow_type`, `assets`, `correlations`, `weights` | rainbow options: `best_of`, `worst_of`, `spread`, `basket`, `exchange` |
+| `forward_start_date`, `strike_fraction` | forward-start options |
+| `autocall_barrier`, `protection_barrier`, `autocall_coupon`, `autocall_observations`, `notional` | autocallable notes |
+| `borrow_cost` | continuous stock borrow (repo) cost, part of the carry |
+| `cash_dividends` | discrete dividends `[{"date", "amount"}]`; escrowed model on analytic/tree/terminal-MC, jumps on path-MC and FD |
 | `discount_curve` | `flat`, `zero_rates`, `discount_factors`, `forward_rates` |
 | `vol_surface` | `flat`, `strike_expiry`, `moneyness_expiry`, `delta_expiry` |
 | `mc_model` | `gbm` (default), `local_vol`, `heston` (needs `heston` params) |
@@ -125,23 +140,52 @@ Selected fields (all optional unless noted):
 Working examples for every product live in [`src/examples/EQ/`](src/examples/EQ/).
 Monte Carlo outputs include the standard error (`std_err`) alongside price and Greeks.
 
+## Runnable examples
+
+One file per product under [`examples/`](examples/), each pricing across every
+applicable engine and model with identity checks:
+
+```bash
+cargo run --release --example vanilla_option     # all four engines, European + American
+cargo run --release --example barrier_option     # eight barrier types, in-out parity
+cargo run --release --example heston_option      # char. function vs MC, smile shape
+cargo run --release --example local_vol_calibration  # quotes -> surface -> Dupire -> reprice
+```
+
+See [`examples/README.md`](examples/README.md) for the full list.
+
 ## Using it as a library
+
+Build contracts with the fluent builder:
+
+```rust
+use rustyqlib::equity::builder::EquityOptionBuilder;
+use rustyqlib::equity::utils::Engine;
+use rustyqlib::core::trade::PutOrCall;
+use rustyqlib::Instrument;
+
+let option = EquityOptionBuilder::new()
+    .spot(100.0)
+    .strike(100.0)
+    .flat_vol(0.30)
+    .flat_rate(0.05)
+    .dividend_yield(0.02)
+    .years_to_maturity(1.0)
+    .vanilla(PutOrCall::Call)
+    .engine(Engine::FiniteDifference)
+    .build();
+
+println!("pv {:.6}  delta {:.4}", option.npv(), option.delta());
+```
+
+...or deserialize the same JSON the CLI consumes:
 
 ```rust
 use rustyqlib::equity::vanila_option::EquityOption;
 use rustyqlib::core::data_models::EquityOptionData;
-use rustyqlib::Instrument;
 
-let contract: EquityOptionData = serde_json::from_str(r#"{
-    "symbol": "ABC", "underlying_price": 100.0,
-    "put_or_call": "C", "payoff_type": "vanilla",
-    "strike_price": 100.0, "volatility": 0.3,
-    "maturity": "2027-07-17", "risk_free_rate": 0.05,
-    "pricer": "Analytical"
-}"#).unwrap();
-
+let contract: EquityOptionData = serde_json::from_str(json)?;
 let option = EquityOption::from_json(&contract);
-println!("pv {:.6}  delta {:.4}", option.npv(), option.delta());
 ```
 
 Lower-level building blocks are exported directly: `YieldCurve`, `VolSurface`,
@@ -169,8 +213,9 @@ the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo
 - Barrier rebates, double/window barriers, seasoned Asians
 - Rates: curve bootstrapping from deposits/FRAs/swaps onto the core curve type,
   swaps and swaptions; FX (Garman-Kohlhagen)
-- SVI smile parameterization with no-arbitrage checks; pathwise / likelihood-ratio
-  Greeks; multi-asset payoffs
+- Stulz closed forms for two-asset best-of/worst-of; per-asset smiles and
+  path-dependent multi-asset payoffs; SVI smile parameterization with
+  no-arbitrage checks; pathwise / likelihood-ratio Greeks
 - `Result`-based error API for the library surface
 
 ## License

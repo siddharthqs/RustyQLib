@@ -18,7 +18,7 @@ pub fn npv(option: &EquityOption) -> f64 {
     // Calculate parameters for the binomial tree
     let u = (option.base.volatility()*dt.sqrt()).exp(); //up movement
     let d = 1.0 / u; //down movement
-    let a_factor = ((risk_free_rate-option.base.dividend_yield) * dt).exp();
+    let a_factor = ((risk_free_rate-option.base.carry_yield()) * dt).exp();
     let p = (a_factor - d) / (u - d); //martingale probability
     // Create a 2D array to represent the binomial tree
     let mut tree = Array2::from_elem((num_steps + 1, num_steps + 1), 0.0);
@@ -27,7 +27,7 @@ pub fn npv(option: &EquityOption) -> f64 {
     // Terminal payoff via the Payoff trait: works for any terminal payoff
     // (vanilla, binary, ...)
     for j in 0..=num_steps {
-        let spot_price_j = option.base.underlying_price.value * u.powi(num_steps as i32 - j as i32) * d.powi(j as i32);
+        let spot_price_j = option.base.effective_spot() * u.powi(num_steps as i32 - j as i32) * d.powi(j as i32);
         tree[[j,num_steps]] = option.payoff.payoff(spot_price_j, strike);
     }
 
@@ -45,7 +45,7 @@ pub fn npv(option: &EquityOption) -> f64 {
 
             for i in (0..num_steps).rev() {
                 for j in 0..=i {
-                    let spot_price_i =  option.base.underlying_price.value * u.powi(i as i32 - j as i32) * d.powi(j as i32);
+                    let spot_price_i =  option.base.effective_spot() * u.powi(i as i32 - j as i32) * d.powi(j as i32);
                     let discounted_option_price = discount_factor * (p * tree[[ j,i+1]] + (1.0 - p) * tree[[ j + 1,i+1]]);
                     tree[[j,i]] = option.payoff.payoff(spot_price_i, strike).max(discounted_option_price);
                 }

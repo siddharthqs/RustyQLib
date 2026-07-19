@@ -19,14 +19,15 @@ pub enum LongShort{
     LONG,
     SHORT
 }
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PayoffType {
     Vanilla,
     Binary,
     Barrier,
     Asian,
-    // etc.
+    ForwardStart,
+    Autocallable,
 }
 impl FromStr for PayoffType {
     type Err = Box<dyn Error>;
@@ -36,6 +37,8 @@ impl FromStr for PayoffType {
             "binary" => Ok(PayoffType::Binary),
             "barrier" => Ok(PayoffType::Barrier),
             "asian" => Ok(PayoffType::Asian),
+            "forward_start" | "forwardstart" => Ok(PayoffType::ForwardStart),
+            "autocallable" | "autocall" => Ok(PayoffType::Autocallable),
             _ => Err("Invalid payoff type".into()),
         }
     }

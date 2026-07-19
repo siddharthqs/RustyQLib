@@ -8,6 +8,7 @@ pub enum ProductData {
     Option(EquityOptionData),
     Future(EquityFutureData),
     Forward(EquityForwardData),
+    RainbowOption(crate::equity::rainbow::RainbowOptionData),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -21,7 +22,17 @@ pub struct EquityInstrumentBase {
     pub underlying_price: f64,
     pub long_short: Option<i32>,
     pub risk_free_rate: Option<f64>,
+    /// Continuous stock borrow (repo) cost; enters the carry like an
+    /// additional dividend yield (hard-to-borrow lowers the forward).
+    pub borrow_cost: Option<f64>,
     pub settlement_type: Option<String>,
+}
+
+/// A discrete cash dividend: ex-date and amount per share.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CashDividendData {
+    pub date: String,
+    pub amount: f64,
 }
 
 
@@ -65,7 +76,22 @@ pub struct EquityOptionData {
     pub averaging_type: Option<String>,
     /// Asian strike: "fixed" (default, average price) | "floating" (average strike).
     pub asian_strike_type: Option<String>,
-    pub strike_price: f64,
+    /// Forward-start: strike fixing date and strike as a fraction of the
+    /// fixing spot (default 1.0).
+    pub forward_start_date: Option<String>,
+    pub strike_fraction: Option<f64>,
+    /// Autocallable: early-redemption and knock-in protection levels
+    /// (absolute), per-period coupon (rebate), observation count, notional.
+    pub autocall_barrier: Option<f64>,
+    pub protection_barrier: Option<f64>,
+    pub autocall_coupon: Option<f64>,
+    pub autocall_observations: Option<usize>,
+    pub notional: Option<f64>,
+    /// Discrete cash dividends (ex-date + amount per share).
+    pub cash_dividends: Option<Vec<CashDividendData>>,
+    /// Strike; required for vanilla/binary/barrier/asian payoffs, unused
+    /// for forward-start and autocallable contracts.
+    pub strike_price: Option<f64>,
     /// Constant volatility; the simple alternative to `vol_surface`.
     pub volatility: Option<f64>,
     pub maturity: String,

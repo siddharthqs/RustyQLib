@@ -23,6 +23,8 @@ pub fn handle_equity_contract(data: &Contract) -> String {
                 theta: option.theta(),
                 rho: option.rho(),
                 std_err,
+                deltas: None,
+                vegas: None,
                 error: None
             };
             println!("Theoretical Price ${}", contract_output.pv);
@@ -43,6 +45,8 @@ pub fn handle_equity_contract(data: &Contract) -> String {
                 theta: future.theta(),
                 rho: future.rho(),
                 std_err: None,
+                deltas: None,
+                vegas: None,
                 error: None
             };
             println!("Equity Future Price: {}", contract_output.pv);
@@ -62,6 +66,8 @@ pub fn handle_equity_contract(data: &Contract) -> String {
                 theta: future.theta(),
                 rho: future.rho(),
                 std_err: None,
+                deltas: None,
+                vegas: None,
                 error: None
             };
             println!("Equity Forward Price: {}", contract_output.pv);
@@ -71,6 +77,31 @@ pub fn handle_equity_contract(data: &Contract) -> String {
             };
             serde_json::to_string(&combined_).expect("Failed to generate output")
         }
+        ProductData::RainbowOption(rb) => {
+            let option = crate::equity::rainbow::RainbowOption::from_json(rb);
+            let stats = option.npv_with_stats();
+            let pv = match stats {
+                Some(s) => s.pv,
+                None => option.npv(),
+            };
+            let contract_output = ContractOutput {
+                pv,
+                // scalar Greeks are per-asset for rainbows: see deltas/vegas
+                delta: 0.0,
+                gamma: 0.0,
+                vega: 0.0,
+                theta: option.theta(),
+                rho: option.rho(),
+                std_err: stats.map(|s| s.std_err),
+                deltas: Some(option.deltas()),
+                vegas: Some(option.vegas()),
+                error: None,
+            };
+            println!("Rainbow Option Price: {}", contract_output.pv);
+            let combined_ = CombinedContract { contract: data.clone(), output: contract_output };
+            serde_json::to_string(&combined_).expect("Failed to generate output")
+        }
+        #[allow(unreachable_patterns)]
         _ => {
             panic!("Unsupported or missing product_type for asset EQ");
         }

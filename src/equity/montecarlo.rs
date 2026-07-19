@@ -31,6 +31,7 @@ use rayon::prelude::*;
 
 use crate::core::utils::ContractStyle;
 use super::asian::{self, AsianStrikeType, AveragingType};
+use super::autocallable::AutocallablePayoff;
 use super::barrier::{BarrierDirection, KnockType};
 use super::heston::HestonParams;
 use super::local_vol::LocalVol;
@@ -215,10 +216,42 @@ fn market_params(option: &EquityOption) -> MarketParams {
         s0: option.base.underlying_price.value(),
         strike: option.base.strike_price,
         r: option.base.risk_free_rate(),
-        q: option.base.dividend_yield,
+        q: option.base.carry_yield(),
         sigma: option.base.volatility(),
         t: option.time_to_maturity(),
     }
+}
+
+/// Cash dividend amounts bucketed per simulation step (None if there are
+/// none): path simulation subtracts them at the ex-date step.
+fn dividends_per_step(option: &EquityOption, t: f64, steps: usize) -> Option<Vec<f64>> {
+    if option.base.cash_dividends.is_empty() {
+        return None;
+    }
+    let dt = t / steps as f64;
+    let mut buckets = vec![0.0; steps];
+    for (date, amount) in &option.base.cash_dividends {
+        let td = (*date - option.base.valuation_date).num_days() as f64 / 365.0;
+        if td > 0.0 && td <= t {
+            let idx = (((td / dt).ceil() as usize).max(1) - 1).min(steps - 1);
+            buckets[idx] += amount;
+        }
+    }
+    Some(buckets)
+}
+
+/// Escrowed-model spot consistent with the bumped market params: rho bumps
+/// shift the dividend discounting, delta bumps move the raw spot.
+fn escrowed_spot(option: &EquityOption, p: &MarketParams) -> f64 {
+    let dr = p.r - option.base.risk_free_rate();
+    let mut pv = 0.0;
+    for (date, amount) in &option.base.cash_dividends {
+        let td = (*date - option.base.valuation_date).num_days() as f64 / 365.0;
+        if td > 0.0 && td <= p.t {
+            pv += amount * option.base.discount_curve.df(td) * (-dr * td).exp();
+        }
+    }
+    p.s0 - pv
 }
 
 pub fn npv(option: &EquityOption) -> f64 {
@@ -308,7 +341,7 @@ fn path_vol<'a>(option: &'a EquityOption, p: &MarketParams) -> PathVol<'a> {
             // the local vol function is frozen at the calibration spot;
             // spot bumps (delta/gamma) move the path start, not the model
             option.base.underlying_price.value(),
-            option.base.dividend_yield,
+            option.base.carry_yield(),
             // vega bumps enter as a parallel shift of the implied surface
             p.sigma - option.base.volatility(),
         )),
@@ -425,6 +458,8 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
             barrier_npv(option, barrier, p)
         } else if let Some(asian) = option.payoff.as_any().downcast_ref::<AsianPayoff>() {
             asian_npv(option, asian, p)
+        } else if let Some(auto) = option.payoff.as_any().downcast_ref::<AutocallablePayoff>() {
+            autocall_npv(option, auto, p)
         } else {
             generic_path_npv(option, p)
         };
@@ -436,6 +471,7 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         // exact one-step GBM transition (constant vol only)
         let drift = (p.r - p.q - 0.5 * p.sigma * p.sigma) * p.t;
         let vol_sqrt_t = p.sigma * p.t.sqrt();
+        let s0 = escrowed_spot(option, p);
         let z = match cfg.sampler {
             Sampler::Sobol => sobol_normals(cfg.paths),
             Sampler::PseudoRandom => pseudo_normals(cfg.paths, cfg.seed),
@@ -446,7 +482,7 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
                 let (mut sum, mut sum_sq) = (0.0, 0.0);
                 for z in chunk {
                     let v = df
-                        * option.payoff.payoff(p.s0 * exp(drift + vol_sqrt_t * z), p.strike);
+                        * option.payoff.payoff(s0 * exp(drift + vol_sqrt_t * z), p.strike);
                     sum += v;
                     sum_sq += v * v;
                 }
@@ -460,12 +496,16 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let dt = p.t / steps as f64;
     let vol_model = path_vol(option, p);
     let draws = PathDraws::new(cfg, steps, dt);
+    let divs = dividends_per_step(option, p.t, steps);
     let drift = p.r - p.q;
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, _| {
         let mut s = p.s0;
         for (i, d) in dw.iter().enumerate() {
             let sigma = vol_model.vol(s, i as f64 * dt);
             s = step(cfg.scheme, s, dt, *d, drift, sigma);
+            if let Some(divs) = &divs {
+                s = (s - divs[i]).max(1e-8);
+            }
         }
         df * option.payoff.payoff(s, p.strike)
     });
@@ -482,12 +522,16 @@ fn generic_path_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let vol_model = path_vol(option, p);
     let draws = PathDraws::new(cfg, steps, dt);
     let drift = p.r - p.q;
+    let divs = dividends_per_step(option, p.t, steps);
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
         path.clear();
         let mut s = p.s0;
         for (i, d) in dw.iter().enumerate() {
             let sigma = vol_model.vol(s, i as f64 * dt);
             s = step(cfg.scheme, s, dt, *d, drift, sigma);
+            if let Some(divs) = &divs {
+                s = (s - divs[i]).max(1e-8);
+            }
             path.push(s);
         }
         df * option.payoff.path_payoff(path, p.strike)
@@ -506,7 +550,8 @@ fn asian_npv(option: &EquityOption, asian: &AsianPayoff, p: &MarketParams) -> Mc
     let use_control_variate = asian.averaging == AveragingType::Arithmetic
         && asian.strike_type == AsianStrikeType::FixedStrike
         && cfg.model == McModel::Gbm
-        && cfg.scheme == DiscretizationScheme::Exact;
+        && cfg.scheme == DiscretizationScheme::Exact
+        && option.base.cash_dividends.is_empty();
     if !use_control_variate {
         return generic_path_npv(option, p);
     }
@@ -561,12 +606,16 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
     let vol_model = path_vol(option, p);
     let draws = PathDraws::new(cfg, steps, dt);
     let drift = p.r - p.q;
+    let divs = dividends_per_step(option, p.t, steps);
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, _| {
         let mut s = p.s0;
         let mut survival = if knocked_at_start { 0.0 } else { 1.0 };
         for (i, d) in dw.iter().enumerate() {
             let sigma = vol_model.vol(s, i as f64 * dt);
-            let s_next = step(cfg.scheme, s, dt, *d, drift, sigma);
+            let mut s_next = step(cfg.scheme, s, dt, *d, drift, sigma);
+            if let Some(divs) = &divs {
+                s_next = (s_next - divs[i]).max(1e-8);
+            }
             if survival > 0.0 {
                 let crossed = if down { s_next <= h } else { s_next >= h };
                 if crossed {
@@ -586,6 +635,45 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
         let vanilla_leg = option.payoff.payoff(s, p.strike);
         let weight = if out { survival } else { 1.0 - survival };
         df * weight * vanilla_leg
+    });
+    stats(sum, sum_sq, cfg.paths, steps, 0.0)
+}
+
+/// Autocallable valuation: cash flows land on their own call dates, so
+/// each path value is the redemption amount times the discount factor of
+/// its payment date (curve discount factors, shifted consistently under
+/// rho bumps). Steps are aligned so every observation falls exactly on a
+/// simulation step. Runs under GBM and local vol.
+fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketParams) -> McStats {
+    let cfg = &option.mc;
+    let n_obs = auto.observations.max(1);
+    let steps = effective_steps(cfg).max(PATH_DEPENDENT_MIN_STEPS).div_ceil(n_obs) * n_obs;
+    let dt = p.t / steps as f64;
+    let obs_idx: Vec<usize> = (1..=n_obs).map(|m| m * steps / n_obs - 1).collect();
+    let dr = p.r - option.base.risk_free_rate();
+    let dfs: Vec<f64> = obs_idx
+        .iter()
+        .map(|&i| {
+            let tm = (i + 1) as f64 * dt;
+            option.base.discount_curve.df(tm) * exp(-dr * tm)
+        })
+        .collect();
+    let divs = dividends_per_step(option, p.t, steps);
+    let vol_model = path_vol(option, p);
+    let draws = PathDraws::new(cfg, steps, dt);
+    let drift = p.r - p.q;
+    let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
+        path.clear();
+        let mut s = p.s0;
+        for (i, d) in dw.iter().enumerate() {
+            let sigma = vol_model.vol(s, i as f64 * dt);
+            s = step(cfg.scheme, s, dt, *d, drift, sigma);
+            if let Some(divs) = &divs {
+                s = (s - divs[i]).max(1e-8);
+            }
+            path.push(s);
+        }
+        auto.path_value(path, &obs_idx, &dfs)
     });
     stats(sum, sum_sq, cfg.paths, steps, 0.0)
 }
@@ -640,6 +728,25 @@ fn heston_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         return stats(sum, sum_sq, cfg.paths, steps, 0.0);
     }
 
+    if let Some(auto) = option.payoff.as_any().downcast_ref::<AutocallablePayoff>() {
+        let n_obs = auto.observations.max(1);
+        let steps = steps.div_ceil(n_obs) * n_obs;
+        let dt = p.t / steps as f64;
+        let obs_idx: Vec<usize> = (1..=n_obs).map(|m| m * steps / n_obs - 1).collect();
+        let dr = p.r - option.base.risk_free_rate();
+        let dfs: Vec<f64> = obs_idx
+            .iter()
+            .map(|&i| {
+                let tm = (i + 1) as f64 * dt;
+                option.base.discount_curve.df(tm) * exp(-dr * tm)
+            })
+            .collect();
+        let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, _| {
+            auto.path_value(spots, &obs_idx, &dfs)
+        });
+        return stats(sum, sum_sq, cfg.paths, steps, 0.0);
+    }
+
     let path_dependent = option.payoff.is_path_dependent();
     let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, _| {
         let v = if path_dependent {
@@ -670,6 +777,7 @@ where
     let sqrt_dt = dt.sqrt();
     let rho = hp.rho;
     let rho_perp = (1.0 - rho * rho).sqrt();
+    let divs = dividends_per_step(option, p.t, steps);
     let chunks = cfg.paths.div_ceil(PATH_CHUNK);
     let partials: Vec<(f64, f64)> = (0..chunks)
         .into_par_iter()
@@ -690,6 +798,9 @@ where
                     let v_pos = v.max(0.0);
                     let sqrt_v = v_pos.sqrt();
                     s *= exp((drift - 0.5 * v_pos) * dt + sqrt_v * sqrt_dt * z_s);
+                    if let Some(divs) = &divs {
+                        s = (s - divs[j]).max(1e-8);
+                    }
                     v += hp.kappa * (hp.theta - v_pos) * dt
                         + hp.vol_of_vol * sqrt_v * sqrt_dt * z_v;
                     spots[j] = s;
@@ -964,6 +1075,8 @@ pub fn option_pricing() {
         maturity_date: future_date,
         discount_curve,
         dividend_yield: div.trim().parse::<f64>().unwrap(),
+        borrow_cost: 0.0,
+        cash_dividends: vec![],
         valuation_date,
         multiplier: 1.0,
     };

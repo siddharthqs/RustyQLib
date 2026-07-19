@@ -1,0 +1,75 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "DIV-ANALYTIC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "vanilla",
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-18",
+        "dividend": 0.01,
+        "borrow_cost": 0.005,
+        "cash_dividends": [
+          { "date": "2026-11-18", "amount": 1.5 },
+          { "date": "2027-05-18", "amount": 1.5 }
+        ],
+        "risk_free_rate": 0.05,
+        "pricer": "Analytical"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "DIV-FD-AMERICAN",
+        "underlying_price": 100.0,
+        "put_or_call": "P",
+        "payoff_type": "vanilla",
+        "exercise_style": "American",
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-18",
+        "dividend": 0.01,
+        "borrow_cost": 0.005,
+        "cash_dividends": [
+          { "date": "2026-11-18", "amount": 1.5 },
+          { "date": "2027-05-18", "amount": 1.5 }
+        ],
+        "risk_free_rate": 0.05,
+        "pricer": "FD"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "DIV-MC-BARRIER",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "barrier",
+        "barrier_type": "down_out",
+        "barrier_level": 85.0,
+        "strike_price": 100.0,
+        "volatility": 0.3,
+        "maturity": "2027-07-18",
+        "dividend": 0.01,
+        "borrow_cost": 0.005,
+        "cash_dividends": [
+          { "date": "2026-11-18", "amount": 1.5 },
+          { "date": "2027-05-18", "amount": 1.5 }
+        ],
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "pricer": "MC"
+      }
+    }
+  ]
+}
