@@ -21,6 +21,7 @@ Release mode matters: the Monte Carlo examples run 50k–100k paths.
 | `heston_option` | Heston stochastic vol | semi-analytic characteristic function vs MC; binaries and barriers; **how rho and vol-of-vol shape the smile** |
 | `rainbow_option` | Multi-asset rainbows | best-of, worst-of, spread (Kirk), basket (moment matching), exchange (Margrabe); correlation sweep; per-asset Greeks |
 | `local_vol_calibration` | Local vol workflow | quotes -> implied vols -> surface -> Dupire -> reprice, end to end with checks at each step |
+| `convert_format` | JSON <-> XML conversion | transcoding contract documents between the two supported formats |
 | `dividends_and_borrow` | Carry inputs | borrow cost as carry; escrowed vs jump dividend models per engine; where the difference matters |
 
 ## Reading the output

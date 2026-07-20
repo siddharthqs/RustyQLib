@@ -49,8 +49,10 @@ impl Date {
         Self { year, month, day }
     }
 
-    /// Days since a fixed epoch (0000-03-01 proleptic Gregorian) – used for
-    /// computing day differences without pulling in a date library.
+    /// Days since the Unix epoch (1970-01-01), proleptic Gregorian – used
+    /// for day differences and as the inverse of [`from_epoch`]. The
+    /// `- 719468` offset shifts the internal 0000-03-01 era count onto the
+    /// Unix epoch so that `from_epoch(days_since_epoch(d)) == d`.
     fn days_since_epoch(self) -> i64 {
         let y = self.year as i64;
         let m = self.month as i64;
@@ -61,7 +63,7 @@ impl Date {
         let yoe = y.rem_euclid(400); // year of era [0, 399]
         let doy = (153 * m + 2) / 5 + d - 1; // day of year [0, 365]
         let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // day of era
-        era * 146097 + doe
+        era * 146097 + doe - 719468
     }
 
     /// Compute the number of calendar days between two dates (self is start).
@@ -555,9 +557,16 @@ mod tests {
 
     #[test]
     fn test_date_arithmetic() {
-        let d = Date::new(2024, 1, 1);
-        let d2 = d.add_days(365);
-        assert_eq!(d2, Date::new(2025, 1, 1));
+        // 2024 is a leap year (366 days), so 365 days after Jan 1 is Dec 31
+        assert_eq!(Date::new(2024, 1, 1).add_days(365), Date::new(2024, 12, 31));
+        assert_eq!(Date::new(2024, 1, 1).add_days(366), Date::new(2025, 1, 1));
+        // 2023 is not a leap year
+        assert_eq!(Date::new(2023, 1, 1).add_days(365), Date::new(2024, 1, 1));
+        // round trip through the epoch, including a month/leap-day boundary
+        let d = Date::new(2024, 2, 28);
+        assert_eq!(d.add_days(1), Date::new(2024, 2, 29));
+        assert_eq!(d.add_days(2), Date::new(2024, 3, 1));
+        assert_eq!(d.days_until(d.add_days(400)), 400);
     }
 
     #[test]

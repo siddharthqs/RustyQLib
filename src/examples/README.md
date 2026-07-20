@@ -20,6 +20,7 @@ rustyqlib file --input src/examples/EQ/<file>.json --output out.json
 | `rainbow_option.json` | Multi-asset rainbows | worst-of (MC), exchange (Margrabe), spread (Kirk), basket (moment matching) |
 | `dividends_borrow.json` | Carry inputs | cash dividends + borrow cost across analytic, FD (American) and MC (barrier) |
 | `eq2.json`, `equity_forward.json` | Forward / future contracts | linear products |
+| `equity_option.xml` | Same as `equity_option.json`, in XML | the XML conventions: `<item>` arrays, attributes as fields, nested arrays |
 
 ## Rates (`IR/`) and commodities (`CO/`)
 
@@ -31,3 +32,14 @@ rustyqlib file --input src/examples/EQ/<file>.json --output out.json
 
 Monte Carlo outputs include a `std_err` field; rainbow outputs report
 per-asset `deltas` and `vegas`.
+
+## JSON and XML
+
+Any of these files can be written in either format. The input format is
+detected from the content, the output format from the output extension:
+
+```bash
+rustyqlib file --input contracts.xml  --output results.json   # XML in, JSON out
+rustyqlib file --input contracts.json --output results.xml    # JSON in, XML out
+cargo run --release --example convert_format -- in.json out.xml
+```

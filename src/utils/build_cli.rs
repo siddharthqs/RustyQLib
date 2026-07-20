@@ -1,7 +1,7 @@
 use std::time::Instant;
 use clap::{Arg, ArgMatches, Command};
 use std::fs::File;
-use crate::utils::parse_json;
+use crate::utils::parse_contracts;
 use std::fs;
 use std::path::Path;
 use std::io;
@@ -86,7 +86,7 @@ pub fn handle_build(matches: &ArgMatches) {
     // We measure the time of the operation
     measure_time("build_curve", || {
         let mut file = File::open(input_file).expect("Failed to open JSON file");
-        parse_json::build_curve(&mut file, output_file);
+        parse_contracts::build_curve(&mut file, output_file);
         println!("(Stub) build_curve from {}", input_file);
     });
 
@@ -100,7 +100,7 @@ pub fn handle_file(matches: &ArgMatches) {
 
     measure_time("parse_contract (single file)", || {
         let mut file = File::open(input_file).expect("Failed to open JSON file");
-        parse_json::parse_contract(&mut file, output_file);
+        parse_contracts::parse_contract(&mut file, output_file);
         println!("(Stub) parse_contract from {}", input_file);
     });
 }
@@ -121,15 +121,20 @@ pub fn handle_dir(matches: &ArgMatches) {
             let dir_entry = file_result.expect("Failed to read entry");
             let path = dir_entry.path();
 
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                let mut file = File::open(&path).expect("Failed to open JSON file");
+            let is_contract_file = path.is_file()
+                && matches!(
+                    path.extension().and_then(|s| s.to_str()).map(|e| e.to_lowercase()).as_deref(),
+                    Some("json") | Some("xml")
+                );
+            if is_contract_file {
+                let mut file = File::open(&path).expect("Failed to open contract file");
 
                 // Construct the corresponding output file path
                 let output_file_path = output_path.join(
                     path.file_name().expect("Failed to get file name"),
                 );
 
-                parse_json::parse_contract(&mut file, output_file_path.to_str().unwrap());
+                parse_contracts::parse_contract(&mut file, output_file_path.to_str().unwrap());
                 println!(
                     "(Stub) parse_contract from {:?} -> {:?}",
                     path, output_file_path

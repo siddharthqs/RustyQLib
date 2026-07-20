@@ -28,6 +28,8 @@ use crate::core::vols::VolSurface;
 use crate::equity::handle_equity_contracts::handle_equity_contract;
 
 use rayon::prelude::*;
+use serde_json::Value;
+use crate::core::serialization::{self, Format};
 /// This function saves the output to a file and returns the path to the file.
 pub fn save_to_file<'a>(output_folder: &'a str, subfolder: &'a str, filename: &'a str, output: &'a str) -> String {
     let mut dir = std::path::PathBuf::from(output_folder);
@@ -45,11 +47,13 @@ pub fn save_to_file<'a>(output_folder: &'a str, subfolder: &'a str, filename: &'
 }
 
 /// This function different types of curves such as term structure, volatility surface, etc.
-pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
+pub fn build_curve(file: &mut File, output_filename: &str) -> () {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
-        .expect("Failed to read JSON file");
-    let list_contracts: Contracts = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
+        .expect("Failed to read curve definition file");
+    let format = Format::detect(&contents);
+    let list_contracts: Contracts = serialization::parse(&contents, format)
+        .unwrap_or_else(|e| panic!("Failed to read {format:?} curve definition: {e}"));
     if list_contracts.contracts.len() == 0 {
         panic!("No contracts found in JSON file");
     }
@@ -59,8 +63,11 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
         let vol_surface = crate::equity::vol_surface::build_implied_vol_surface(&contracts)
             .expect("Failed to build implied vol surface");
         println!("{}", vol_surface);
-        let serialized_vol_surface = serde_json::to_string(&vol_surface).unwrap();
-        let out_dir = save_to_file(output_filename, "vol_surface", "vol_surface.json", &serialized_vol_surface);
+        let vol_value = serde_json::to_value(&vol_surface).unwrap();
+        let serialized_vol_surface =
+            serialization::render_value(&vol_value, format, "vol_surface");
+        let filename = format!("vol_surface.{}", format.extension());
+        let out_dir = save_to_file(output_filename, "vol_surface", &filename, &serialized_vol_surface);
         println!("Volatility surface saved to {}", out_dir);
     }
     else if list_contracts.asset=="CO"{
@@ -84,15 +91,22 @@ pub fn build_curve(mut file: &mut File,output_filename: &str)->() {
     }
 }
 
-pub fn parse_contract(mut file: &mut File,output_filename: &str) {
+/// Price every contract in a document. The input format is detected from
+/// the content (JSON or XML) and the output format from the output file
+/// extension, defaulting to the input format.
+pub fn parse_contract(file: &mut File, output_filename: &str) {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
-        .expect("Failed to read JSON file");
+        .expect("Failed to read contract file");
 
-    let list_contracts: Contracts = serde_json::from_str(&contents).expect("Failed to deserialize JSON");
+    let in_format = Format::detect(&contents);
+    let out_format = Format::from_path(output_filename).unwrap_or(in_format);
 
-    if list_contracts.contracts.len() == 0 {
-        println!("No contracts found in JSON file");
+    let list_contracts: Contracts = serialization::parse(&contents, in_format)
+        .unwrap_or_else(|e| panic!("Failed to read {in_format:?} contracts: {e}"));
+
+    if list_contracts.contracts.is_empty() {
+        println!("No contracts found in the input document");
         return;
     }
     // parallel processing of each contract using rayon
@@ -101,13 +115,13 @@ pub fn parse_contract(mut file: &mut File,output_filename: &str) {
         .collect();
     output_vec.sort_by_key(|k| k.0);
 
-    let output_vec: Vec<String> = output_vec.into_iter().map(|(_,v)| v).collect();
-    let output_str = output_vec.join(",");
+    let results: Vec<Value> = output_vec.into_iter().map(|(_,v)| v).collect();
+    let output_str = serialization::render_results(&results, out_format);
     //Write to file
     let mut file = File::create(output_filename).expect("Failed to create file");
     file.write_all(output_str.as_bytes()).expect("Failed to write to file");
 }
-pub fn process_contract(data: &Contract) -> String {
+pub fn process_contract(data: &Contract) -> serde_json::Value {
 
     let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
     let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
@@ -201,11 +215,11 @@ pub fn process_contract(data: &Contract) -> String {
         }
         let df = deposit.get_discount_factor();
         println!("Discount Factor {:?}",df);
-        return "Work in progress".to_string();
+        return serde_json::Value::String("Work in progress".to_string());
     }
     else{
         panic!("Invalid action");
     }
-    return "Invalid Action".to_string();
+    return serde_json::Value::String("Invalid Action".to_string());
 
 }

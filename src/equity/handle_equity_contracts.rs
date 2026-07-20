@@ -4,7 +4,7 @@ use crate::core::data_models::ProductData;
 use crate::equity::equity_forward::EquityForward;
 use crate::equity::vanila_option::EquityOption;
 use crate::equity::equity_future::EquityFuture;
-pub fn handle_equity_contract(data: &Contract) -> String {
+pub fn handle_equity_contract(data: &Contract) -> serde_json::Value {
     match &data.product_type {
         ProductData::Option(opt) => {
             let option = EquityOption::from_json(opt);
@@ -33,7 +33,7 @@ pub fn handle_equity_contract(data: &Contract) -> String {
                 contract: data.clone(),
                 output:contract_output
             };
-            serde_json::to_string(&combined_).expect("Failed to generate output")
+            serde_json::to_value(&combined_).expect("Failed to generate output")
         }
         ProductData::Future(fut) => {
             let future = EquityFuture::from_json(fut);
@@ -54,7 +54,7 @@ pub fn handle_equity_contract(data: &Contract) -> String {
                 contract: data.clone(),
                 output: contract_output
             };
-            serde_json::to_string(&combined_).expect("Failed to generate output")
+            serde_json::to_value(&combined_).expect("Failed to generate output")
         }
         ProductData::Forward(forward) => {
             let future = EquityForward::from_json(forward);
@@ -75,7 +75,7 @@ pub fn handle_equity_contract(data: &Contract) -> String {
                 contract: data.clone(),
                 output: contract_output
             };
-            serde_json::to_string(&combined_).expect("Failed to generate output")
+            serde_json::to_value(&combined_).expect("Failed to generate output")
         }
         ProductData::RainbowOption(rb) => {
             let option = crate::equity::rainbow::RainbowOption::from_json(rb);
@@ -99,7 +99,7 @@ pub fn handle_equity_contract(data: &Contract) -> String {
             };
             println!("Rainbow Option Price: {}", contract_output.pv);
             let combined_ = CombinedContract { contract: data.clone(), output: contract_output };
-            serde_json::to_string(&combined_).expect("Failed to generate output")
+            serde_json::to_value(&combined_).expect("Failed to generate output")
         }
         #[allow(unreachable_patterns)]
         _ => {

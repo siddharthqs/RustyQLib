@@ -4,11 +4,11 @@
 ![Crates.io](https://img.shields.io/crates/v/rustyqlib)
 [![codecov](https://codecov.io/gh/siddharthqs/RustyQLib/graph/badge.svg?token=879K6LTTR4)](https://codecov.io/gh/siddharthqs/RustyQLib)
 
-# RustyQLib — Pricing Options with Confidence using JSON
+# RustyQLib — Pricing Options with Confidence using JSON or XML
 
 RustyQLib is a lightweight quantitative finance library written entirely in Rust.
-It prices equity derivatives through JSON contracts (a stateless pricing service in a
-single binary) or as a Rust library, with an emphasis on numerically validated
+It prices equity derivatives through JSON or XML contracts (a stateless pricing service
+in a single binary) or as a Rust library, with an emphasis on numerically validated
 implementations: every pricer is cross-checked against independent oracles,
 put-call parity, replication identities and cross-engine agreement in the test suite.
 
@@ -20,6 +20,7 @@ put-call parity, replication identities and cross-engine agreement in the test s
 - **Three models** — Black-Scholes, **Dupire local volatility** (calibrated
   non-parametrically from an implied vol surface), and **Heston stochastic
   volatility** (semi-analytic characteristic-function pricing + Monte Carlo).
+- **JSON and XML** contracts and results, over a single shared schema.
 - **Market-standard infrastructure** — discount curves with discount factors as the
   source of truth (flat / zero rates / discount factors / forward rates in, any
   compounding), volatility surfaces (flat, strike x expiry, moneyness, FX-style
@@ -139,6 +140,47 @@ Selected fields (all optional unless noted):
 
 Working examples for every product live in [`src/examples/EQ/`](src/examples/EQ/).
 Monte Carlo outputs include the standard error (`std_err`) alongside price and Greeks.
+
+### XML contracts
+
+Every contract can equally be written in XML — the input format is detected from the
+content and the output format from the output file extension, so `-o results.xml`
+writes XML and `-o results.json` writes JSON regardless of the input:
+
+```xml
+<contracts>
+  <asset>EQ</asset>
+  <contracts>
+    <item>
+      <action>PV</action>
+      <asset>EQ</asset>
+      <product_type product_type="option">
+        <symbol>ABC</symbol>
+        <underlying_price>100.0</underlying_price>
+        <put_or_call>C</put_or_call>
+        <payoff_type>vanilla</payoff_type>
+        <strike_price>100.0</strike_price>
+        <volatility>0.3</volatility>
+        <maturity>2027-07-17</maturity>
+        <risk_free_rate>0.05</risk_free_rate>
+        <pricer>Analytical</pricer>
+      </product_type>
+    </item>
+  </contracts>
+</contracts>
+```
+
+Conventions: elements are object fields; **attributes are fields too** (convenient for
+enum tags such as `type="flat"`); `<item>` children make an array, including
+single-element ones; scalars are inferred, so numbers become numbers while
+`2027-07-17` and `C` stay strings. See
+[`src/examples/EQ/equity_option.xml`](src/examples/EQ/equity_option.xml), and convert
+between formats with `cargo run --example convert_format -- in.json out.xml`.
+
+XML is a *syntax* over the same data model — documents are transcoded to
+`serde_json::Value` and deserialized with the same derives, so both formats share one
+schema, one set of defaults and one set of validation rules, and every new product
+supports both automatically.
 
 ## Runnable examples
 

@@ -10,29 +10,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  test:
+    name: Build and test
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Install Tarpaulin.
-      run: cargo install cargo-tarpaulin
-    - name: Generate code coverage report.
-      run:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --verbose
+      - name: Run tests
+        run: cargo test --verbose
+
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    # Coverage is informational: a tarpaulin or Codecov hiccup must never
+    # fail the pipeline. The `test` job above is the real gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+      - name: Generate code coverage report
+        # A generous per-test timeout: the Monte Carlo tests run tens of
+        # thousands of paths and are much slower under instrumentation.
+        run: >
           cargo tarpaulin
           --verbose
-          --all-features
           --workspace
-          --timeout 120
+          --timeout 300
           --out Xml
           --exclude-files 'src/main.rs'
-    - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v3
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
+      - name: Upload coverage report to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

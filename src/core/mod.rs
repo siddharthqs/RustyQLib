@@ -1,5 +1,6 @@
 pub mod curves;
 pub mod daycount;
+pub mod serialization;
 pub mod vols;
 pub mod interpolation;
 pub mod termstructure;
