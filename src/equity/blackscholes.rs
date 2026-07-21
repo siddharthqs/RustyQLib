@@ -25,6 +25,9 @@ impl BlackScholesPricer {
         //assert!(bsd_option.volatility >= 0.0);
         assert!(bsd_option.time_to_maturity() >= 0.0, "Option is expired or negative time");
         assert!(bsd_option.base.underlying_price.value >= 0.0, "Negative underlying price not allowed");
+        if bsd_option.base.is_futures_option() {
+            return self.npv_black76(bsd_option);
+        }
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.npv_vanilla(bsd_option),
             PayoffType::Binary => self.npv_binary(bsd_option),
@@ -38,6 +41,9 @@ impl BlackScholesPricer {
         //assert!(bsd_option.volatility >= 0.0);
         assert!(bsd_option.time_to_maturity() >= 0.0, "Option is expired or negative time");
         assert!(bsd_option.base.underlying_price.value >= 0.0, "Negative underlying price not allowed");
+        if bsd_option.base.is_futures_option() {
+            return self.delta_black76(bsd_option);
+        }
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.delta_vanilla(bsd_option),
             PayoffType::Binary => self.delta_binary(bsd_option),
@@ -48,6 +54,9 @@ impl BlackScholesPricer {
         }
     }
     pub fn gamma(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.gamma_black76(bsd_option);
+        }
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.gamma_vanilla(bsd_option),
             PayoffType::Binary => self.gamma_binary(bsd_option),
@@ -58,6 +67,9 @@ impl BlackScholesPricer {
         }
     }
     pub fn vega(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.vega_black76(bsd_option);
+        }
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.vega_vanilla(bsd_option),
             PayoffType::Binary => self.vega_binary(bsd_option),
@@ -68,6 +80,9 @@ impl BlackScholesPricer {
         }
     }
     pub fn theta(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.theta_black76(bsd_option);
+        }
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.theta_vanilla(bsd_option),
             PayoffType::Binary => self.theta_binary(bsd_option),
@@ -78,6 +93,9 @@ impl BlackScholesPricer {
         }
     }
     pub fn rho(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.rho_black76(bsd_option);
+        }
         match &bsd_option.payoff.payoff_kind() {
             PayoffType::Vanilla => self.rho_vanilla(bsd_option),
             PayoffType::Binary => self.rho_binary(bsd_option),
@@ -86,6 +104,48 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.rho_forward_start(bsd_option),
             _ => {0.0}
         }
+    }
+    // ── Black-76: European options on a future ─────────────────────────
+    // The underlying_price is the futures price F; there is no spot,
+    // dividend or carry. Vol is read from the surface at (K, F, T).
+
+    fn black76_inputs(bsd_option: &EquityOption)
+        -> (f64, f64, f64, f64, f64, PutOrCall, crate::equity::black76::FuturesSettlement)
+    {
+        let f = bsd_option.base.underlying_price.value();
+        let k = bsd_option.base.strike_price;
+        let r = bsd_option.base.risk_free_rate();
+        let t = bsd_option.time_to_maturity();
+        let sigma = bsd_option.base.vol_surface.vol(k, f, t);
+        let settlement = bsd_option
+            .base
+            .futures_settlement
+            .expect("black76 pricer called on a non-futures option");
+        (f, k, r, sigma, t, *bsd_option.payoff.put_or_call(), settlement)
+    }
+    fn npv_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::price(f, k, r, sig, t, pc, s)
+    }
+    fn delta_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::delta(f, k, r, sig, t, pc, s)
+    }
+    fn gamma_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, _pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::gamma(f, k, r, sig, t, s)
+    }
+    fn vega_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, _pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::vega(f, k, r, sig, t, s)
+    }
+    fn theta_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::theta(f, k, r, sig, t, pc, s)
+    }
+    fn rho_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::rho(f, k, r, sig, t, pc, s)
     }
     fn npv_vanilla(&self, bsd_option: &EquityOption) -> f64 {
 
@@ -712,6 +772,7 @@ pub fn option_pricing() {
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         borrow_cost: 0.0,
         cash_dividends: vec![],
+        futures_settlement: None,
         valuation_date,
         multiplier: 1.0,
     };
@@ -850,6 +911,7 @@ mod tests {
             dividend_yield: 0.0,
             borrow_cost: 0.0,
             cash_dividends: vec![],
+        futures_settlement: None,
             vol_surface: VolSurface::flat(0.3, valuation_date, DayCountConvention::Act365)
                 .unwrap(),
             maturity_date: NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
@@ -1894,6 +1956,146 @@ mod tests {
         option.base.borrow_cost = 0.02;
         let expected = option.base.effective_spot() * ((0.05 - 0.02) * 1.0_f64).exp();
         assert_approx_eq!(option.base.forward_price(), expected, 1e-10);
+    }
+
+    #[test]
+    fn cash_dividend_with_carry_discounts_at_net_carry() {
+        // with a continuous carry present, the cash dividend must be
+        // discounted at (r - carry), not r, so the escrowed spot and the
+        // analytic forward match the jump-model ground truth
+        // F = (S - D e^{-(r-carry)t}) e^{(r-carry)T}
+        let carry = 0.03;
+        let mut option = dividend_paying_option(PutOrCall::Call);
+        option.base.borrow_cost = carry;
+        let (r, s, d, t) = (0.05, 100.0, 3.0, 1.0);
+        let t_div = (NaiveDate::from_ymd_opt(2026, 7, 1).unwrap()
+            - NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+        .num_days() as f64
+            / 365.0;
+
+        let s_eff = s - d * (-(r - carry) * t_div).exp();
+        assert_approx_eq!(option.base.effective_spot(), s_eff, 1e-10);
+
+        let jump_forward = s_eff * ((r - carry) * t).exp();
+        assert_approx_eq!(option.base.forward_price(), jump_forward, 1e-10);
+    }
+
+    #[test]
+    fn net_carry_discounting_flows_through_to_price_and_stays_near_jump_engines() {
+        // The fix guarantees forward consistency (checked above); this
+        // confirms it flows through to the analytic price, which is exactly
+        // the escrowed lognormal on the net-carry spot, and that the price
+        // stays within the escrowed-vs-jump tolerance of the FD engine.
+        //
+        // Note: matching the forward does NOT make the escrowed *price*
+        // equal the jump price — the escrowed model applies vol to S - PV
+        // rather than to S with a jump, an intrinsic approximation. So we
+        // check the band, not exact agreement.
+        let carry = 0.03;
+        let mut analytic = dividend_paying_option(PutOrCall::Call);
+        analytic.base.borrow_cost = carry;
+        let a = analytic.npv();
+
+        let expected =
+            bs_price(analytic.base.effective_spot(), 100.0, 0.05, carry, 0.3, 1.0, PutOrCall::Call);
+        assert_approx_eq!(a, expected, 1e-10);
+
+        let mut fd = dividend_paying_option(PutOrCall::Call);
+        fd.base.borrow_cost = carry;
+        fd.engine = Engine::FiniteDifference;
+        assert!((a - fd.npv()).abs() < 0.2, "analytic {a} vs fd {}", fd.npv());
+    }
+
+    // ── Options on futures (Black-76) ───────────────────────────────────
+
+    fn futures_option(
+        pc: PutOrCall,
+        settlement: crate::equity::black76::FuturesSettlement,
+    ) -> EquityOption {
+        crate::equity::builder::EquityOptionBuilder::new()
+            .symbol("FUT")
+            .spot(100.0) // interpreted as the futures price F
+            .strike(100.0)
+            .flat_vol(0.30)
+            .flat_rate(0.05)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+            .vanilla(pc)
+            .on_future(settlement)
+            .engine(Engine::BlackScholes)
+            .build()
+    }
+
+    #[test]
+    fn black76_option_api_matches_closed_form() {
+        use crate::equity::black76::FuturesSettlement::*;
+        for (settlement, gold) in [(Discounted, 11.34202064), (Margined, 11.92353847)] {
+            let option = futures_option(PutOrCall::Call, settlement);
+            assert_approx_eq!(option.npv(), gold, 1e-7);
+        }
+        // spot-check a Greek reaches the option API too
+        let call = futures_option(PutOrCall::Call, Discounted);
+        assert_approx_eq!(call.delta(), 0.53232482, 1e-7);
+        assert_approx_eq!(call.rho(), -11.34202064, 1e-6);
+    }
+
+    #[test]
+    fn margined_futures_option_has_zero_rho_and_exceeds_discounted() {
+        use crate::equity::black76::FuturesSettlement::*;
+        let disc = futures_option(PutOrCall::Call, Discounted).npv();
+        let marg = futures_option(PutOrCall::Call, Margined);
+        assert_eq!(marg.rho(), 0.0);
+        assert!(marg.npv() > disc);
+        assert_approx_eq!(marg.npv(), disc * (0.05_f64).exp(), 1e-9);
+    }
+
+    #[test]
+    fn black76_on_the_forward_equals_spot_black_scholes() {
+        // a discounted Black-76 option on F = S e^{(r-q)T} must equal the
+        // equivalent spot option priced by the equity Black-Scholes engine
+        let (s, q, r, t): (f64, f64, f64, f64) = (100.0, 0.02, 0.05, 1.0);
+        let fwd = s * ((r - q) * t).exp();
+        let futures_opt = crate::equity::builder::EquityOptionBuilder::new()
+            .spot(fwd)
+            .strike(100.0)
+            .flat_vol(0.30)
+            .flat_rate(r)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+            .vanilla(PutOrCall::Call)
+            .on_future(crate::equity::black76::FuturesSettlement::Discounted)
+            .build();
+        let spot_opt = crate::equity::builder::EquityOptionBuilder::new()
+            .spot(s)
+            .strike(100.0)
+            .flat_vol(0.30)
+            .flat_rate(r)
+            .dividend_yield(q)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+            .vanilla(PutOrCall::Call)
+            .build();
+        assert_approx_eq!(futures_opt.npv(), spot_opt.npv(), 1e-10);
+    }
+
+    #[test]
+    fn put_call_parity_on_futures_both_styles() {
+        use crate::equity::black76::FuturesSettlement::*;
+        for (settlement, df) in [(Discounted, (-0.05_f64).exp()), (Margined, 1.0)] {
+            let c = futures_option(PutOrCall::Call, settlement).npv();
+            let p = futures_option(PutOrCall::Put, settlement).npv();
+            // F = K = 100 -> parity value is 0
+            assert_approx_eq!(c - p, df * (100.0 - 100.0), 1e-10);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Options on futures (Black-76) price on the Analytical engine only")]
+    fn futures_option_rejects_non_analytic_engine() {
+        let mut option =
+            futures_option(PutOrCall::Call, crate::equity::black76::FuturesSettlement::Discounted);
+        option.engine = Engine::MonteCarlo;
+        option.npv();
     }
 
     // ── Forward-start options ───────────────────────────────────────────

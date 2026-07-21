@@ -54,6 +54,7 @@ pub struct EquityOptionBuilder {
     dividend_yield: f64,
     borrow_cost: f64,
     cash_dividends: Vec<(NaiveDate, f64)>,
+    futures_settlement: Option<crate::equity::black76::FuturesSettlement>,
     valuation_date: NaiveDate,
     maturity_date: Option<NaiveDate>,
     exercise_style: ContractStyle,
@@ -83,6 +84,7 @@ impl EquityOptionBuilder {
             dividend_yield: 0.0,
             borrow_cost: 0.0,
             cash_dividends: Vec::new(),
+            futures_settlement: None,
             valuation_date: Local::now().date_naive(),
             maturity_date: None,
             exercise_style: ContractStyle::European,
@@ -137,6 +139,15 @@ impl EquityOptionBuilder {
     }
     pub fn cash_dividend(mut self, date: NaiveDate, amount: f64) -> Self {
         self.cash_dividends.push((date, amount));
+        self
+    }
+    /// Price the option on a future with Black-76: `spot` is then the
+    /// futures price `F`. European vanilla, Analytical engine only.
+    pub fn on_future(
+        mut self,
+        settlement: crate::equity::black76::FuturesSettlement,
+    ) -> Self {
+        self.futures_settlement = Some(settlement);
         self
     }
 
@@ -328,6 +339,7 @@ impl EquityOptionBuilder {
             dividend_yield: self.dividend_yield,
             borrow_cost: self.borrow_cost,
             cash_dividends: self.cash_dividends,
+            futures_settlement: self.futures_settlement,
             vol_surface,
             maturity_date,
             valuation_date: self.valuation_date,

@@ -4,7 +4,7 @@
 ![Crates.io](https://img.shields.io/crates/v/rustyqlib)
 [![codecov](https://codecov.io/gh/siddharthqs/RustyQLib/graph/badge.svg?token=879K6LTTR4)](https://codecov.io/gh/siddharthqs/RustyQLib)
 
-# RustyQLib — Pricing Options with Confidence using JSON or XML
+# RustyQLib — Pricing Options using JSON or XML
 
 RustyQLib is a lightweight quantitative finance library written entirely in Rust.
 It prices equity derivatives through JSON or XML contracts (a stateless pricing service
@@ -26,6 +26,8 @@ put-call parity, replication identities and cross-engine agreement in the test s
   compounding), volatility surfaces (flat, strike x expiry, moneyness, FX-style
   delta quotes), robust implied vol, day counts, term-structure-consistent PDE
   discounting.
+- **Options on futures**: European vanillas priced with Black-76, both
+  standard (discounted premium) and futures-style (margined, undiscounted).
 - **Payoffs**: European & American vanillas, cash- and asset-or-nothing binaries,
   all eight barrier types (knock-in/out, up/down), Asian options (arithmetic /
   geometric, fixed / floating strike), forward-start options, autocallable
@@ -39,6 +41,7 @@ put-call parity, replication identities and cross-engine agreement in the test s
 | Payoff | Analytic | Binomial | Finite difference | Monte Carlo |
 |---|---|---|---|---|
 | Vanilla European | Black-Scholes / Heston CF | yes | yes (grid Greeks) | yes (+ stderr) |
+| Vanilla on a future | Black-76 (discounted / margined) | — | — | — |
 | Vanilla American | — | yes | Brennan-Schwartz | two-pass Longstaff-Schwartz |
 | Binary (cash / asset) | closed form / Heston CF | yes | yes (Rannacher + cell averaging) | yes |
 | Barrier (8 types) | Reiner-Rubinstein | — | absorbing boundary / parity | Brownian-bridge corrected |
@@ -131,6 +134,7 @@ Selected fields (all optional unless noted):
 | `forward_start_date`, `strike_fraction` | forward-start options |
 | `autocall_barrier`, `protection_barrier`, `autocall_coupon`, `autocall_observations`, `notional` | autocallable notes |
 | `borrow_cost` | continuous stock borrow (repo) cost, part of the carry |
+| `futures_settlement` | option on a future (Black-76): `discounted` (standard) or `margined` (futures-style); `underlying_price` is then the futures price |
 | `cash_dividends` | discrete dividends `[{"date", "amount"}]`; escrowed model on analytic/tree/terminal-MC, jumps on path-MC and FD |
 | `discount_curve` | `flat`, `zero_rates`, `discount_factors`, `forward_rates` |
 | `vol_surface` | `flat`, `strike_expiry`, `moneyness_expiry`, `delta_expiry` |

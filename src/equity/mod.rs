@@ -1,6 +1,7 @@
 pub mod asian;
 pub mod autocallable;
 pub mod barrier;
+pub mod black76;
 pub mod blackscholes;
 pub mod builder;
 pub mod heston;

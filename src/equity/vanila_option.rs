@@ -216,6 +216,11 @@ pub struct EquityOptionBase {
     /// Continuous stock borrow (repo) cost; part of the carry alongside
     /// the dividend yield.
     pub borrow_cost: f64,
+    /// When set, the underlying is a future priced with Black-76
+    /// (`underlying_price` is the futures price `F`), settled either with an
+    /// up-front discounted premium or futures-style margined. European
+    /// vanilla only, on the Analytical engine.
+    pub futures_settlement: Option<crate::equity::black76::FuturesSettlement>,
     /// Discrete cash dividends (ex-date, amount per share). Analytic,
     /// tree and terminal Monte Carlo engines use the escrowed model
     /// (spot minus PV of dividends); path-wise Monte Carlo and finite
@@ -302,6 +307,16 @@ impl EquityOption {
                 )
             })
             .collect();
+        let futures_settlement = data.futures_settlement.as_deref().map(|s| {
+            s.parse::<crate::equity::black76::FuturesSettlement>()
+                .expect("Invalid futures_settlement")
+        });
+        if futures_settlement.is_some() {
+            assert!(
+                matches!(payoff_type, PayoffType::Vanilla),
+                "options on futures (Black-76) support the vanilla payoff only"
+            );
+        }
         let base_option = EquityOptionBase {
             symbol:data.base.symbol.clone(),
             currency: data.base.currency.clone(),
@@ -322,6 +337,7 @@ impl EquityOption {
             dividend_yield: data.dividend.unwrap_or(0.0),
             borrow_cost: data.base.borrow_cost.unwrap_or(0.0),
             cash_dividends,
+            futures_settlement,
             valuation_date,
             multiplier: data.multiplier.unwrap_or(1.0),
         };
@@ -515,15 +531,31 @@ impl EquityOptionBase {
     pub fn carry_yield(&self) -> f64 {
         self.dividend_yield + self.borrow_cost
     }
-    /// Present value of the cash dividends with ex-dates inside the
-    /// option's life, discounted on the option's curve.
+    /// True when the underlying is a future priced with Black-76.
+    pub fn is_futures_option(&self) -> bool {
+        self.futures_settlement.is_some()
+    }
+    /// Escrow value of the cash dividends with ex-dates inside the option's
+    /// life: the amount to carve out of spot so the risky stub reproduces
+    /// the jump-model forward.
+    ///
+    /// Each dividend is discounted at the **net carry rate** `r - carry`,
+    /// not the risk-free rate, so that the escrow accretes at the same rate
+    /// the risky stub grows (`effective_spot` is grown at `r - carry` in
+    /// [`forward_price`]). This makes the analytic forward match the
+    /// well-defined jump model `F = (S - D e^{-(r-carry)t}) e^{(r-carry)T}`
+    /// used by the FD and path-wise Monte Carlo engines. With no continuous
+    /// carry this reduces to plain risk-free discounting.
     pub fn pv_cash_dividends(&self) -> f64 {
+        let carry = self.carry_yield();
         self.cash_dividends
             .iter()
             .filter(|(date, _)| *date > self.valuation_date && *date <= self.maturity_date)
             .map(|(date, amount)| {
                 let t = (*date - self.valuation_date).num_days() as f64 / 365.0;
-                amount * self.discount_curve.df(t)
+                // df(t) = e^{-r t}; multiplying by e^{carry t} discounts at
+                // the net carry (r - carry), generalizing to any curve shape.
+                amount * self.discount_curve.df(t) * (carry * t).exp()
             })
             .sum()
     }
@@ -612,6 +644,16 @@ impl EquityOption {
 impl Instrument for EquityOption  {
     fn npv(&self) -> f64 {
         let american = matches!(self.payoff.exercise_style(), ContractStyle::American);
+        if self.base.is_futures_option() {
+            if !matches!(self.engine, Engine::BlackScholes) {
+                panic!(
+                    "Options on futures (Black-76) price on the Analytical engine only"
+                );
+            }
+            if american {
+                panic!("Black-76 supports European exercise only");
+            }
+        }
         if self.payoff.is_path_dependent() {
             if american {
                 panic!("American path-dependent options are not supported yet");

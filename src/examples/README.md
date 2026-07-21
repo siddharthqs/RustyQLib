@@ -20,6 +20,7 @@ rustyqlib file --input src/examples/EQ/<file>.json --output out.json
 | `rainbow_option.json` | Multi-asset rainbows | worst-of (MC), exchange (Margrabe), spread (Kirk), basket (moment matching) |
 | `dividends_borrow.json` | Carry inputs | cash dividends + borrow cost across analytic, FD (American) and MC (barrier) |
 | `eq2.json`, `equity_forward.json` | Forward / future contracts | linear products |
+| `futures_option.json` | Options on futures (Black-76) | `futures_settlement`: discounted (standard) and margined (futures-style) |
 | `equity_option.xml` | Same as `equity_option.json`, in XML | the XML conventions: `<item>` arrays, attributes as fields, nested arrays |
 
 ## Rates (`IR/`) and commodities (`CO/`)

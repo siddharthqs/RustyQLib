@@ -121,5 +121,53 @@ fn main() {
                 .build(),
         );
     }
+
+    digital_greek_surfaces();
     println!();
+}
+
+/// The digital's Greeks are the standout case for visualizing (lack of)
+/// smoothness: as maturity shrinks the delta spikes into a tall bump at the
+/// strike and gamma flips sign right across it. Saved as self-contained
+/// interactive HTML to `runs/binary_option/`.
+fn digital_greek_surfaces() {
+    use common::plot3d::{greek_surface, linspace, save_surface_html, Labels};
+    use rustyqlib::equity::vanila_option::EquityOption;
+
+    common::section("Digital Greek surfaces over (moneyness, maturity) -> runs/binary_option/*.html");
+
+    // tighter moneyness band and shorter maturities: that is where the
+    // digital's delta/gamma structure lives
+    let moneyness = linspace(0.8, 1.2, 80);
+    let mats = linspace(0.02, 1.0, 60);
+
+    let greek = |select: fn(&EquityOption) -> f64| {
+        move |m: f64, years: f64| -> f64 {
+            let option = base()
+                .spot(m * STRIKE)
+                .years_to_maturity(years)
+                .binary(PutOrCall::Call, BinaryType::CashOrNothing, CASH)
+                .engine(Engine::BlackScholes)
+                .build();
+            select(&option)
+        }
+    };
+
+    for (name, file, select) in [
+        ("Delta", "delta", (|o: &EquityOption| o.delta()) as fn(&EquityOption) -> f64),
+        ("Gamma", "gamma", |o: &EquityOption| o.gamma()),
+    ] {
+        let surface = greek_surface(&moneyness, &mats, greek(select));
+        save_surface_html(
+            &surface,
+            &format!("runs/binary_option/{file}_surface.html"),
+            &Labels {
+                title: &format!("Cash digital call {name} (K=100) — note the near-expiry spike"),
+                x: "moneyness (S/K)",
+                y: "maturity (y)",
+                z: name,
+            },
+        );
+    }
+    common::note("contrast with the vanilla surfaces: the digital is far from smooth near the strike");
 }

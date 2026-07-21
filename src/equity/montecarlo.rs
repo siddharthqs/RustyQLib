@@ -242,13 +242,20 @@ fn dividends_per_step(option: &EquityOption, t: f64, steps: usize) -> Option<Vec
 
 /// Escrowed-model spot consistent with the bumped market params: rho bumps
 /// shift the dividend discounting, delta bumps move the raw spot.
+///
+/// Cash dividends are discounted at the net carry `r - carry` (here
+/// `p.r - p.q`, `p.q` being the total carry), matching the analytic engine
+/// and the jump-model forward; see
+/// [`EquityOptionBase::pv_cash_dividends`](super::vanila_option::EquityOptionBase::pv_cash_dividends).
 fn escrowed_spot(option: &EquityOption, p: &MarketParams) -> f64 {
     let dr = p.r - option.base.risk_free_rate();
     let mut pv = 0.0;
     for (date, amount) in &option.base.cash_dividends {
         let td = (*date - option.base.valuation_date).num_days() as f64 / 365.0;
         if td > 0.0 && td <= p.t {
-            pv += amount * option.base.discount_curve.df(td) * (-dr * td).exp();
+            // df(td) e^{-dr td} discounts at the bumped rate p.r;
+            // e^{p.q td} moves it to the net carry (p.r - p.q).
+            pv += amount * option.base.discount_curve.df(td) * ((p.q - dr) * td).exp();
         }
     }
     p.s0 - pv
@@ -1077,6 +1084,7 @@ pub fn option_pricing() {
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         borrow_cost: 0.0,
         cash_dividends: vec![],
+        futures_settlement: None,
         valuation_date,
         multiplier: 1.0,
     };

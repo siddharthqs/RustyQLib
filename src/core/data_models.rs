@@ -89,6 +89,10 @@ pub struct EquityOptionData {
     pub notional: Option<f64>,
     /// Discrete cash dividends (ex-date + amount per share).
     pub cash_dividends: Option<Vec<CashDividendData>>,
+    /// When set, the option is on a future (Black-76): "discounted"
+    /// (standard) or "margined" (futures-style). `underlying_price` is then
+    /// the futures price.
+    pub futures_settlement: Option<String>,
     /// Strike; required for vanilla/binary/barrier/asian payoffs, unused
     /// for forward-start and autocallable contracts.
     pub strike_price: Option<f64>,

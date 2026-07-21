@@ -12,6 +12,10 @@ use rustyqlib::equity::montecarlo;
 use rustyqlib::equity::utils::Engine;
 use rustyqlib::equity::vanila_option::EquityOption;
 
+// Not every example uses the plotter; silence dead-code warnings there.
+#[allow(dead_code)]
+pub mod plot3d;
+
 pub fn title(text: &str) {
     println!("\n{}", "=".repeat(96));
     println!("  {text}");
