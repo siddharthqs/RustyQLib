@@ -1,6 +1,6 @@
 [package]
 name = "RustyQLib"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 authors = ["Siddharth Singh"]
 description = "RustyQLib is a lightweight yet robust quantitative finance library designed to price derivatives and perform risk analysis"
@@ -15,7 +15,9 @@ keywords = [
     "black-scholes",
     "cli"
 ]
-categories = ["command-line", "quant", "monte-carlo", "finance"]
+# crates.io categories must be from its controlled vocabulary
+# (https://crates.io/category_slugs) -- the old values were rejected/ignored.
+categories = ["mathematics", "science", "simulation", "command-line-utilities"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
