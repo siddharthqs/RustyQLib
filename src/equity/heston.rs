@@ -316,6 +316,36 @@ pub fn analytic_rho(option: &EquityOption) -> f64 {
     let h = 1e-5;
     (price_with(option, 0.0, 0.0, h, 0.0) - price_with(option, 0.0, 0.0, -h, 0.0)) / (2.0 * h)
 }
+/// Change in delta for a parallel shift of the Heston instantaneous and
+/// long-run volatility levels.
+pub fn analytic_vanna(option: &EquityOption) -> f64 {
+    let hs = option.base.underlying_price.value() * 1e-4;
+    let hv = 1e-4;
+    (price_with(option, hs, hv, 0.0, 0.0) - price_with(option, -hs, hv, 0.0, 0.0)
+        - price_with(option, hs, -hv, 0.0, 0.0) + price_with(option, -hs, -hv, 0.0, 0.0))
+        / (4.0 * hs * hv)
+}
+/// Calendar-time change in delta.
+pub fn analytic_charm(option: &EquityOption) -> f64 {
+    let hs = option.base.underlying_price.value() * 1e-4;
+    let ht = (1.0 / 365.0_f64).min(0.5 * option.time_to_maturity());
+    -(price_with(option, hs, 0.0, 0.0, ht) - price_with(option, -hs, 0.0, 0.0, ht)
+        - price_with(option, hs, 0.0, 0.0, -ht) + price_with(option, -hs, 0.0, 0.0, -ht))
+        / (4.0 * hs * ht)
+}
+/// Change in gamma for a parallel shift of the Heston instantaneous and
+/// long-run volatility levels.
+pub fn analytic_zomma(option: &EquityOption) -> f64 {
+    let hs = option.base.underlying_price.value() * 1e-3;
+    let hv = 1e-4;
+    let gamma_at_vol = |dvol: f64| {
+        (price_with(option, hs, dvol, 0.0, 0.0)
+            - 2.0 * price_with(option, 0.0, dvol, 0.0, 0.0)
+            + price_with(option, -hs, dvol, 0.0, 0.0))
+            / (hs * hs)
+    };
+    (gamma_at_vol(hv) - gamma_at_vol(-hv)) / (2.0 * hv)
+}
 
 #[cfg(test)]
 mod tests {

@@ -15,9 +15,9 @@ use rustyqlib::equity::vanila_option::EquityOption;
 
 const SPOT: f64 = 100.0;
 const STRIKE: f64 = 100.0;
-const VOL: f64 = 0.30;
-const RATE: f64 = 0.05;
-const DIV: f64 = 0.02;
+const VOL: f64 = 0.80;
+const RATE: f64 = 0.06;
+const DIV: f64 = 0.00;
 
 fn asof() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
@@ -172,8 +172,8 @@ fn greek_surfaces() {
 
     // x = moneyness S/K (0.4 .. 1.6, i.e. spot 40..160 for K=100);
     // y = maturity 0.05..2.0y (short-dated ATM is where the structure lives)
-    let moneyness = linspace(0.6, 1.4, 72);
-    let mats = linspace(0.05, 1.0, 56);
+    let moneyness = linspace(0.5, 1.5, 72);
+    let mats = linspace(0.01, 1.0, 56);
 
     // a call priced analytically at (moneyness, maturity); spot = m * K
     let greek = |select: fn(&EquityOption) -> f64| {
@@ -198,6 +198,10 @@ fn greek_surfaces() {
         ("Gamma", "gamma", |o: &EquityOption| o.gamma()),
         ("Vega", "vega", |o: &EquityOption| o.vega()),
         ("Theta", "theta", |o: &EquityOption| o.theta()),
+        ("Vanna", "vanna", |o: &EquityOption| o.vanna()),
+        ("Charm", "charm", |o: &EquityOption| o.charm()),
+        ("Gamma P", "gamma_p", |o: &EquityOption| o.gamma_p()),
+        ("Zomma", "zomma", |o: &EquityOption| o.zomma()),
     ] {
         let surface = greek_surface(&moneyness, &mats, greek(select));
         save_surface_html(

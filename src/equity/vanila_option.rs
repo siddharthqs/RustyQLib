@@ -753,6 +753,42 @@ impl EquityOption {
             _ => BlackScholesPricer::new().rho(&self),
         }
     }
+    /// Vanna: change in delta per unit change in implied volatility.
+    pub fn vanna(&self) -> f64 {
+        match self.engine {
+            Engine::MonteCarlo => montecarlo::vanna(&self),
+            Engine::FiniteDifference => finite_difference::vanna(&self),
+            _ if self.analytic_heston() => heston::analytic_vanna(&self),
+            _ => BlackScholesPricer::new().vanna(&self),
+        }
+    }
+    /// Charm: change in delta per year of calendar time.
+    pub fn charm(&self) -> f64 {
+        match self.engine {
+            Engine::MonteCarlo => montecarlo::charm(&self),
+            Engine::FiniteDifference => finite_difference::charm(&self),
+            _ if self.analytic_heston() => heston::analytic_charm(&self),
+            _ => BlackScholesPricer::new().charm(&self),
+        }
+    }
+    /// Delta elasticity (`S * gamma / delta`), also called percentage gamma.
+    pub fn gamma_p(&self) -> f64 {
+        let delta = self.delta();
+        if delta == 0.0 {
+            f64::NAN
+        } else {
+            self.base.underlying_price.value() * self.gamma() / delta
+        }
+    }
+    /// Zomma: change in gamma per unit change in implied volatility.
+    pub fn zomma(&self) -> f64 {
+        match self.engine {
+            Engine::MonteCarlo => montecarlo::zomma(&self),
+            Engine::FiniteDifference => finite_difference::zomma(&self),
+            _ if self.analytic_heston() => heston::analytic_zomma(&self),
+            _ => BlackScholesPricer::new().zomma(&self),
+        }
+    }
 }
 // #[cfg(test)]
 // mod tests {
@@ -799,4 +835,3 @@ impl EquityOption {
 //         assert_eq!(option.style, ContractStyle::European);
 //     }
 // }
-

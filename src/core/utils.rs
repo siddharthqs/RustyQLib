@@ -98,6 +98,14 @@ pub struct ContractOutput {
     pub vega: f64,
     pub theta: f64,
     pub rho: f64,
+    /// Change in delta per unit change in implied volatility.
+    pub vanna: f64,
+    /// Change in delta per year of calendar time.
+    pub charm: f64,
+    /// Delta elasticity, `S * gamma / delta`.
+    pub gamma_p: f64,
+    /// Change in gamma per unit change in implied volatility.
+    pub zomma: f64,
     /// Monte Carlo standard error of `pv` (None for deterministic engines).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub std_err: Option<f64>,

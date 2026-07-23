@@ -105,6 +105,65 @@ impl BlackScholesPricer {
             _ => {0.0}
         }
     }
+    /// Vanna (`d delta / d volatility`).  Vanilla and Black-76 options use
+    /// their closed forms; other analytic payoffs use a stable mixed bump.
+    pub fn vanna(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.vanna_black76(bsd_option);
+        }
+        if matches!(bsd_option.payoff.payoff_kind(), PayoffType::Vanilla) {
+            return bs_vanna(
+                bsd_option.base.effective_spot(), bsd_option.base.strike_price,
+                bsd_option.base.risk_free_rate(), bsd_option.base.carry_yield(),
+                bsd_option.base.volatility(), bsd_option.time_to_maturity(),
+            );
+        }
+        self.vanna_bumped(bsd_option)
+    }
+    /// Charm (`d delta / d calendar time`).  A positive value means delta
+    /// rises as one year of calendar time elapses.
+    pub fn charm(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.charm_black76(bsd_option);
+        }
+        if matches!(bsd_option.payoff.payoff_kind(), PayoffType::Vanilla) {
+            return bs_charm(
+                bsd_option.base.effective_spot(), bsd_option.base.strike_price,
+                bsd_option.base.risk_free_rate(), bsd_option.base.carry_yield(),
+                bsd_option.base.volatility(), bsd_option.time_to_maturity(),
+                *bsd_option.payoff.put_or_call(),
+            );
+        }
+        self.charm_bumped(bsd_option)
+    }
+    /// Delta elasticity (`S * gamma / delta`), sometimes called percentage
+    /// gamma. It is undefined when delta is zero.
+    pub fn gamma_p(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.gamma_p_black76(bsd_option);
+        }
+        let delta = self.delta(bsd_option);
+        if delta == 0.0 {
+            f64::NAN
+        } else {
+            bsd_option.base.underlying_price.value() * self.gamma(bsd_option) / delta
+        }
+    }
+    /// Zomma (`d gamma / d volatility`). Vanilla and Black-76 use closed
+    /// forms; other analytic payoffs use a central volatility bump.
+    pub fn zomma(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.zomma_black76(bsd_option);
+        }
+        if matches!(bsd_option.payoff.payoff_kind(), PayoffType::Vanilla) {
+            return bs_zomma(
+                bsd_option.base.effective_spot(), bsd_option.base.strike_price,
+                bsd_option.base.risk_free_rate(), bsd_option.base.carry_yield(),
+                bsd_option.base.volatility(), bsd_option.time_to_maturity(),
+            );
+        }
+        self.zomma_bumped(bsd_option)
+    }
     // ── Black-76: European options on a future ─────────────────────────
     // The underlying_price is the futures price F; there is no spot,
     // dividend or carry. Vol is read from the surface at (K, F, T).
@@ -146,6 +205,22 @@ impl BlackScholesPricer {
     fn rho_black76(&self, o: &EquityOption) -> f64 {
         let (f, k, r, sig, t, pc, s) = Self::black76_inputs(o);
         crate::equity::black76::rho(f, k, r, sig, t, pc, s)
+    }
+    fn vanna_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, _pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::vanna(f, k, r, sig, t, s)
+    }
+    fn charm_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::charm(f, k, r, sig, t, pc, s)
+    }
+    fn gamma_p_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::gamma_p(f, k, r, sig, t, pc, s)
+    }
+    fn zomma_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, _pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::zomma(f, k, r, sig, t, s)
     }
     fn npv_vanilla(&self, bsd_option: &EquityOption) -> f64 {
 
@@ -227,6 +302,63 @@ impl BlackScholesPricer {
         }
     }
 
+    /// Analytic price with bumpable spot, volatility, rate and expiry.  This
+    /// supports the cross-Greeks of payoffs whose first-order formulas are
+    /// deliberately implemented by bump-and-reprice.
+    fn price_with(
+        bsd_option: &EquityOption,
+        ds: f64,
+        dsigma: f64,
+        dr: f64,
+        dt_shift: f64,
+    ) -> f64 {
+        match bsd_option.payoff.payoff_kind() {
+            PayoffType::Vanilla => bs_price(
+                bsd_option.base.effective_spot() + ds,
+                bsd_option.base.strike_price,
+                bsd_option.base.risk_free_rate() + dr,
+                bsd_option.base.carry_yield(),
+                bsd_option.base.volatility() + dsigma,
+                bsd_option.time_to_maturity() + dt_shift,
+                *bsd_option.payoff.put_or_call(),
+            ),
+            PayoffType::Binary => Self::binary_price_with(bsd_option, ds, dsigma, dr, dt_shift),
+            PayoffType::Barrier => Self::barrier_price_with(bsd_option, ds, dsigma, dr, dt_shift),
+            PayoffType::Asian => Self::asian_price_with(bsd_option, ds, dsigma, dr, dt_shift),
+            PayoffType::ForwardStart => Self::forward_start_price_with(bsd_option, ds, dsigma, dr, dt_shift),
+            _ => panic!("cross-Greeks are not available for this analytic payoff"),
+        }
+    }
+    fn vanna_bumped(&self, bsd_option: &EquityOption) -> f64 {
+        let hs = bsd_option.base.underlying_price.value() * 1e-4;
+        let hv = 1e-4;
+        (Self::price_with(bsd_option, hs, hv, 0.0, 0.0)
+            - Self::price_with(bsd_option, -hs, hv, 0.0, 0.0)
+            - Self::price_with(bsd_option, hs, -hv, 0.0, 0.0)
+            + Self::price_with(bsd_option, -hs, -hv, 0.0, 0.0))
+            / (4.0 * hs * hv)
+    }
+    fn charm_bumped(&self, bsd_option: &EquityOption) -> f64 {
+        let hs = bsd_option.base.underlying_price.value() * 1e-4;
+        let ht = (1.0 / 365.0_f64).min(0.5 * bsd_option.time_to_maturity());
+        -(Self::price_with(bsd_option, hs, 0.0, 0.0, ht)
+            - Self::price_with(bsd_option, -hs, 0.0, 0.0, ht)
+            - Self::price_with(bsd_option, hs, 0.0, 0.0, -ht)
+            + Self::price_with(bsd_option, -hs, 0.0, 0.0, -ht))
+            / (4.0 * hs * ht)
+    }
+    fn zomma_bumped(&self, bsd_option: &EquityOption) -> f64 {
+        let hv = 1e-4;
+        let hs = bsd_option.base.underlying_price.value() * 1e-3;
+        let gamma_at_vol = |dsigma: f64| {
+            (Self::price_with(bsd_option, hs, dsigma, 0.0, 0.0)
+                - 2.0 * Self::price_with(bsd_option, 0.0, dsigma, 0.0, 0.0)
+                + Self::price_with(bsd_option, -hs, dsigma, 0.0, 0.0))
+                / (hs * hs)
+        };
+        (gamma_at_vol(hv) - gamma_at_vol(-hv)) / (2.0 * hv)
+    }
+
     // ── Binary (digital) options ───────────────────────────────────────
     // cash-or-nothing:  cash * e^{-rT} N(+-d2)
     // asset-or-nothing: S e^{-qT} N(+-d1)
@@ -241,6 +373,30 @@ impl BlackScholesPricer {
             .downcast_ref::<BinaryPayoff>()
             .expect("payoff of kind Binary must be a BinaryPayoff");
         (payoff.binary_type, payoff.cash)
+    }
+
+    fn binary_price_with(
+        bsd_option: &EquityOption,
+        ds: f64,
+        dsigma: f64,
+        dr: f64,
+        dt_shift: f64,
+    ) -> f64 {
+        let (binary_type, cash) = Self::binary_details(bsd_option);
+        let s = bsd_option.base.effective_spot() + ds;
+        let k = bsd_option.base.strike_price;
+        let r = bsd_option.base.risk_free_rate() + dr;
+        let q = bsd_option.base.carry_yield();
+        let sigma = bsd_option.base.volatility() + dsigma;
+        let t = bsd_option.time_to_maturity() + dt_shift;
+        let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * t.sqrt());
+        let d2 = d1 - sigma * t.sqrt();
+        match (binary_type, bsd_option.payoff.put_or_call()) {
+            (BinaryType::CashOrNothing, PutOrCall::Call) => cash * (-r * t).exp() * N(d2),
+            (BinaryType::CashOrNothing, PutOrCall::Put) => cash * (-r * t).exp() * N(-d2),
+            (BinaryType::AssetOrNothing, PutOrCall::Call) => s * (-q * t).exp() * N(d1),
+            (BinaryType::AssetOrNothing, PutOrCall::Put) => s * (-q * t).exp() * N(-d1),
+        }
     }
 
     fn npv_binary(&self, bsd_option: &EquityOption) -> f64 {
@@ -611,6 +767,43 @@ pub fn bs_vega(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
     let sqrt_t = t.sqrt();
     let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
     s * exp(-q * t) * dN(d1) * sqrt_t
+}
+
+/// Black-Scholes vanna, the change in spot delta per unit of volatility.
+pub fn bs_vanna(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
+    let sqrt_t = t.sqrt();
+    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    exp(-q * t) * dN(d1) * (sqrt_t - d1 / sigma)
+}
+
+/// Black-Scholes charm, the change in spot delta per year of calendar time.
+pub fn bs_charm(
+    s: f64,
+    k: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    t: f64,
+    put_or_call: PutOrCall,
+) -> f64 {
+    let sqrt_t = t.sqrt();
+    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    let df_q = exp(-q * t);
+    let d1_dt = (r - q + 0.5 * sigma * sigma) / (sigma * sqrt_t) - d1 / (2.0 * t);
+    let delta_component = match put_or_call {
+        PutOrCall::Call => N(d1),
+        PutOrCall::Put => N(d1) - 1.0,
+    };
+    q * df_q * delta_component - df_q * dN(d1) * d1_dt
+}
+
+/// Black-Scholes zomma, the change in spot gamma per unit of volatility.
+pub fn bs_zomma(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
+    let sqrt_t = t.sqrt();
+    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    let d2 = d1 - sigma * sqrt_t;
+    let gamma = exp(-q * t) * dN(d1) / (s * sigma * sqrt_t);
+    gamma * (d1 * d2 - 1.0) / sigma
 }
 
 const IMPLIED_VOL_MIN: f64 = 1e-4;
@@ -989,6 +1182,56 @@ mod tests {
         assert_approx_eq!(option.vega(), 37.9432933117, 1e-8);
         assert_approx_eq!(option.theta(), -3.3450427745, 1e-8);
         assert_approx_eq!(option.rho(), -46.9290244455, 1e-8);
+    }
+
+    #[test]
+    fn vanilla_vanna_and_charm_match_mixed_price_bumps() {
+        let option = test_option(PutOrCall::Call, flat_5pct());
+        let s = option.base.effective_spot();
+        let k = option.base.strike_price;
+        let r = option.base.risk_free_rate();
+        let q = option.base.carry_yield();
+        let sigma = option.base.volatility();
+        let t = option.time_to_maturity();
+        let hs = 1e-3;
+        let hv = 1e-5;
+        let ht = 1e-5;
+        let pc = PutOrCall::Call;
+        let vanna_bump = (bs_price(s + hs, k, r, q, sigma + hv, t, pc)
+            - bs_price(s - hs, k, r, q, sigma + hv, t, pc)
+            - bs_price(s + hs, k, r, q, sigma - hv, t, pc)
+            + bs_price(s - hs, k, r, q, sigma - hv, t, pc))
+            / (4.0 * hs * hv);
+        let charm_bump = -(bs_price(s + hs, k, r, q, sigma, t + ht, pc)
+            - bs_price(s - hs, k, r, q, sigma, t + ht, pc)
+            - bs_price(s + hs, k, r, q, sigma, t - ht, pc)
+            + bs_price(s - hs, k, r, q, sigma, t - ht, pc))
+            / (4.0 * hs * ht);
+        assert_approx_eq!(option.vanna(), vanna_bump, 1e-6);
+        assert_approx_eq!(option.charm(), charm_bump, 1e-6);
+    }
+
+    #[test]
+    fn vanilla_gamma_p_and_zomma_match_definitions() {
+        let option = test_option(PutOrCall::Call, flat_5pct());
+        let s = option.base.underlying_price.value();
+        assert_approx_eq!(option.gamma_p(), s * option.gamma() / option.delta(), 1e-12);
+
+        let h = 1e-5;
+        let k = option.base.strike_price;
+        let r = option.base.risk_free_rate();
+        let q = option.base.carry_yield();
+        let sigma = option.base.volatility();
+        let t = option.time_to_maturity();
+        let gamma_at_vol = |vol: f64| {
+            let hs = 1e-3;
+            (bs_price(s + hs, k, r, q, vol, t, PutOrCall::Call)
+                - 2.0 * bs_price(s, k, r, q, vol, t, PutOrCall::Call)
+                + bs_price(s - hs, k, r, q, vol, t, PutOrCall::Call))
+                / (hs * hs)
+        };
+        let zomma_bump = (gamma_at_vol(sigma + h) - gamma_at_vol(sigma - h)) / (2.0 * h);
+        assert_approx_eq!(option.zomma(), zomma_bump, 1e-6);
     }
 
     #[test]

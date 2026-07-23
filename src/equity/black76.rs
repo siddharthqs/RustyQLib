@@ -121,6 +121,38 @@ pub fn gamma(
     df * dN(d1) / (f * sigma * t.sqrt())
 }
 
+/// Delta elasticity (also called percentage gamma), `F * gamma / delta`.
+/// It is undefined when delta is zero and returns `NaN` in that case.
+pub fn gamma_p(
+    f: f64,
+    k: f64,
+    r: f64,
+    sigma: f64,
+    t: f64,
+    put_or_call: PutOrCall,
+    settlement: FuturesSettlement,
+) -> f64 {
+    let d = delta(f, k, r, sigma, t, put_or_call, settlement);
+    if d == 0.0 {
+        f64::NAN
+    } else {
+        f * gamma(f, k, r, sigma, t, settlement) / d
+    }
+}
+
+/// Zomma, the change in futures gamma per unit change in volatility.
+pub fn zomma(
+    f: f64,
+    k: f64,
+    r: f64,
+    sigma: f64,
+    t: f64,
+    settlement: FuturesSettlement,
+) -> f64 {
+    let (d1, d2) = d1_d2(f, k, sigma, t);
+    gamma(f, k, r, sigma, t, settlement) * (d1 * d2 - 1.0) / sigma
+}
+
 /// Vega (per unit of vol; same for calls and puts).
 pub fn vega(
     f: f64,
@@ -133,6 +165,44 @@ pub fn vega(
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
     df * f * dN(d1) * t.sqrt()
+}
+
+/// Vanna, the change in futures delta per unit change in volatility.
+pub fn vanna(
+    f: f64,
+    k: f64,
+    r: f64,
+    sigma: f64,
+    t: f64,
+    settlement: FuturesSettlement,
+) -> f64 {
+    let df = settlement.discount_factor(r, t);
+    let (d1, _) = d1_d2(f, k, sigma, t);
+    df * dN(d1) * (t.sqrt() - d1 / sigma)
+}
+
+/// Charm, the change in futures delta per year of calendar time.
+pub fn charm(
+    f: f64,
+    k: f64,
+    r: f64,
+    sigma: f64,
+    t: f64,
+    put_or_call: PutOrCall,
+    settlement: FuturesSettlement,
+) -> f64 {
+    let df = settlement.discount_factor(r, t);
+    let (d1, _) = d1_d2(f, k, sigma, t);
+    let d1_dt = sigma / (2.0 * t.sqrt()) - d1 / (2.0 * t);
+    let delta_component = match put_or_call {
+        PutOrCall::Call => N(d1),
+        PutOrCall::Put => N(d1) - 1.0,
+    };
+    let discount_decay = match settlement {
+        FuturesSettlement::Discounted => r * df * delta_component,
+        FuturesSettlement::Margined => 0.0,
+    };
+    discount_decay - df * dN(d1) * d1_dt
 }
 
 /// Rho (sensitivity to the risk-free rate). Zero for margined options,
@@ -196,6 +266,16 @@ mod tests {
         assert!((delta(F, K, R, SIG, T, PutOrCall::Put, D) + 0.41890461).abs() < 1e-7);
         assert!((gamma(F, K, R, SIG, T, D) - 0.01250801).abs() < 1e-7);
         assert!((vega(F, K, R, SIG, T, D) - 37.52403469).abs() < 1e-6);
+        let h_vol = 1e-5;
+        let bumped_vanna = (delta(F, K, R, SIG + h_vol, T, PutOrCall::Call, D)
+            - delta(F, K, R, SIG - h_vol, T, PutOrCall::Call, D))
+            / (2.0 * h_vol);
+        assert!((vanna(F, K, R, SIG, T, D) - bumped_vanna).abs() < 1e-9);
+        let h_time = 1e-5;
+        let bumped_charm = -(delta(F, K, R, SIG, T + h_time, PutOrCall::Call, D)
+            - delta(F, K, R, SIG, T - h_time, PutOrCall::Call, D))
+            / (2.0 * h_time);
+        assert!((charm(F, K, R, SIG, T, PutOrCall::Call, D) - bumped_charm).abs() < 1e-9);
         assert!((rho(F, K, R, SIG, T, PutOrCall::Call, D) + 11.34202064).abs() < 1e-6);
         assert!((theta(F, K, R, SIG, T, PutOrCall::Call, D) + 5.06150417).abs() < 1e-6);
     }

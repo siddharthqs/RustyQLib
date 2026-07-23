@@ -323,6 +323,45 @@ pub fn rho(option: &EquityOption) -> f64 {
         / (2.0 * h)
 }
 
+/// Vanna, estimated with common-random-number mixed spot/volatility bumps.
+pub fn vanna(option: &EquityOption) -> f64 {
+    let p = market_params(option);
+    let hs = p.s0 * 0.01;
+    let hv = 0.01;
+    (price(option, &MarketParams { s0: p.s0 + hs, sigma: p.sigma + hv, ..p }).pv
+        - price(option, &MarketParams { s0: p.s0 - hs, sigma: p.sigma + hv, ..p }).pv
+        - price(option, &MarketParams { s0: p.s0 + hs, sigma: p.sigma - hv, ..p }).pv
+        + price(option, &MarketParams { s0: p.s0 - hs, sigma: p.sigma - hv, ..p }).pv)
+        / (4.0 * hs * hv)
+}
+
+/// Charm, the calendar-time change in delta, estimated by mixed bumps.
+pub fn charm(option: &EquityOption) -> f64 {
+    let p = market_params(option);
+    let hs = p.s0 * 0.01;
+    let ht = (1.0 / 365.0_f64).min(0.5 * p.t);
+    -(price(option, &MarketParams { s0: p.s0 + hs, t: p.t + ht, ..p }).pv
+        - price(option, &MarketParams { s0: p.s0 - hs, t: p.t + ht, ..p }).pv
+        - price(option, &MarketParams { s0: p.s0 + hs, t: p.t - ht, ..p }).pv
+        + price(option, &MarketParams { s0: p.s0 - hs, t: p.t - ht, ..p }).pv)
+        / (4.0 * hs * ht)
+}
+
+/// Zomma, estimated by applying a volatility bump to the common-random-
+/// number gamma estimate.
+pub fn zomma(option: &EquityOption) -> f64 {
+    let p = market_params(option);
+    let hs = p.s0 * 0.01;
+    let hv = 0.01;
+    let gamma_at_vol = |sigma: f64| {
+        (price(option, &MarketParams { s0: p.s0 + hs, sigma, ..p }).pv
+            - 2.0 * price(option, &MarketParams { sigma, ..p }).pv
+            + price(option, &MarketParams { s0: p.s0 - hs, sigma, ..p }).pv)
+            / (hs * hs)
+    };
+    (gamma_at_vol(p.sigma + hv) - gamma_at_vol(p.sigma - hv)) / (2.0 * hv)
+}
+
 // ── Volatility dynamics along a path ────────────────────────────────────
 
 enum PathVol<'a> {

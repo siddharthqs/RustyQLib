@@ -97,22 +97,48 @@ pub fn vega(option: &EquityOption) -> f64 {
     // parallel vol bump: constant-vol solves shift sigma, local vol solves
     // shift the implied surface before the Dupire transform
     let h = 1e-3;
-    (solve_dispatch(option, h, 0.0).npv - solve_dispatch(option, -h, 0.0).npv) / (2.0 * h)
+    (solve_dispatch(option, h, 0.0, 0.0).npv - solve_dispatch(option, -h, 0.0, 0.0).npv) / (2.0 * h)
 }
 pub fn rho(option: &EquityOption) -> f64 {
     let h = 1e-4;
-    (solve_dispatch(option, 0.0, h).npv - solve_dispatch(option, 0.0, -h).npv) / (2.0 * h)
+    (solve_dispatch(option, 0.0, h, 0.0).npv - solve_dispatch(option, 0.0, -h, 0.0).npv) / (2.0 * h)
+}
+
+/// Vanna from the change in the grid delta under a parallel vol bump.
+pub fn vanna(option: &EquityOption) -> f64 {
+    let h = 1e-3;
+    (solve_dispatch(option, h, 0.0, 0.0).delta - solve_dispatch(option, -h, 0.0, 0.0).delta)
+        / (2.0 * h)
+}
+
+/// Charm from the spot derivative of the grid's calendar theta.
+pub fn charm(option: &EquityOption) -> f64 {
+    let h = option.base.underlying_price.value() * 1e-3;
+    (solve_dispatch(option, 0.0, 0.0, h).theta - solve_dispatch(option, 0.0, 0.0, -h).theta)
+        / (2.0 * h)
+}
+
+/// Zomma from the change in the grid gamma under a parallel vol bump.
+pub fn zomma(option: &EquityOption) -> f64 {
+    let h = 1e-3;
+    (solve_dispatch(option, h, 0.0, 0.0).gamma - solve_dispatch(option, -h, 0.0, 0.0).gamma)
+        / (2.0 * h)
 }
 
 /// Value and grid Greeks in a single solve (two for knock-ins).
 pub fn solution(option: &EquityOption) -> FdSolution {
-    solve_dispatch(option, 0.0, 0.0)
+    solve_dispatch(option, 0.0, 0.0, 0.0)
 }
 
-fn solve_dispatch(option: &EquityOption, sigma_bump: f64, r_bump: f64) -> FdSolution {
+fn solve_dispatch(
+    option: &EquityOption,
+    sigma_bump: f64,
+    r_bump: f64,
+    spot_bump: f64,
+) -> FdSolution {
     let t = option.time_to_maturity();
     assert!(t >= 0.0, "Option is expired or negative time");
-    let s0 = option.base.underlying_price.value();
+    let s0 = option.base.underlying_price.value() + spot_bump;
     assert!(s0 > 0.0, "underlying price must be positive");
     if t == 0.0 {
         let mut sol = FdSolution::zero();
@@ -128,22 +154,22 @@ fn solve_dispatch(option: &EquityOption, sigma_bump: f64, r_bump: f64) -> FdSolu
                 if knocked {
                     FdSolution::zero()
                 } else {
-                    solve(option, sigma_bump, r_bump, Some(barrier))
+                    solve(option, sigma_bump, r_bump, spot_bump, Some(barrier))
                 }
             }
             KnockType::In => {
                 // knock-in by parity (European only; guarded upstream):
                 // KI = vanilla leg - KO, which is linear in all Greeks
-                let vanilla = solve(option, sigma_bump, r_bump, None);
+                let vanilla = solve(option, sigma_bump, r_bump, spot_bump, None);
                 if knocked {
                     vanilla
                 } else {
-                    vanilla.minus(solve(option, sigma_bump, r_bump, Some(barrier)))
+                    vanilla.minus(solve(option, sigma_bump, r_bump, spot_bump, Some(barrier)))
                 }
             }
         };
     }
-    solve(option, sigma_bump, r_bump, None)
+    solve(option, sigma_bump, r_bump, spot_bump, None)
 }
 
 /// Volatility field used to assemble the PDE coefficients.
@@ -165,12 +191,13 @@ fn solve(
     option: &EquityOption,
     sigma_bump: f64,
     r_bump: f64,
+    spot_bump: f64,
     knock_out: Option<&BarrierPayoff>,
 ) -> FdSolution {
     let cfg = &option.fd;
     let payoff = option.payoff.as_ref();
     let strike = option.base.strike_price;
-    let s0 = option.base.underlying_price.value();
+    let s0 = option.base.underlying_price.value() + spot_bump;
     let q = option.base.carry_yield();
     let t = option.time_to_maturity();
     let sigma_ref = option.base.volatility() + sigma_bump;
@@ -183,7 +210,9 @@ fn solve(
         McModel::LocalVol => FdVol::Local(LocalVol::new(
             &option.base.vol_surface,
             &option.base.discount_curve,
-            s0,
+            // A spot bump moves the valuation point, not the calibrated
+            // local-vol surface reference spot.
+            option.base.underlying_price.value(),
             q,
             sigma_bump,
         )),

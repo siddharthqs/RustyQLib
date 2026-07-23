@@ -221,7 +221,10 @@ let option = EquityOptionBuilder::new()
     .engine(Engine::FiniteDifference)
     .build();
 
-println!("pv {:.6}  delta {:.4}", option.npv(), option.delta());
+println!(
+    "pv {:.6}  delta {:.4}  vanna {:.4}  charm {:.4}",
+    option.npv(), option.delta(), option.vanna(), option.charm()
+);
 ```
 
 ...or deserialize the same JSON the CLI consumes:

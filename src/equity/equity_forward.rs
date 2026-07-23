@@ -103,4 +103,8 @@ impl EquityForward{
     pub fn vega(&self) -> f64  { 0.0 }
     pub fn theta(&self) -> f64 { 0.0 }
     pub fn rho(&self) -> f64   { 0.0 }
+    pub fn vanna(&self) -> f64 { 0.0 }
+    pub fn charm(&self) -> f64 { 0.0 }
+    pub fn gamma_p(&self) -> f64 { 0.0 }
+    pub fn zomma(&self) -> f64 { 0.0 }
 }
