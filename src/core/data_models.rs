@@ -9,6 +9,9 @@ pub enum ProductData {
     Future(EquityFutureData),
     Forward(EquityForwardData),
     RainbowOption(crate::equity::rainbow::RainbowOptionData),
+    CliquetOption(crate::equity::cliquet::CliquetOptionData),
+    Accumulator(crate::equity::accumulator::AccumulatorData),
+    VarianceSwap(crate::equity::variance_swap::VarianceSwapData),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,6 +75,14 @@ pub struct EquityOptionData {
     /// Barrier variant: "up_in" | "up_out" | "down_in" | "down_out".
     pub barrier_type: Option<String>,
     pub barrier_level: Option<f64>,
+    /// Second barrier level (makes the option a double barrier).
+    pub barrier_level2: Option<f64>,
+    /// Barrier rebate amount.
+    pub rebate: Option<f64>,
+    /// Knock-out rebate paid at the touch (default: at expiry).
+    pub rebate_at_hit: Option<bool>,
+    /// Lookback flavor: "floating" (default) or "fixed".
+    pub lookback_type: Option<String>,
     /// Asian averaging: "arithmetic" (default) | "geometric".
     pub averaging_type: Option<String>,
     /// Asian strike: "fixed" (default, average price) | "floating" (average strike).
@@ -86,6 +97,10 @@ pub struct EquityOptionData {
     pub protection_barrier: Option<f64>,
     pub autocall_coupon: Option<f64>,
     pub autocall_observations: Option<usize>,
+    /// Phoenix: conditional-coupon barrier (absolute level).
+    pub coupon_barrier: Option<f64>,
+    /// Phoenix: memory coupons (missed coupons recovered later).
+    pub coupon_memory: Option<bool>,
     pub notional: Option<f64>,
     /// Discrete cash dividends (ex-date + amount per share).
     pub cash_dividends: Option<Vec<CashDividendData>>,

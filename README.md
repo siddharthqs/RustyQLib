@@ -19,9 +19,20 @@ put-call parity, replication identities and cross-engine agreement in the test s
   tree, finite difference (log-spot Crank-Nicolson with Rannacher smoothing),
   and parallel Monte Carlo — behind one dispatch, so the same contract prices
   on any suitable engine.
-- **Three models** — Black-Scholes, **Dupire local volatility** (calibrated
-  non-parametrically from an implied vol surface), and **Heston stochastic
-  volatility** (semi-analytic characteristic-function pricing + Monte Carlo).
+- **Four volatility frameworks** — Black-Scholes, **Dupire local volatility**
+  (calibrated non-parametrically from an implied vol surface), **Heston
+  stochastic volatility** (semi-analytic characteristic-function pricing +
+  Monte Carlo) with **Bates jump-diffusion extensions** (Heston + lognormal
+  Merton jumps, and Heston + Kou double-exponential jumps, both priced
+  semi-analytically through the shared characteristic-function machinery and
+  calibrated by the same Levenberg-Marquardt transform-space pattern),
+  **stochastic local volatility** (Heston-style variance times a leverage
+  function calibrated to the Dupire surface by the particle / binning
+  method, so vanillas reprice while forward smiles stay stochastic),
+  and **SVI / SSVI parametric implied surfaces** (Gatheral,
+  Gatheral-Jacquier) — Levenberg-Marquardt smile and surface calibration,
+  Gatheral-Jacquier butterfly (`g(k)`) and calendar no-arbitrage checks, and
+  sampling into the pricing vol surface.
 - **JSON and XML** contracts and results, over a single shared schema.
 - **Market-standard infrastructure** — discount curves with discount factors as the
   source of truth (flat / zero rates / discount factors / forward rates in, any
@@ -31,9 +42,22 @@ put-call parity, replication identities and cross-engine agreement in the test s
 - **Options on futures**: European vanillas priced with Black-76, both
   standard (discounted premium) and futures-style (margined, undiscounted).
 - **Payoffs**: European & American vanillas, cash- and asset-or-nothing binaries,
-  all eight barrier types (knock-in/out, up/down), Asian options (arithmetic /
+  all eight barrier types (knock-in/out, up/down) with **rebates** (at hit or
+  at expiry) and **double-barrier corridors** (Ikeda-Kunitomo), Asian options (arithmetic /
   geometric, fixed / floating strike), forward-start options, autocallable
-  notes with coupons and knock-in protection, and **multi-asset rainbow
+  notes with coupons and knock-in protection (incl. **Phoenix certificates**
+  with conditional and memory coupons), **lookback options** (floating and
+  fixed strike, Goldman-Sosin-Gatto / Conze-Viswanathan closed forms),
+  **accumulators / decumulators** (daily geared accrual with knock-out,
+  priced as a strip of barrier-option pairs or by Monte Carlo),
+  **variance, gamma and corridor variance swaps** (model-free replication
+  over any smile: DDKZ log contract, spot-weighted `S ln S` contract with
+  exact carry adjustment, Carr-Lewis corridor truncation with exact corridor
+  additivity; seasoned MtM with accrued realized variance and the exact GBM
+  volatility-swap strike), **cliquets / ratchets, reverse
+  cliquets and Napoleons** (capped-floored return strips, coupon-minus-losses
+  and coupon-plus-worst-month structures; closed forms under Black-Scholes
+  where the payoff permits, Monte Carlo under GBM or Heston), and **multi-asset rainbow
   options** (best-of, worst-of, spread, basket, exchange) on n correlated
   assets. Carry handles dividend yield, discrete cash dividends and stock
   borrow cost.
@@ -45,12 +69,18 @@ put-call parity, replication identities and cross-engine agreement in the test s
 | Vanilla European | Black-Scholes / Heston CF | yes | yes (grid Greeks) | yes (+ stderr) |
 | Vanilla on a future | Black-76 (discounted / margined) | — | — | — |
 | Vanilla American | Barone-Adesi-Whaley / Bjerksund-Stensland 2002 (approx.) | yes | Brennan-Schwartz | two-pass Longstaff-Schwartz |
+| Perpetual American | Merton closed form (exact) | — | — | — |
 | Binary (cash / asset) | closed form / Heston CF | yes | yes (Rannacher + cell averaging) | yes |
-| Barrier (8 types) | Reiner-Rubinstein | — | absorbing boundary / parity | Brownian-bridge corrected |
-| Asian (arith / geo, fixed / floating) | Turnbull-Wakeman / exact geometric | — | — | geometric control variate |
+| Barrier (8 types, + rebates at hit / at expiry) | Reiner-Rubinstein + E/F rebate terms | — | absorbing boundary / parity | Brownian-bridge corrected (rebate at expiry) |
+| Double barrier (knock-in / knock-out corridor) | Ikeda-Kunitomo image series | — | — | discrete corridor monitoring |
+| Asian (arith / geo, fixed / floating) | Turnbull-Wakeman (fixed + Henderson-Wojakowski average-strike) / exact geometric (fixed + average-strike) | — | — | geometric control variate |
 | Forward-start | Rubinstein (BS) | — | — | yes (incl. Heston forward smile) |
-| Autocallable (coupon/rebate, knock-in protection) | — | — | — | multi-date discounting; GBM / local vol / Heston |
+| Autocallable / Phoenix (conditional + memory coupons) | — | — | — | multi-date discounting; GBM / local vol / Heston |
 | Rainbow (best/worst-of, spread, basket, exchange) | Margrabe / Kirk / moment matching | — | — | correlated terminal GBM |
+| Accumulator / decumulator (geared, knock-out) | strip of Reiner-Rubinstein knock-out pairs | — | — | discrete daily knockout |
+| Lookback (floating / fixed strike) | Goldman-Sosin-Gatto / Conze-Viswanathan (continuous) | — | — | discrete monitoring |
+| Variance / gamma / corridor variance swap (+ GBM vol-swap strike) | model-free replication: DDKZ 1/K^2 kernel, S ln S contract with carry adjustment, Carr-Lewis corridor truncation | — | — | — |
+| Cliquet / ratchet / reverse cliquet / Napoleon | forward-start call/put spreads (no global clamp; Napoleon MC-only) | — | — | per-period GBM or Heston paths |
 
 Model availability: local vol runs on the FD and MC engines; Heston runs on the
 analytic (vanilla + binary) and MC engines (all payoffs above except American
@@ -83,11 +113,33 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   under a microsecond, within a few cents of a fine tree, and return true
   American Greeks (unlike the tree, whose Greeks fall back to the European
   closed form). Use them when speed matters more than the last basis point.
+  **Perpetual American** calls and puts have exact Merton closed forms
+  (`equity::perpetual`), verified against the stationary pricing ODE, smooth
+  pasting and the finite-maturity limit.
 - **Calibration workflow**: quoted option prices -> robust implied vols
   (safeguarded Newton with arbitrage bounds) -> implied surface -> Dupire local
   vol -> reprice anything, including barriers under smile dynamics. **Heston
   calibration** fits all five parameters to vanilla quotes by
   Levenberg-Marquardt in an unconstrained transform space (log/atanh).
+- **Risk analytics** (`risk`): Value-at-Risk and Expected Shortfall in the
+  standard flavors — historical, parametric normal, Cornish-Fisher
+  higher-moment corrected, and delta-normal multi-asset VaR with the exact
+  Euler component / marginal decomposition — plus scenario **VaR/ES for an
+  options book** (delta-gamma-vega-theta from aggregated Greeks and full
+  revaluation through the portfolio repricer, on shared scenarios so the
+  difference isolates the Taylor error), EWMA / realized volatility,
+  max drawdown, Sharpe / Sortino, the Kupiec VaR backtest, and
+  **TOML-configured stress MtM**: named shock scenarios (relative / absolute
+  bumps on spot, vol, rates and time, with per-underlying filters) prepared
+  into bumped market data and fully revalued, reported per trade and
+  aggregated per scenario.
+- **Adjoint Algorithmic Differentiation** (`core::aad`): a tape-based
+  reverse-mode differentiator with operator overloading — write a pricer over
+  `Var` and one backward sweep returns every input sensitivity at a fixed
+  small multiple of pricing cost. Ships with the Black-Scholes closed form
+  on tape (all six first-order Greeks from one sweep, validated to the
+  library's closed forms) and pathwise Monte Carlo Greeks (delta / vega /
+  rho differentiated straight through the simulation).
 - **Numerical toolkits** in `core`: 1-D root finding (`solvers`: bisection,
   Newton-Raphson, secant, Halley, safeguarded Newton — pluggable by enum),
   multi-dimensional optimization (`optimization`: Levenberg-Marquardt, BFGS,
@@ -100,9 +152,11 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   matching, Welford statistics), an interpolation toolkit (`interpolation`:
   linear, cubic splines with natural / clamped / not-a-knot boundaries,
   shape-preserving PCHIP and Akima, bilinear grids and thin-plate splines for
-  2-D vol surfaces), and correlation repair (`linalg`: PSD-tolerant Cholesky
-  plus Higham's nearest-correlation projection, auto-applied to non-PSD
-  rainbow correlation inputs).
+  2-D vol surfaces), and linear algebra (`linalg`: Cholesky / QR / SVD /
+  symmetric-eigen decompositions with least-squares and pseudo-inverse
+  solves, plus correlation repair — PSD-tolerant Cholesky and Higham's
+  nearest-correlation projection, auto-applied to non-PSD rainbow
+  correlation inputs).
 
 ## Running the CLI
 
@@ -262,7 +316,7 @@ println!(
 ...or deserialize the same JSON the CLI consumes:
 
 ```rust
-use rustyqlib::equity::vanila_option::EquityOption;
+use rustyqlib::equity::vanilla_option::EquityOption;
 use rustyqlib::core::data_models::EquityOptionData;
 
 let contract: EquityOptionData = serde_json::from_str(json)?;

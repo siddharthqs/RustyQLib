@@ -10,6 +10,8 @@
 //! - [`equity`] — equity options, forwards and futures with Black-Scholes,
 //!   binomial, Monte Carlo and finite-difference engines
 //! - [`rates`] — interest-rate instruments (deposits, FRAs) and curve building
+//! - [`risk`] — VaR / Expected Shortfall, portfolio scenario risk, volatility
+//!   estimation, performance statistics and VaR backtesting
 //! - [`cmdty`] — commodity options
 //! - [`utils`] — random number generation, stochastic processes and the
 //!   JSON/CLI plumbing used by the `rustyqlib` binary
@@ -24,6 +26,7 @@ pub mod cmdty;
 pub mod core;
 pub mod equity;
 pub mod rates;
+pub mod risk;
 pub mod utils;
 
 pub use crate::core::curves::{Compounding, CurveInput, InterpolationMethod, Tenor, YieldCurve};

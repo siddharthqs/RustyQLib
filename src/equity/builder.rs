@@ -38,7 +38,7 @@ use crate::equity::forward_start_option::ForwardStartPayoff;
 use crate::equity::heston::HestonParams;
 use crate::equity::montecarlo::{McModel, MonteCarloConfig};
 use crate::equity::utils::{Engine, LongShort, Payoff};
-use crate::equity::vanila_option::{
+use crate::equity::vanilla_option::{
     AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityOption, EquityOptionBase,
     VanillaPayoff,
 };
@@ -206,6 +206,9 @@ impl EquityOptionBuilder {
     ) -> Self {
         let style = self.exercise_style.clone();
         self.payoff = Some(Box::new(BarrierPayoff {
+            barrier2: None,
+            rebate: 0.0,
+            rebate_at_hit: false,
             put_or_call,
             exercise_style: style,
             direction,
@@ -214,6 +217,56 @@ impl EquityOptionBuilder {
         }));
         self
     }
+    /// Double-barrier option on the corridor between the two levels.
+    pub fn double_barrier(
+        mut self,
+        put_or_call: PutOrCall,
+        knock: crate::equity::barrier::KnockType,
+        lower: f64,
+        upper: f64,
+    ) -> Self {
+        let style = self.exercise_style.clone();
+        self.payoff = Some(Box::new(BarrierPayoff {
+            put_or_call,
+            exercise_style: style,
+            direction: crate::equity::barrier::BarrierDirection::Down,
+            knock,
+            barrier: lower,
+            barrier2: Some(upper),
+            rebate: 0.0,
+            rebate_at_hit: false,
+        }));
+        self
+    }
+
+    /// Rebate on the most recently configured barrier payoff
+    /// (`at_hit = true` pays the knock-out rebate at the touch;
+    /// analytic engine only).
+    pub fn barrier_rebate(mut self, rebate: f64, at_hit: bool) -> Self {
+        if let Some(payoff) = self.payoff.take() {
+            let mut barrier = payoff
+                .as_any()
+                .downcast_ref::<BarrierPayoff>()
+                .map(|b| BarrierPayoff {
+                    put_or_call: b.put_or_call,
+                    exercise_style: b.exercise_style.clone(),
+                    direction: b.direction,
+                    knock: b.knock,
+                    barrier: b.barrier,
+                    barrier2: b.barrier2,
+                    rebate: b.rebate,
+                    rebate_at_hit: b.rebate_at_hit,
+                })
+                .expect("barrier_rebate must follow .barrier(...) or .double_barrier(...)");
+            barrier.rebate = rebate;
+            barrier.rebate_at_hit = at_hit;
+            self.payoff = Some(Box::new(barrier));
+        } else {
+            panic!("barrier_rebate must follow .barrier(...) or .double_barrier(...)");
+        }
+        self
+    }
+
     pub fn asian(
         mut self,
         put_or_call: PutOrCall,
@@ -226,6 +279,22 @@ impl EquityOptionBuilder {
             exercise_style: style,
             averaging,
             strike_type,
+        }));
+        self
+    }
+    /// Lookback on the path extremum: floating strike pays against the
+    /// min (call) / max (put); fixed strike pays the max (call) / min
+    /// (put) against the built strike.
+    pub fn lookback(
+        mut self,
+        put_or_call: PutOrCall,
+        lookback_type: crate::equity::vanilla_option::LookbackType,
+    ) -> Self {
+        let style = self.exercise_style.clone();
+        self.payoff = Some(Box::new(crate::equity::vanilla_option::LookbackPayoff {
+            put_or_call,
+            exercise_style: style,
+            lookback_type,
         }));
         self
     }
@@ -263,6 +332,37 @@ impl EquityOptionBuilder {
             observations,
             notional,
             initial_fixing: self.spot,
+            coupon_barrier: None,
+            memory: false,
+        }));
+        self
+    }
+
+    /// Phoenix certificate: an autocallable whose coupon is paid at every
+    /// observation with `S >= coupon_barrier` (with optional memory),
+    /// rather than accruing as an at-call rebate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn phoenix(
+        mut self,
+        autocall_barrier: f64,
+        coupon_barrier: f64,
+        protection_barrier: f64,
+        coupon: f64,
+        observations: usize,
+        notional: f64,
+        memory: bool,
+    ) -> Self {
+        let style = self.exercise_style.clone();
+        self.payoff = Some(Box::new(AutocallablePayoff {
+            exercise_style: style,
+            autocall_barrier,
+            protection_barrier,
+            coupon,
+            observations,
+            notional,
+            initial_fixing: self.spot,
+            coupon_barrier: Some(coupon_barrier),
+            memory,
         }));
         self
     }

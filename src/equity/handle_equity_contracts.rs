@@ -2,7 +2,7 @@ use crate::core::traits::Instrument;
 use crate::core::utils::{Contract,CombinedContract, ContractOutput};
 use crate::core::data_models::ProductData;
 use crate::equity::equity_forward::EquityForward;
-use crate::equity::vanila_option::EquityOption;
+use crate::equity::vanilla_option::EquityOption;
 use crate::equity::equity_future::EquityFuture;
 pub fn handle_equity_contract(data: &Contract) -> serde_json::Value {
     match &data.product_type {
@@ -115,6 +115,102 @@ pub fn handle_equity_contract(data: &Contract) -> serde_json::Value {
                 error: None,
             };
             println!("Rainbow Option Price: {}", contract_output.pv);
+            let combined_ = CombinedContract { contract: data.clone(), output: contract_output };
+            serde_json::to_value(&combined_).expect("Failed to generate output")
+        }
+        ProductData::CliquetOption(cq) => {
+            let cliquet = crate::equity::cliquet::Cliquet::from_json(cq);
+            let (pv, std_err) = match cliquet.pricer {
+                crate::equity::cliquet::CliquetPricer::MonteCarlo => {
+                    let (pv, se) = cliquet.mc_npv();
+                    (pv, Some(se))
+                }
+                crate::equity::cliquet::CliquetPricer::Analytical => match cliquet.analytic_npv()
+                {
+                    Ok(pv) => (pv, None),
+                    Err(_) => {
+                        let (pv, se) = cliquet.mc_npv();
+                        (pv, Some(se))
+                    }
+                },
+            };
+            let contract_output = ContractOutput {
+                pv,
+                // the return-based payoff is spot-homogeneous: no spot Greeks
+                delta: 0.0,
+                gamma: 0.0,
+                vega: 0.0,
+                theta: 0.0,
+                rho: 0.0,
+                vanna: 0.0,
+                charm: 0.0,
+                gamma_p: 0.0,
+                zomma: 0.0,
+                std_err,
+                deltas: None,
+                vegas: None,
+                error: None,
+            };
+            println!("Cliquet Option Price: {}", contract_output.pv);
+            let combined_ = CombinedContract { contract: data.clone(), output: contract_output };
+            serde_json::to_value(&combined_).expect("Failed to generate output")
+        }
+        ProductData::Accumulator(acc) => {
+            let accumulator = crate::equity::accumulator::Accumulator::from_json(acc);
+            let (pv, std_err) = match accumulator.pricer {
+                crate::equity::accumulator::AccumulatorPricer::MonteCarlo => {
+                    let (pv, se) = accumulator.mc_npv();
+                    (pv, Some(se))
+                }
+                crate::equity::accumulator::AccumulatorPricer::Analytical => {
+                    (accumulator.analytic_npv(), None)
+                }
+            };
+            let contract_output = ContractOutput {
+                pv,
+                delta: 0.0,
+                gamma: 0.0,
+                vega: 0.0,
+                theta: 0.0,
+                rho: 0.0,
+                vanna: 0.0,
+                charm: 0.0,
+                gamma_p: 0.0,
+                zomma: 0.0,
+                std_err,
+                deltas: None,
+                vegas: None,
+                error: None,
+            };
+            println!("Accumulator Price: {}", contract_output.pv);
+            let combined_ = CombinedContract { contract: data.clone(), output: contract_output };
+            serde_json::to_value(&combined_).expect("Failed to generate output")
+        }
+        ProductData::VarianceSwap(vs) => {
+            let swap = crate::equity::variance_swap::VarianceSwap::from_json(vs);
+            let contract_output = ContractOutput {
+                pv: swap.npv(),
+                delta: 0.0,
+                gamma: 0.0,
+                // a variance swap is pure vega-family exposure: report the
+                // fair strike diagnostics through the print instead
+                vega: 0.0,
+                theta: 0.0,
+                rho: 0.0,
+                vanna: 0.0,
+                charm: 0.0,
+                gamma_p: 0.0,
+                zomma: 0.0,
+                std_err: None,
+                deltas: None,
+                vegas: None,
+                error: None,
+            };
+            println!(
+                "Variance Swap MtM: {} (fair strike {:.4} vol)",
+                contract_output.pv,
+                swap.fair_remaining_variance.sqrt()
+            );
             let combined_ = CombinedContract { contract: data.clone(), output: contract_output };
             serde_json::to_value(&combined_).expect("Failed to generate output")
         }

@@ -11,7 +11,7 @@ use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::portfolio::{EquityPortfolio, MarketMove, PnlAttribution};
 use rustyqlib::equity::utils::Engine;
-use rustyqlib::equity::vanila_option::EquityOption;
+use rustyqlib::equity::vanilla_option::EquityOption;
 
 const SPOT: f64 = 100.0;
 const VOL: f64 = 0.30;

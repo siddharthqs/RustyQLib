@@ -1,0 +1,45 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "accumulator",
+        "symbol": "ACCU-DAILY",
+        "side": "accumulator",
+        "underlying_price": 100.0,
+        "strike": 95.0,
+        "barrier": 110.0,
+        "observations": 252,
+        "maturity": "2030-01-01",
+        "shares_per_day": 100.0,
+        "gearing": 2.0,
+        "risk_free_rate": 0.03,
+        "dividend": 0.01,
+        "volatility": 0.25,
+        "pricer": "MC",
+        "simulation": 100000
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "accumulator",
+        "symbol": "DECU-DAILY",
+        "side": "decumulator",
+        "underlying_price": 100.0,
+        "strike": 105.0,
+        "barrier": 90.0,
+        "observations": 252,
+        "maturity": "2030-01-01",
+        "shares_per_day": 100.0,
+        "risk_free_rate": 0.03,
+        "dividend": 0.01,
+        "volatility": 0.25,
+        "pricer": "Analytical"
+      }
+    }
+  ]
+}

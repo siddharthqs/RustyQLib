@@ -9,7 +9,7 @@ use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::utils::Engine;
-use rustyqlib::equity::vanila_option::BinaryType;
+use rustyqlib::equity::vanilla_option::BinaryType;
 
 const SPOT: f64 = 100.0;
 const STRIKE: f64 = 100.0;
@@ -132,7 +132,7 @@ fn main() {
 /// interactive HTML to `runs/binary_option/`.
 fn digital_greek_surfaces() {
     use common::plot3d::{greek_surface, linspace, save_surface_html, Labels};
-    use rustyqlib::equity::vanila_option::EquityOption;
+    use rustyqlib::equity::vanilla_option::EquityOption;
 
     common::section("Digital Greek surfaces over (moneyness, maturity) -> runs/binary_option/*.html");
 

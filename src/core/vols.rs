@@ -28,7 +28,7 @@ use std::fmt;
 
 use crate::core::curves::Tenor;
 use crate::core::daycount::DayCountConvention;
-use crate::core::utils::inv_N;
+use crate::core::utils::inv_norm_cdf;
 
 /// The accepted input forms for a volatility surface. Deserializes from
 /// JSON; canonicalized at construction ([`VolSurface::from_input`]).
@@ -219,7 +219,7 @@ impl VolSurface {
                     .iter()
                     .zip(row)
                     .map(|(&delta, &sigma)| {
-                        let k = 0.5 * sigma * sigma * t - sigma * t.sqrt() * inv_N(delta);
+                        let k = 0.5 * sigma * sigma * t - sigma * t.sqrt() * inv_norm_cdf(delta);
                         (k, sigma)
                     })
                     .collect();
@@ -425,7 +425,7 @@ impl fmt::Display for VolSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::utils::N;
+    use crate::core::utils::norm_cdf;
 
     fn asof() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 7, 16).unwrap()
@@ -516,7 +516,7 @@ mod tests {
         let forward = 100.0;
         for (&delta, &sigma) in deltas.iter().zip(&vols) {
             // strike implied by the pillar's own quote
-            let k = 0.5 * sigma * sigma * t - sigma * t.sqrt() * inv_N(delta);
+            let k = 0.5 * sigma * sigma * t - sigma * t.sqrt() * inv_norm_cdf(delta);
             let strike = forward * k.exp();
             assert!(
                 (s.vol(strike, forward, t) - sigma).abs() < 1e-10,
@@ -525,7 +525,7 @@ mod tests {
             );
             // and the strike really has that forward delta under its vol
             let d1 = ((forward / strike).ln() + 0.5 * sigma * sigma * t) / (sigma * t.sqrt());
-            assert!((N(d1) - delta).abs() < 1e-10);
+            assert!((norm_cdf(d1) - delta).abs() < 1e-10);
         }
         // put wing (low strike = high call delta) has the higher vol
         assert!(s.vol(80.0, forward, t) > s.vol(120.0, forward, t));
@@ -535,21 +535,21 @@ mod tests {
     fn inv_norm_cdf_round_trip() {
         for i in -60..=60 {
             let x = i as f64 / 10.0;
-            let p = N(x);
+            let p = norm_cdf(x);
             if p > 0.0 && p < 1.0 {
                 // in the far tails a 1-ulp error in p maps to ~1e-8 in x
                 // (dp/dx = phi(x) is tiny there) — that is the attainable
                 // double-precision accuracy, not an approximation error
                 let tol = if x.abs() <= 4.5 { 1e-9 } else { 5e-8 };
                 assert!(
-                    (inv_N(p) - x).abs() < tol,
-                    "x={x}: inv_N(N(x))={}",
-                    inv_N(p)
+                    (inv_norm_cdf(p) - x).abs() < tol,
+                    "x={x}: inv_norm_cdf(norm_cdf(x))={}",
+                    inv_norm_cdf(p)
                 );
             }
         }
-        assert!(inv_N(0.0).is_nan());
-        assert!(inv_N(1.0).is_nan());
+        assert!(inv_norm_cdf(0.0).is_nan());
+        assert!(inv_norm_cdf(1.0).is_nan());
     }
 
     #[test]

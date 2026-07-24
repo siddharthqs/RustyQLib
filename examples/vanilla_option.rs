@@ -11,7 +11,7 @@ use rustyqlib::equity::blackscholes::bs_price;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::montecarlo::{McModel, Sampler};
 use rustyqlib::equity::utils::Engine;
-use rustyqlib::equity::vanila_option::EquityOption;
+use rustyqlib::equity::vanilla_option::EquityOption;
 
 const SPOT: f64 = 100.0;
 const STRIKE: f64 = 100.0;

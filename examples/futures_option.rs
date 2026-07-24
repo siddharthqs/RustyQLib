@@ -12,7 +12,7 @@ use rustyqlib::equity::black76::{price, FuturesSettlement};
 use rustyqlib::equity::blackscholes::bs_price;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::utils::Engine;
-use rustyqlib::equity::vanila_option::EquityOption;
+use rustyqlib::equity::vanilla_option::EquityOption;
 
 const F: f64 = 100.0; // futures price
 const K: f64 = 100.0;

@@ -23,9 +23,9 @@
 
 use crate::core::solvers::Solver1d;
 use crate::core::trade::PutOrCall;
-use crate::core::utils::{dN, ContractStyle, N};
+use crate::core::utils::{norm_pdf, ContractStyle, norm_cdf};
 use crate::equity::blackscholes::bs_price;
-use crate::equity::vanila_option::EquityOption;
+use crate::equity::vanilla_option::EquityOption;
 
 /// Relative convergence tolerance (in units of strike) for the critical-price
 /// Newton iteration, and its iteration cap.
@@ -59,7 +59,7 @@ pub fn price(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64, put_or_call: Pu
             }
             let q2 = quadratic_root(r, b, sigma, t, true);
             let d1 = d1_of(s_star, k, b, sigma, t);
-            let a2 = (s_star / q2) * (1.0 - ((b - r) * t).exp() * N(d1));
+            let a2 = (s_star / q2) * (1.0 - ((b - r) * t).exp() * norm_cdf(d1));
             euro + a2 * (s / s_star).powf(q2)
         }
         PutOrCall::Put => {
@@ -69,7 +69,7 @@ pub fn price(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64, put_or_call: Pu
             }
             let q1 = quadratic_root(r, b, sigma, t, false);
             let d1 = d1_of(s_star, k, b, sigma, t);
-            let a1 = -(s_star / q1) * (1.0 - ((b - r) * t).exp() * N(-d1));
+            let a1 = -(s_star / q1) * (1.0 - ((b - r) * t).exp() * norm_cdf(-d1));
             euro + a1 * (s / s_star).powf(q1)
         }
     }
@@ -123,13 +123,13 @@ fn critical_call(k: f64, r: f64, b: f64, sigma: f64, t: f64) -> f64 {
     let rhs = |si: f64| {
         let d1 = d1_of(si, k, b, sigma, t);
         bs_price(si, k, r, r - b, sigma, t, PutOrCall::Call)
-            + (1.0 - ((b - r) * t).exp() * N(d1)) * si / q2
+            + (1.0 - ((b - r) * t).exp() * norm_cdf(d1)) * si / q2
     };
     // slope b_i of RHS from the Barone-Adesi-Whaley paper
     let bi = |si: f64| {
         let d1 = d1_of(si, k, b, sigma, t);
-        ((b - r) * t).exp() * N(d1) * (1.0 - 1.0 / q2)
-            + (1.0 - ((b - r) * t).exp() * dN(d1) / sqt) / q2
+        ((b - r) * t).exp() * norm_cdf(d1) * (1.0 - 1.0 / q2)
+            + (1.0 - ((b - r) * t).exp() * norm_pdf(d1) / sqt) / q2
     };
     Solver1d::new(CRIT_TOL * k, CRIT_MAX_ITER)
         .newton_raphson(|si| (si - k) - rhs(si), |si| 1.0 - bi(si), seed)
@@ -151,12 +151,12 @@ fn critical_put(k: f64, r: f64, b: f64, sigma: f64, t: f64) -> f64 {
     let rhs = |si: f64| {
         let d1 = d1_of(si, k, b, sigma, t);
         bs_price(si, k, r, r - b, sigma, t, PutOrCall::Put)
-            - (1.0 - ((b - r) * t).exp() * N(-d1)) * si / q1
+            - (1.0 - ((b - r) * t).exp() * norm_cdf(-d1)) * si / q1
     };
     let bi = |si: f64| {
         let d1 = d1_of(si, k, b, sigma, t);
-        -((b - r) * t).exp() * N(-d1) * (1.0 - 1.0 / q1)
-            - (1.0 + ((b - r) * t).exp() * dN(-d1) / sqt) / q1
+        -((b - r) * t).exp() * norm_cdf(-d1) * (1.0 - 1.0 / q1)
+            - (1.0 + ((b - r) * t).exp() * norm_pdf(-d1) / sqt) / q1
     };
     Solver1d::new(CRIT_TOL * k, CRIT_MAX_ITER)
         .newton_raphson(|si| (k - si) - rhs(si), |si| -1.0 - bi(si), seed)

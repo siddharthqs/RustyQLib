@@ -33,6 +33,58 @@ pub enum BinaryType {
     AssetOrNothing,
 }
 
+/// Lookback flavor: floating strike pays against the path extremum,
+/// fixed strike pays the extremum against a fixed strike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookbackType {
+    FloatingStrike,
+    FixedStrike,
+}
+
+/// Lookback payoff: the call watches the minimum (floating) or maximum
+/// (fixed), the put the mirror image. Discretely monitored on the path
+/// grid under Monte Carlo; the analytic engine prices the continuous-
+/// monitoring closed forms.
+#[derive(Debug)]
+pub struct LookbackPayoff {
+    pub put_or_call: PutOrCall,
+    pub exercise_style: ContractStyle,
+    pub lookback_type: LookbackType,
+}
+
+impl Payoff for LookbackPayoff {
+    /// Degenerate single-point value (fresh option): zero.
+    fn payoff(&self, _spot: f64, _strike: f64) -> f64 {
+        0.0
+    }
+    fn path_payoff(&self, path: &[f64], strike: f64) -> f64 {
+        let terminal = *path.last().expect("empty path");
+        let max = path.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min = path.iter().cloned().fold(f64::INFINITY, f64::min);
+        match (self.lookback_type, &self.put_or_call) {
+            (LookbackType::FloatingStrike, PutOrCall::Call) => terminal - min,
+            (LookbackType::FloatingStrike, PutOrCall::Put) => max - terminal,
+            (LookbackType::FixedStrike, PutOrCall::Call) => (max - strike).max(0.0),
+            (LookbackType::FixedStrike, PutOrCall::Put) => (strike - min).max(0.0),
+        }
+    }
+    fn is_path_dependent(&self) -> bool {
+        true
+    }
+    fn payoff_kind(&self) -> PayoffType {
+        PayoffType::Lookback
+    }
+    fn put_or_call(&self) -> &PutOrCall {
+        &self.put_or_call
+    }
+    fn exercise_style(&self) -> &ContractStyle {
+        &self.exercise_style
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[derive(Debug)]
 pub struct BinaryPayoff {
     pub put_or_call: PutOrCall,
@@ -48,6 +100,15 @@ pub struct BarrierPayoff {
     pub direction: BarrierDirection,
     pub knock: KnockType,
     pub barrier: f64,
+    /// Second barrier level: `Some` makes this a **double** barrier (the
+    /// corridor `[min, max]` of the two levels; `direction` is ignored).
+    pub barrier2: Option<f64>,
+    /// Rebate paid on the knock event (knock-out) or at expiry when the
+    /// option never knocks in (knock-in). Zero = no rebate.
+    pub rebate: f64,
+    /// Knock-out rebate timing: at the touch (`true`, analytic engine
+    /// only) or at expiry (`false`; also the Monte Carlo convention).
+    pub rebate_at_hit: bool,
 }
 
 /// Barrier payoff: `payoff` is the underlying vanilla leg (used by the
@@ -63,19 +124,33 @@ impl Payoff for BarrierPayoff {
         }
     }
     fn path_payoff(&self, path: &[f64], strike: f64) -> f64 {
-        let crossed = path.iter().any(|&s| match self.direction {
-            BarrierDirection::Up => s >= self.barrier,
-            BarrierDirection::Down => s <= self.barrier,
-        });
+        let crossed = match self.barrier2 {
+            Some(b2) => {
+                let (lo, hi) = (self.barrier.min(b2), self.barrier.max(b2));
+                path.iter().any(|&s| s <= lo || s >= hi)
+            }
+            None => path.iter().any(|&s| match self.direction {
+                BarrierDirection::Up => s >= self.barrier,
+                BarrierDirection::Down => s <= self.barrier,
+            }),
+        };
         let alive = match self.knock {
             KnockType::Out => !crossed,
             KnockType::In => crossed,
         };
-        if alive {
+        // rebate legs pay at expiry under path pricing: a knocked-out
+        // path collects the rebate, a never-in path of a knock-in does
+        let rebate = match self.knock {
+            KnockType::Out if crossed => self.rebate,
+            KnockType::In if !crossed => self.rebate,
+            _ => 0.0,
+        };
+        let payoff = if alive {
             self.payoff(*path.last().expect("empty path"), strike)
         } else {
             0.0
-        }
+        };
+        payoff + rebate
     }
     fn is_path_dependent(&self) -> bool {
         true
@@ -386,6 +461,21 @@ impl EquityOption {
                     cash: data.cash_amount.unwrap_or(1.0),
                 })
             }
+            PayoffType::Lookback => {
+                let lookback_type = match data
+                    .lookback_type
+                    .as_deref()
+                    .unwrap_or("floating")
+                    .trim()
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "floating" | "floating_strike" => LookbackType::FloatingStrike,
+                    "fixed" | "fixed_strike" => LookbackType::FixedStrike,
+                    other => panic!("Invalid lookback_type '{other}' (use 'floating' or 'fixed')"),
+                };
+                Box::new(LookbackPayoff { put_or_call: side, exercise_style: style, lookback_type })
+            }
             PayoffType::Barrier => {
                 let barrier = data
                     .barrier_level
@@ -412,6 +502,9 @@ impl EquityOption {
                     direction,
                     knock,
                     barrier,
+                    barrier2: data.barrier_level2,
+                    rebate: data.rebate.unwrap_or(0.0),
+                    rebate_at_hit: data.rebate_at_hit.unwrap_or(false),
                 })
             }
             PayoffType::Asian => {
@@ -476,6 +569,8 @@ impl EquityOption {
                         .protection_barrier
                         .expect("protection_barrier is required for autocallables"),
                     coupon: data.autocall_coupon.unwrap_or(0.0),
+                    coupon_barrier: data.coupon_barrier,
+                    memory: data.coupon_memory.unwrap_or(false),
                     observations: data.autocall_observations.unwrap_or(4).max(1),
                     notional: data.notional.unwrap_or(100.0),
                     initial_fixing: data.base.underlying_price,

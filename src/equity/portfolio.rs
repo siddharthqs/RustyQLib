@@ -22,7 +22,7 @@
 //! residual — third-order terms and any cross terms not in the expansion.
 
 use crate::core::traits::Instrument;
-use crate::equity::vanila_option::EquityOption;
+use crate::equity::vanilla_option::EquityOption;
 
 /// A signed position in one option: `quantity` contracts (negative = short).
 pub struct Position {

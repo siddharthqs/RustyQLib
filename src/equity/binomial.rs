@@ -1,5 +1,5 @@
 //extern crate ndarray;
-use super::vanila_option::{EquityOption};
+use super::vanilla_option::{EquityOption};
 use super::utils::{Engine, Payoff};
 use crate::core::trade::{ PutOrCall, Transection};
 use crate::core::utils::{ContractStyle};
@@ -70,7 +70,7 @@ pub fn npv(option: &EquityOption) -> f64 {
 //     use crate::core::utils::{Contract,MarketData};
 //     use crate::core::trade::{OptionType,Transection};
 //     use crate::core::utils::{ContractStyle};
-//     use crate::equity::vanila_option::{EquityOption};
+//     use crate::equity::vanilla_option::{EquityOption};
 //
 //     use chrono::{NaiveDate};
 //     use crate::core::traits::Instrument;

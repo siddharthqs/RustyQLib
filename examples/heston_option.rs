@@ -13,7 +13,7 @@ use rustyqlib::equity::blackscholes::{bs_price, implied_vol_from_price};
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::heston::{heston_price, HestonParams};
 use rustyqlib::equity::utils::Engine;
-use rustyqlib::equity::vanila_option::BinaryType;
+use rustyqlib::equity::vanilla_option::BinaryType;
 
 const SPOT: f64 = 100.0;
 const STRIKE: f64 = 100.0;

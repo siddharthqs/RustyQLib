@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use crate::equity::vanila_option::EquityOptionBase;
+use crate::equity::vanilla_option::EquityOptionBase;
 use std::str::FromStr;
 use std::error::Error;
 use crate::core::trade::{PutOrCall};
@@ -33,6 +33,7 @@ pub enum PayoffType {
     Asian,
     ForwardStart,
     Autocallable,
+    Lookback,
 }
 impl FromStr for PayoffType {
     type Err = Box<dyn Error>;
@@ -44,6 +45,7 @@ impl FromStr for PayoffType {
             "asian" => Ok(PayoffType::Asian),
             "forward_start" | "forwardstart" => Ok(PayoffType::ForwardStart),
             "autocallable" | "autocall" => Ok(PayoffType::Autocallable),
+            "lookback" => Ok(PayoffType::Lookback),
             _ => Err("Invalid payoff type".into()),
         }
     }

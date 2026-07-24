@@ -1,7 +1,7 @@
 //! Stratified sampling and Latin hypercube designs — seeded, exact
 //! stratification of the unit interval / hypercube.
 
-use crate::core::utils::inv_N;
+use crate::core::utils::inv_norm_cdf;
 
 use super::rng::splitmix64;
 
@@ -36,7 +36,7 @@ pub fn stratified_uniforms(n: usize, seed: u64) -> Vec<f64> {
 pub fn stratified_normals(n: usize, seed: u64) -> Vec<f64> {
     stratified_uniforms(n, seed)
         .into_iter()
-        .map(|u| inv_N(u.clamp(1e-15, 1.0 - 1e-15)))
+        .map(|u| inv_norm_cdf(u.clamp(1e-15, 1.0 - 1e-15)))
         .collect()
 }
 

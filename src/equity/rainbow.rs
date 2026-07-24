@@ -23,7 +23,7 @@ use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::linalg::{cholesky, nearest_correlation};
 use crate::core::trade::PutOrCall;
-use crate::core::utils::N;
+use crate::core::utils::norm_cdf;
 use crate::equity::montecarlo::{McStats, Sampler};
 use crate::equity::utils::Engine;
 use crate::core::montecarlo::{path_normals, QmcSequence};
@@ -346,7 +346,7 @@ impl RainbowOption {
         }
         let d1 = ((p.spots[i] / p.spots[j]).ln() + (q_j - q_i + 0.5 * sigma * sigma) * p.t) / st;
         let d2 = d1 - st;
-        p.spots[i] * exp(-q_i * p.t) * N(d1) - p.spots[j] * exp(-q_j * p.t) * N(d2)
+        p.spots[i] * exp(-q_i * p.t) * norm_cdf(d1) - p.spots[j] * exp(-q_j * p.t) * norm_cdf(d2)
     }
 
     /// Kirk's (1995) approximation for spread options (S1 - S2 - K)^+.
@@ -364,8 +364,8 @@ impl RainbowOption {
         let d2 = d1 - st;
         let df = exp(-p.r * p.t);
         match self.put_or_call {
-            PutOrCall::Call => df * (f1 * N(d1) - (f2 + k) * N(d2)),
-            PutOrCall::Put => df * ((f2 + k) * N(-d2) - f1 * N(-d1)),
+            PutOrCall::Call => df * (f1 * norm_cdf(d1) - (f2 + k) * norm_cdf(d2)),
+            PutOrCall::Put => df * ((f2 + k) * norm_cdf(-d2) - f1 * norm_cdf(-d1)),
         }
     }
 
@@ -393,8 +393,8 @@ impl RainbowOption {
         let d2 = d1 - sqrt_v;
         let df = exp(-p.r * p.t);
         match self.put_or_call {
-            PutOrCall::Call => df * (m1 * N(d1) - k * N(d2)),
-            PutOrCall::Put => df * (k * N(-d2) - m1 * N(-d1)),
+            PutOrCall::Call => df * (m1 * norm_cdf(d1) - k * norm_cdf(d2)),
+            PutOrCall::Put => df * (k * norm_cdf(-d2) - m1 * norm_cdf(-d1)),
         }
     }
 

@@ -3,7 +3,7 @@
 //! is the quasi-random workhorse when the problem's dimension exceeds
 //! the embedded Sobol table ([`SobolSequence`](super::sobol::SobolSequence)).
 
-use crate::core::utils::inv_N;
+use crate::core::utils::inv_norm_cdf;
 
 use super::rng::splitmix64;
 
@@ -60,7 +60,7 @@ impl QmcSequence {
             if u >= 1.0 {
                 u -= 1.0;
             }
-            *z = inv_N(u.clamp(1e-15, 1.0 - 1e-15));
+            *z = inv_norm_cdf(u.clamp(1e-15, 1.0 - 1e-15));
         }
     }
 }

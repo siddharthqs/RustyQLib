@@ -13,7 +13,7 @@ use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::baw;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::utils::Engine;
-use rustyqlib::equity::vanila_option::EquityOption;
+use rustyqlib::equity::vanilla_option::EquityOption;
 
 const SPOT: f64 = 100.0;
 const STRIKE: f64 = 100.0;
@@ -116,6 +116,24 @@ fn main() {
     println!("  tree   : {tree_ns:>10.0} ns / price");
     println!("  BAW is ~{:.0}x faster for ~{:.3} of price error",
         tree_ns / baw_ns, (baw_opt.npv() - tree.npv()).abs());
+
+    common::section("Perpetual limit: T -> infinity has an exact closed form (Merton)");
+    {
+        use rustyqlib::equity::bjerksund_stensland;
+        use rustyqlib::equity::perpetual::{exercise_boundary, perpetual_put};
+        let perp = perpetual_put(SPOT, STRIKE, RATE, DIV, VOL);
+        println!("  {:<26} {:>12}", "maturity", "put value");
+        for t in [1.0, 5.0, 15.0, 40.0] {
+            let v = bjerksund_stensland::price(SPOT, STRIKE, RATE, DIV, VOL, t, PutOrCall::Put);
+            println!("  {:<26} {:>12.6}", format!("T = {t}y (BS2002)"), v);
+        }
+        println!("  {:<26} {:>12.6}", "T = infinity (exact)", perp);
+        common::note(&format!(
+            "perpetual exercise boundary S** = {:.4}; finite-maturity American",
+            exercise_boundary(STRIKE, RATE, DIV, VOL, PutOrCall::Put)
+        ));
+        common::note("prices increase with maturity toward the exact perpetual value");
+    }
 
     common::section("Checks");
     let put = american(PutOrCall::Put, Engine::BaroneAdesiWhaley);

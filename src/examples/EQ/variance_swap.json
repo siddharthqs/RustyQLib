@@ -1,0 +1,69 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "variance_swap",
+        "symbol": "VSWAP-FLAT",
+        "underlying_price": 100.0,
+        "strike_vol": 0.22,
+        "notional": 1000000.0,
+        "maturity": "2030-01-01",
+        "risk_free_rate": 0.03,
+        "dividend": 0.01,
+        "volatility": 0.25
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "variance_swap",
+        "symbol": "VSWAP-SEASONED",
+        "underlying_price": 100.0,
+        "strike_vol": 0.2,
+        "notional": 1000000.0,
+        "maturity": "2030-01-01",
+        "risk_free_rate": 0.03,
+        "volatility": 0.25,
+        "elapsed": 0.5,
+        "accrued_variance": 0.09
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "variance_swap",
+        "symbol": "GSWAP",
+        "underlying_price": 100.0,
+        "strike_vol": 0.25,
+        "notional": 1000000.0,
+        "maturity": "2030-01-01",
+        "risk_free_rate": 0.03,
+        "dividend": 0.01,
+        "volatility": 0.25,
+        "swap_type": "gamma"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "variance_swap",
+        "symbol": "CSWAP-8/120",
+        "underlying_price": 100.0,
+        "strike_vol": 0.2,
+        "notional": 1000000.0,
+        "maturity": "2030-01-01",
+        "risk_free_rate": 0.03,
+        "volatility": 0.25,
+        "swap_type": "corridor",
+        "corridor_low": 80.0,
+        "corridor_high": 120.0
+      }
+    }
+  ]
+}

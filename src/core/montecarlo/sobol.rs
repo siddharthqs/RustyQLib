@@ -13,7 +13,7 @@
 //! problems use [`QmcSequence`](super::halton::QmcSequence) (Halton),
 //! which extends to any dimension.
 
-use crate::core::utils::inv_N;
+use crate::core::utils::inv_norm_cdf;
 
 use super::rng::splitmix64;
 
@@ -121,7 +121,7 @@ impl SobolSequence {
     pub fn normals(&self, index: u64, out: &mut [f64]) {
         self.uniforms(index, out);
         for u in out.iter_mut() {
-            *u = inv_N(u.clamp(1e-15, 1.0 - 1e-15));
+            *u = inv_norm_cdf(u.clamp(1e-15, 1.0 - 1e-15));
         }
     }
 }
@@ -167,7 +167,7 @@ pub(crate) fn van_der_corput_base2(mut i: u64) -> f64 {
 /// `n` low-discrepancy standard normal draws (1-D Sobol through the
 /// inverse normal CDF). Deterministic.
 pub fn sobol_normals(n: usize) -> Vec<f64> {
-    (1..=n as u64).map(|i| inv_N(van_der_corput_base2(i))).collect()
+    (1..=n as u64).map(|i| inv_norm_cdf(van_der_corput_base2(i))).collect()
 }
 
 #[cfg(test)]

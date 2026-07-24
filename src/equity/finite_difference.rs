@@ -33,7 +33,7 @@ use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::local_vol::LocalVol;
 use crate::equity::montecarlo::McModel;
 use crate::equity::utils::Payoff;
-use crate::equity::vanila_option::{BarrierPayoff, EquityOption};
+use crate::equity::vanilla_option::{BarrierPayoff, EquityOption};
 
 const RANNACHER_STEPS: usize = 4;
 const CELL_AVG_POINTS: usize = 16;
@@ -176,6 +176,10 @@ fn solve_dispatch(
     }
 
     if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+        assert!(
+            barrier.barrier2.is_none() && barrier.rebate == 0.0,
+            "double barriers and rebates are not supported on the FD engine;              use the Analytical or MonteCarlo engine"
+        );
         let down = barrier.direction == BarrierDirection::Down;
         let knocked = if down { s0 <= barrier.barrier } else { s0 >= barrier.barrier };
         return match barrier.knock {

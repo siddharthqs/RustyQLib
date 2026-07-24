@@ -17,7 +17,7 @@ Release mode matters: the Monte Carlo examples run 50k–100k paths.
 | `barrier_option` | All eight barrier types | analytic vs FD vs bridge-corrected MC; in-out parity; barrier sweep; skew effect under local vol |
 | `asian_option` | Asian options | geometric (exact) vs arithmetic (Turnbull-Wakeman); the geometric control variate cutting MC variance ~15x; floating strike; AM-GM ordering |
 | `forward_start_option` | Forward-start options | Rubinstein closed form vs MC; **the forward smile** (Heston vs Black-Scholes); strike-fraction and fixing-date sweeps |
-| `autocallable_option` | Autocallable note with coupon | GBM vs local vol vs Heston; coupon / barrier / frequency sensitivity; exact degenerate cases |
+| `autocallable_option` | Autocallable note with coupon | GBM vs local vol vs Heston; coupon / barrier / frequency sensitivity; exact degenerate cases (Phoenix conditional/memory coupons via `.phoenix(...)`) |
 | `heston_option` | Heston stochastic vol | semi-analytic characteristic function vs MC; binaries and barriers; **how rho and vol-of-vol shape the smile** |
 | `rainbow_option` | Multi-asset rainbows | best-of, worst-of, spread (Kirk), basket (moment matching), exchange (Margrabe); correlation sweep; per-asset Greeks |
 | `local_vol_calibration` | Local vol workflow | quotes -> implied vols -> surface -> Dupire -> reprice, end to end with checks at each step |
@@ -25,7 +25,9 @@ Release mode matters: the Monte Carlo examples run 50k–100k paths.
 | `convert_format` | JSON <-> XML conversion | transcoding contract documents between the two supported formats |
 | `dividends_and_borrow` | Carry inputs | borrow cost as carry; escrowed vs jump dividend models per engine; where the difference matters |
 | `portfolio_pnl` | Book of options on one underlying | quantity-weighted Greek aggregation; second-order PnL attribution (delta/gamma/vega/volga/vanna/theta/rho) vs full reprice; the unexplained residual growing with the move |
-| `american_baw` | American vanillas, analytic approximations | Barone-Adesi-Whaley and Bjerksund-Stensland 2002 vs binomial / FD / LSMC; early-exercise premium and critical boundary; the BS2002 lower-bound property; true American Greeks; ~cents of error for a huge speed-up |
+| `cliquet_option` | Cliquet / ratchet / reverse / Napoleon | closed form vs MC; local cap sweep; global floor/cap coupling; **the Heston forward-smile discount on capped strips**; the floored Napoleon's vol-of-vol convexity |
+| `stress_mtm` | Stress MtM from TOML scenarios | shock config (relative/absolute, per-underlying) -> bumped market -> full revaluation; trade-level table and portfolio aggregation per scenario |
+| `american_baw` | American vanillas, analytic approximations | Barone-Adesi-Whaley and Bjerksund-Stensland 2002 vs binomial / FD / LSMC; early-exercise premium and critical boundary; the BS2002 lower-bound property; the exact Merton perpetual as the T -> infinity limit; true American Greeks; ~cents of error for a huge speed-up |
 
 ## Reading the output
 

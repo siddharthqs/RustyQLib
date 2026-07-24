@@ -21,6 +21,9 @@ rustyqlib file --input src/examples/EQ/<file>.json --output out.json
 | `dividends_borrow.json` | Carry inputs | cash dividends + borrow cost across analytic, FD (American) and MC (barrier) |
 | `eq2.json`, `equity_forward.json` | Forward / future contracts | linear products |
 | `futures_option.json` | Options on futures (Black-76) | `futures_settlement`: discounted (standard) and margined (futures-style) |
+| `accumulator.json` | Accumulator / decumulator | daily geared accrual, knock-out barrier, analytic strip vs MC |
+| `variance_swap.json` | Variance / gamma / corridor swaps (`swap_type`) | fair strikes by replication; seasoned MtM with accrued variance |
+| `cliquet_option.json` | Cliquet / ratchet (+ `style`: reverse, napoleon) | monthly reset strip, local cap, global floor, GBM and **Heston** MC |
 | `equity_option.xml` | Same as `equity_option.json`, in XML | the XML conventions: `<item>` arrays, attributes as fields, nested arrays |
 
 ## Rates (`IR/`) and commodities (`CO/`)

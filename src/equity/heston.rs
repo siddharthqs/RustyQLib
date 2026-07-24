@@ -24,52 +24,52 @@ use crate::core::trade::PutOrCall;
 // ── Minimal complex arithmetic (principal branches) ─────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Cpx {
-    re: f64,
-    im: f64,
+pub(crate) struct Cpx {
+    pub(crate) re: f64,
+    pub(crate) im: f64,
 }
 
-const I: Cpx = Cpx { re: 0.0, im: 1.0 };
+pub(crate) const I: Cpx = Cpx { re: 0.0, im: 1.0 };
 
 impl Cpx {
-    fn new(re: f64, im: f64) -> Self {
+    pub(crate) fn new(re: f64, im: f64) -> Self {
         Cpx { re, im }
     }
-    fn real(re: f64) -> Self {
+    pub(crate) fn real(re: f64) -> Self {
         Cpx { re, im: 0.0 }
     }
-    fn add(self, o: Cpx) -> Cpx {
+    pub(crate) fn add(self, o: Cpx) -> Cpx {
         Cpx::new(self.re + o.re, self.im + o.im)
     }
-    fn sub(self, o: Cpx) -> Cpx {
+    pub(crate) fn sub(self, o: Cpx) -> Cpx {
         Cpx::new(self.re - o.re, self.im - o.im)
     }
-    fn mul(self, o: Cpx) -> Cpx {
+    pub(crate) fn mul(self, o: Cpx) -> Cpx {
         Cpx::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
     }
-    fn div(self, o: Cpx) -> Cpx {
+    pub(crate) fn div(self, o: Cpx) -> Cpx {
         let denom = o.re * o.re + o.im * o.im;
         Cpx::new(
             (self.re * o.re + self.im * o.im) / denom,
             (self.im * o.re - self.re * o.im) / denom,
         )
     }
-    fn scale(self, x: f64) -> Cpx {
+    pub(crate) fn scale(self, x: f64) -> Cpx {
         Cpx::new(self.re * x, self.im * x)
     }
-    fn exp(self) -> Cpx {
+    pub(crate) fn exp(self) -> Cpx {
         let m = self.re.exp();
         Cpx::new(m * self.im.cos(), m * self.im.sin())
     }
-    fn ln(self) -> Cpx {
+    pub(crate) fn ln(self) -> Cpx {
         Cpx::new(self.norm().ln(), self.im.atan2(self.re))
     }
-    fn sqrt(self) -> Cpx {
+    pub(crate) fn sqrt(self) -> Cpx {
         let m = self.norm().sqrt();
         let half_arg = 0.5 * self.im.atan2(self.re);
         Cpx::new(m * half_arg.cos(), m * half_arg.sin())
     }
-    fn norm(self) -> f64 {
+    pub(crate) fn norm(self) -> f64 {
         self.re.hypot(self.im)
     }
 }
@@ -119,7 +119,7 @@ impl HestonParams {
     /// Map to the unconstrained calibration space: `ln` for the positive
     /// parameters and `atanh` for the correlation, so any point the
     /// optimizer visits maps back to a valid parameter set.
-    fn to_unconstrained(&self) -> Vec<f64> {
+    pub(crate) fn to_unconstrained(&self) -> Vec<f64> {
         vec![
             self.v0.ln(),
             self.kappa.ln(),
@@ -130,7 +130,7 @@ impl HestonParams {
         ]
     }
 
-    fn from_unconstrained(u: &[f64]) -> HestonParams {
+    pub(crate) fn from_unconstrained(u: &[f64]) -> HestonParams {
         HestonParams {
             v0: u[0].exp(),
             kappa: u[1].exp(),
@@ -212,7 +212,7 @@ pub fn calibrate(
 // ── Characteristic function and pricing ─────────────────────────────────
 
 /// Characteristic function of ln(S_T) in the trap-free formulation.
-fn characteristic_fn(u: Cpx, s: f64, r: f64, q: f64, t: f64, hp: &HestonParams) -> Cpx {
+pub(crate) fn characteristic_fn(u: Cpx, s: f64, r: f64, q: f64, t: f64, hp: &HestonParams) -> Cpx {
     let kappa = Cpx::real(hp.kappa);
     let eps = hp.vol_of_vol;
     let eps2 = eps * eps;
@@ -250,16 +250,27 @@ fn characteristic_fn(u: Cpx, s: f64, r: f64, q: f64, t: f64, hp: &HestonParams) 
 /// The two Heston probabilities: P2 = P(S_T > K) under the risk-neutral
 /// measure, P1 the same under the spot measure.
 fn probabilities(s: f64, k: f64, r: f64, q: f64, t: f64, hp: &HestonParams) -> (f64, f64) {
-    let ln_k = k.ln();
     let forward = s * ((r - q) * t).exp();
+    probabilities_with_cf(&|u| characteristic_fn(u, s, r, q, t, hp), forward, k)
+}
+
+/// P1/P2 from any log-price characteristic function whose martingale
+/// property gives `phi(-i) = forward` — shared by Heston and the Bates
+/// jump-diffusion extensions.
+pub(crate) fn probabilities_with_cf(
+    cf: &dyn Fn(Cpx) -> Cpx,
+    forward: f64,
+    k: f64,
+) -> (f64, f64) {
+    let ln_k = k.ln();
     // integrands: Re[ e^{-iu lnK} phi_j(u) / (iu) ]
     let integrand = |u: f64, shifted: bool| -> f64 {
         let uc = Cpx::real(u);
         let phi = if shifted {
             // phi1(u) = phi(u - i) / phi(-i), phi(-i) = forward
-            characteristic_fn(uc.sub(I), s, r, q, t, hp).scale(1.0 / forward)
+            cf(uc.sub(I)).scale(1.0 / forward)
         } else {
-            characteristic_fn(uc, s, r, q, t, hp)
+            cf(uc)
         };
         let num = I.scale(-u * ln_k).exp().mul(phi);
         num.div(I.scale(u)).re
@@ -268,7 +279,7 @@ fn probabilities(s: f64, k: f64, r: f64, q: f64, t: f64, hp: &HestonParams) -> (
     (p(true), p(false))
 }
 
-fn simpson<F: Fn(f64) -> f64>(f: F, a: f64, b: f64, n: usize) -> f64 {
+pub(crate) fn simpson<F: Fn(f64) -> f64>(f: F, a: f64, b: f64, n: usize) -> f64 {
     let n = if n % 2 == 0 { n } else { n + 1 };
     let h = (b - a) / n as f64;
     let mut sum = f(a) + f(b);
@@ -344,7 +355,7 @@ pub fn heston_binary_asset_price(
 // ── Option-level analytic pricing and bump Greeks ───────────────────────
 
 use crate::equity::utils::PayoffType;
-use crate::equity::vanila_option::{BinaryPayoff, BinaryType, EquityOption};
+use crate::equity::vanilla_option::{BinaryPayoff, BinaryType, EquityOption};
 
 /// Reprice the option under Heston with additive bumps to
 /// (spot, vol shift, rate, expiry). The vol bump shifts sqrt(v0) and

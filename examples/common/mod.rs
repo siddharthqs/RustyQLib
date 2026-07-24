@@ -10,7 +10,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::montecarlo;
 use rustyqlib::equity::utils::Engine;
-use rustyqlib::equity::vanila_option::EquityOption;
+use rustyqlib::equity::vanilla_option::EquityOption;
 
 // Not every example uses the plotter; silence dead-code warnings there.
 #[allow(dead_code)]

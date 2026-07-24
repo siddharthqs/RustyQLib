@@ -1,6 +1,6 @@
 //! Halley's method: cubic convergence using the first and second
 //! derivatives. Used to polish the inverse normal CDF
-//! ([`inv_N`](crate::core::utils::inv_N)).
+//! ([`inv_norm_cdf`](crate::core::utils::inv_norm_cdf)).
 
 use super::solver_1d::{Root, Solver1d};
 

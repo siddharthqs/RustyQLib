@@ -13,7 +13,7 @@ use chrono::NaiveDate;
 use crate::core::curves::Tenor;
 use crate::core::daycount::DayCountConvention;
 use crate::core::vols::VolSurface;
-use super::vanila_option::EquityOption;
+use super::vanilla_option::EquityOption;
 
 /// Build an implied vol surface from quoted options. Quotes without a
 /// positive market price or violating arbitrage bounds are skipped (with a

@@ -1,0 +1,44 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "cliquet_option",
+        "symbol": "CLIQ-RATCHET",
+        "resets": 12,
+        "maturity": "2030-01-01",
+        "local_floor": 0.0,
+        "local_cap": 0.03,
+        "notional": 1000000.0,
+        "risk_free_rate": 0.03,
+        "dividend": 0.01,
+        "volatility": 0.2,
+        "pricer": "MC",
+        "simulation": 100000,
+        "mc_seed": 42
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "cliquet_option",
+        "symbol": "CLIQ-HESTON",
+        "resets": 12,
+        "maturity": "2030-01-01",
+        "local_floor": 0.0,
+        "local_cap": 0.03,
+        "global_floor": 0.05,
+        "notional": 1000000.0,
+        "risk_free_rate": 0.03,
+        "dividend": 0.01,
+        "volatility": 0.2,
+        "heston": { "v0": 0.04, "kappa": 1.5, "theta": 0.04, "vol_of_vol": 0.7, "rho": -0.7 },
+        "pricer": "MC",
+        "simulation": 100000
+      }
+    }
+  ]
+}

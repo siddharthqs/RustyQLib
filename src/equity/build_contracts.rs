@@ -4,7 +4,7 @@
 use chrono::{NaiveDate,Local,Weekday};
 use chrono::Datelike;
 use crate::core::trade;
-use super::vanila_option::{EquityOption};
+use super::vanilla_option::{EquityOption};
 use super::super::core::termstructure::YieldTermStructure;
 use crate::rates::utils::TermStructure;
 use crate::core::vols::VolSurface;

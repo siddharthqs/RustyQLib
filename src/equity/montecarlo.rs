@@ -35,7 +35,7 @@ use super::autocallable::AutocallablePayoff;
 use super::barrier::{BarrierDirection, KnockType};
 use super::heston::HestonParams;
 use super::local_vol::LocalVol;
-use super::vanila_option::{AsianPayoff, BarrierPayoff, EquityOption, EquityOptionBase, VanillaPayoff};
+use super::vanilla_option::{AsianPayoff, BarrierPayoff, EquityOption, EquityOptionBase, VanillaPayoff};
 use super::utils::{Engine, LongShort, Payoff};
 use crate::core::trade::PutOrCall;
 use crate::core::montecarlo::{
@@ -244,7 +244,7 @@ fn dividends_per_step(option: &EquityOption, t: f64, steps: usize) -> Option<Vec
 /// Cash dividends are discounted at the net carry `r - carry` (here
 /// `p.r - p.q`, `p.q` being the total carry), matching the analytic engine
 /// and the jump-model forward; see
-/// [`EquityOptionBase::pv_cash_dividends`](super::vanila_option::EquityOptionBase::pv_cash_dividends).
+/// [`EquityOptionBase::pv_cash_dividends`](super::vanilla_option::EquityOptionBase::pv_cash_dividends).
 fn escrowed_spot(option: &EquityOption, p: &MarketParams) -> f64 {
     let dr = p.r - option.base.risk_free_rate();
     let mut pv = 0.0;
@@ -268,6 +268,12 @@ pub fn npv_with_stats(option: &EquityOption) -> McStats {
     assert!(option.base.volatility() >= 0.0);
     assert!(option.base.time_to_maturity() >= 0.0);
     assert!(option.base.underlying_price.value >= 0.0);
+    if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+        assert!(
+            !(barrier.rebate != 0.0 && barrier.rebate_at_hit),
+            "at-hit rebates need the touch time: price on the Analytical engine              (Monte Carlo supports the at-expiry rebate convention)"
+        );
+    }
     price(option, &market_params(option))
 }
 
@@ -532,7 +538,12 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         // barriers get the Brownian-bridge crossing correction; Asians get
         // the geometric control variate; anything else path-dependent uses
         // its own path_payoff with discrete monitoring
-        return if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+        return if let Some(barrier) = option
+            .payoff
+            .as_any()
+            .downcast_ref::<BarrierPayoff>()
+            .filter(|b| b.barrier2.is_none() && b.rebate == 0.0)
+        {
             barrier_npv(option, barrier, p)
         } else if let Some(asian) = option.payoff.as_any().downcast_ref::<AsianPayoff>() {
             asian_npv(option, asian, p)

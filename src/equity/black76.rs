@@ -17,7 +17,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::core::trade::PutOrCall;
-use crate::core::utils::{dN, N};
+use crate::core::utils::{norm_pdf, norm_cdf};
 
 /// How an option on a future is settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,8 +84,8 @@ pub fn price(
     }
     let (d1, d2) = d1_d2(f, k, sigma, t);
     match put_or_call {
-        PutOrCall::Call => df * (f * N(d1) - k * N(d2)),
-        PutOrCall::Put => df * (k * N(-d2) - f * N(-d1)),
+        PutOrCall::Call => df * (f * norm_cdf(d1) - k * norm_cdf(d2)),
+        PutOrCall::Put => df * (k * norm_cdf(-d2) - f * norm_cdf(-d1)),
     }
 }
 
@@ -102,8 +102,8 @@ pub fn delta(
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
     match put_or_call {
-        PutOrCall::Call => df * N(d1),
-        PutOrCall::Put => -df * N(-d1),
+        PutOrCall::Call => df * norm_cdf(d1),
+        PutOrCall::Put => -df * norm_cdf(-d1),
     }
 }
 
@@ -118,7 +118,7 @@ pub fn gamma(
 ) -> f64 {
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
-    df * dN(d1) / (f * sigma * t.sqrt())
+    df * norm_pdf(d1) / (f * sigma * t.sqrt())
 }
 
 /// Delta elasticity (also called percentage gamma), `F * gamma / delta`.
@@ -164,7 +164,7 @@ pub fn vega(
 ) -> f64 {
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
-    df * f * dN(d1) * t.sqrt()
+    df * f * norm_pdf(d1) * t.sqrt()
 }
 
 /// Volga (also called vomma), the change in vega per unit change in
@@ -194,7 +194,7 @@ pub fn vanna(
 ) -> f64 {
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
-    df * dN(d1) * (t.sqrt() - d1 / sigma)
+    df * norm_pdf(d1) * (t.sqrt() - d1 / sigma)
 }
 
 /// Charm, the change in futures delta per year of calendar time.
@@ -211,14 +211,14 @@ pub fn charm(
     let (d1, _) = d1_d2(f, k, sigma, t);
     let d1_dt = sigma / (2.0 * t.sqrt()) - d1 / (2.0 * t);
     let delta_component = match put_or_call {
-        PutOrCall::Call => N(d1),
-        PutOrCall::Put => N(d1) - 1.0,
+        PutOrCall::Call => norm_cdf(d1),
+        PutOrCall::Put => norm_cdf(d1) - 1.0,
     };
     let discount_decay = match settlement {
         FuturesSettlement::Discounted => r * df * delta_component,
         FuturesSettlement::Margined => 0.0,
     };
-    discount_decay - df * dN(d1) * d1_dt
+    discount_decay - df * norm_pdf(d1) * d1_dt
 }
 
 /// Rho (sensitivity to the risk-free rate). Zero for margined options,
@@ -253,7 +253,7 @@ pub fn theta(
     let (d1, _) = d1_d2(f, k, sigma, t);
     // volatility bleed term F df dN(d1) sigma / (2 sqrt(T)), common to both
     // settlement styles and to calls and puts
-    let bleed = df * f * dN(d1) * sigma / (2.0 * t.sqrt());
+    let bleed = df * f * norm_pdf(d1) * sigma / (2.0 * t.sqrt());
     match settlement {
         FuturesSettlement::Margined => -bleed,
         FuturesSettlement::Discounted => {

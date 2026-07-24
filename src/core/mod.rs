@@ -1,3 +1,4 @@
+pub mod aad;
 pub mod curves;
 pub mod daycount;
 pub mod fd_solvers;

@@ -1,0 +1,47 @@
+# Stress MtM scenario definitions.
+#
+# factor: spot | vol | rate | time     (time size is in days, absolute)
+# mode:   relative | absolute
+# underlying: optional symbol filter ("*" or omitted = every underlying)
+
+[[scenarios]]
+name = "equity_crash"
+
+[[scenarios.shocks]]
+factor = "spot"
+mode = "relative"
+size = -0.20
+
+[[scenarios.shocks]]
+factor = "vol"
+mode = "absolute"
+size = 0.10
+
+[[scenarios]]
+name = "melt_up"
+
+[[scenarios.shocks]]
+factor = "spot"
+mode = "relative"
+size = 0.10
+
+[[scenarios.shocks]]
+factor = "vol"
+mode = "absolute"
+size = -0.05
+
+[[scenarios]]
+name = "rates_plus_100bp"
+
+[[scenarios.shocks]]
+factor = "rate"
+mode = "absolute"
+size = 0.01
+
+[[scenarios]]
+name = "one_month_decay"
+
+[[scenarios.shocks]]
+factor = "time"
+mode = "absolute"
+size = 30.0

@@ -5,7 +5,7 @@ use crate::core::quotes::Quote;
 use crate::core::traits::Instrument;
 use crate::core::utils::{Contract,ContractStyle};
 use crate::equity::utils::LongShort;
-//use crate::equity::vanila_option::EquityOption;
+//use crate::equity::vanilla_option::EquityOption;
 
 pub struct EquityFuture {
 

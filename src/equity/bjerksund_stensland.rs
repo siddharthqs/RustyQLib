@@ -18,9 +18,9 @@
 //! especially for longer maturities.
 
 use crate::core::trade::PutOrCall;
-use crate::core::utils::{bivariate_N, ContractStyle, N};
+use crate::core::utils::{bivariate_norm_cdf, ContractStyle, norm_cdf};
 use crate::equity::blackscholes::bs_price;
-use crate::equity::vanila_option::EquityOption;
+use crate::equity::vanilla_option::EquityOption;
 
 /// Bjerksund-Stensland (2002) American vanilla price. `q` is the total
 /// continuous carry (`b = r - q`). Degenerate inputs return intrinsic.
@@ -101,7 +101,7 @@ fn phi(s: f64, t: f64, gamma: f64, h: f64, i: f64, r: f64, b: f64, sigma: f64) -
     let kappa = 2.0 * b / (sigma * sigma) + 2.0 * gamma - 1.0;
     lambda.exp()
         * s.powf(gamma)
-        * (N(d) - (i / s).powf(kappa) * N(d - 2.0 * (i / s).ln() / sqt))
+        * (norm_cdf(d) - (i / s).powf(kappa) * norm_cdf(d - 2.0 * (i / s).ln() / sqt))
 }
 
 /// Two-period expectation `psi`: the `S_T^gamma` payoff surviving the
@@ -136,9 +136,9 @@ fn psi(
     let kappa = 2.0 * b / (sigma * sigma) + 2.0 * gamma - 1.0;
     (lambda * t2).exp()
         * s.powf(gamma)
-        * (bivariate_N(-d1, -f1, rho) - (i2 / s).powf(kappa) * bivariate_N(-d2, -f2, rho)
-            - (i1 / s).powf(kappa) * bivariate_N(-d3, -f3, -rho)
-            + (i1 / i2).powf(kappa) * bivariate_N(-d4, -f4, -rho))
+        * (bivariate_norm_cdf(-d1, -f1, rho) - (i2 / s).powf(kappa) * bivariate_norm_cdf(-d2, -f2, rho)
+            - (i1 / s).powf(kappa) * bivariate_norm_cdf(-d3, -f3, -rho)
+            + (i1 / i2).powf(kappa) * bivariate_norm_cdf(-d4, -f4, -rho))
 }
 
 // ── EquityOption integration (mirrors the BAW engine) ───────────────────

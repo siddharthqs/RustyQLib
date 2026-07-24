@@ -1,38 +1,19 @@
-//! Cholesky factorization of correlation matrices (PSD-tolerant).
+//! Cholesky factorization of correlation matrices (PSD-tolerant): the
+//! unit-diagonal validation layer over the general factorization in
+//! [`decomp::cholesky`](super::decomp::cholesky).
+
+use super::decomp::cholesky::cholesky_factor;
 
 /// Cholesky decomposition of a correlation matrix; Err if the matrix is
 /// not symmetric positive **semi**-definite with a unit diagonal
 /// (perfectly correlated assets are allowed).
 pub fn cholesky(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
-    let n = m.len();
-    for i in 0..n {
-        if (m[i][i] - 1.0).abs() > 1e-10 {
+    for (i, row) in m.iter().enumerate() {
+        if (row[i] - 1.0).abs() > 1e-10 {
             return Err(format!("diagonal element [{i}][{i}] must be 1"));
         }
-        for j in 0..n {
-            if (m[i][j] - m[j][i]).abs() > 1e-10 {
-                return Err("matrix must be symmetric".to_string());
-            }
-        }
     }
-    let mut l = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for j in 0..=i {
-            let s: f64 = (0..j).map(|k| l[i][k] * l[j][k]).sum();
-            if i == j {
-                let d = m[i][i] - s;
-                if d < -1e-10 {
-                    return Err("matrix is not positive semi-definite".to_string());
-                }
-                l[i][j] = d.max(0.0).sqrt();
-            } else if l[j][j] > 1e-12 {
-                l[i][j] = (m[i][j] - s) / l[j][j];
-            } else {
-                l[i][j] = 0.0;
-            }
-        }
-    }
-    Ok(l)
+    cholesky_factor(m)
 }
 
 #[cfg(test)]

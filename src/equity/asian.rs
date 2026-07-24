@@ -11,7 +11,7 @@
 //! implemented closed form and price on the Monte Carlo engine.
 
 use crate::core::trade::PutOrCall;
-use crate::core::utils::N;
+use crate::core::utils::norm_cdf;
 
 /// How the average is computed along the path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +32,8 @@ fn black(df_r: f64, forward: f64, k: f64, log_var: f64, put_or_call: PutOrCall) 
     let d1 = ((forward / k).ln() + 0.5 * log_var) / sqrt_v;
     let d2 = d1 - sqrt_v;
     match put_or_call {
-        PutOrCall::Call => df_r * (forward * N(d1) - k * N(d2)),
-        PutOrCall::Put => df_r * (k * N(-d2) - forward * N(-d1)),
+        PutOrCall::Call => df_r * (forward * norm_cdf(d1) - k * norm_cdf(d2)),
+        PutOrCall::Put => df_r * (k * norm_cdf(-d2) - forward * norm_cdf(-d1)),
     }
 }
 
@@ -67,6 +67,88 @@ pub fn geometric_asian_price(
     let log_var = sigma * sigma * t * var_factor;
     let forward = s * (mu + 0.5 * log_var).exp();
     black((-r * t).exp(), forward, k, log_var, put_or_call)
+}
+
+/// Exact price of a geometric average-**strike** (floating-strike) Asian:
+/// the call pays `(S_T - G)+` and the put `(G - S_T)+`, with `G` the
+/// geometric average of `n` equally spaced fixings (continuous averaging
+/// when `None`).
+///
+/// `ln S_T` and `ln G` are jointly normal, so the payoff is an exchange
+/// option between two lognormals and prices exactly by
+/// `E[(A - B)+] = E[A] N(d1) - E[B] N(d2)` with
+/// `s^2 = Var(ln S_T - ln G)`. With a single fixing `G = S_T` and the
+/// option is worthless; more fixings decouple the average from the
+/// terminal spot and raise the value toward the continuous limit.
+pub fn geometric_average_strike_price(
+    s: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    t: f64,
+    n: Option<usize>,
+    put_or_call: PutOrCall,
+) -> f64 {
+    assert!(s > 0.0 && sigma > 0.0 && t > 0.0);
+    let b = r - q;
+    // E[ln G] factor, Var(ln G) factor, Cov(ln S_T, ln G) factor (in
+    // units of (b - sigma^2/2) t / sigma^2 t)
+    let (mean_factor, var_factor, cov_factor) = match n {
+        Some(n) => {
+            assert!(n > 0);
+            let nf = n as f64;
+            (
+                (nf + 1.0) / (2.0 * nf),
+                (nf + 1.0) * (2.0 * nf + 1.0) / (6.0 * nf * nf),
+                (nf + 1.0) / (2.0 * nf),
+            )
+        }
+        None => (0.5, 1.0 / 3.0, 0.5),
+    };
+    let e_terminal = s * (b * t).exp();
+    let e_average = s
+        * ((b - 0.5 * sigma * sigma) * t * mean_factor
+            + 0.5 * sigma * sigma * t * var_factor)
+            .exp();
+    let spread_var = sigma * sigma * t * (1.0 + var_factor - 2.0 * cov_factor);
+    let df = (-r * t).exp();
+    if spread_var <= 1e-16 {
+        // single fixing: G = S_T, zero intrinsic either way
+        return match put_or_call {
+            PutOrCall::Call => df * (e_terminal - e_average).max(0.0),
+            PutOrCall::Put => df * (e_average - e_terminal).max(0.0),
+        };
+    }
+    let sv = spread_var.sqrt();
+    let d1 = ((e_terminal / e_average).ln() + 0.5 * spread_var) / sv;
+    let d2 = d1 - sv;
+    match put_or_call {
+        PutOrCall::Call => df * (e_terminal * norm_cdf(d1) - e_average * norm_cdf(d2)),
+        PutOrCall::Put => df * (e_average * norm_cdf(-d2) - e_terminal * norm_cdf(-d1)),
+    }
+}
+
+/// Arithmetic average-**strike** (floating-strike) Asian via the
+/// Henderson-Wojakowski (2002) symmetry: at inception under GBM, a
+/// floating-strike call paying `(S_T - A)+` is **exactly** a
+/// fixed-strike put struck at spot with the roles of `r` and `q`
+/// interchanged (and vice versa for the put). The fixed-strike side is
+/// then priced with the Turnbull-Wakeman moment match, so the symmetry
+/// step is exact and TW is the only approximation layer. Continuous
+/// averaging; exact put-call parity
+/// `C - P = e^{-rT} (E[S_T] - E[A])` is preserved.
+pub fn turnbull_wakeman_average_strike_price(
+    s: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    t: f64,
+    put_or_call: PutOrCall,
+) -> f64 {
+    match put_or_call {
+        PutOrCall::Call => turnbull_wakeman_price(s, s, q, r, sigma, t, PutOrCall::Put),
+        PutOrCall::Put => turnbull_wakeman_price(s, s, q, r, sigma, t, PutOrCall::Call),
+    }
 }
 
 /// Turnbull-Wakeman approximation for an arithmetic average-price Asian
@@ -107,6 +189,79 @@ mod tests {
     const R: f64 = 0.05;
     const Q: f64 = 0.02;
     const SIG: f64 = 0.3;
+
+    #[test]
+    fn average_strike_single_fixing_is_worthless() {
+        // n = 1: the average IS the terminal spot
+        for pc in [PutOrCall::Call, PutOrCall::Put] {
+            let p = geometric_average_strike_price(S, R, Q, SIG, 1.0, Some(1), pc);
+            assert!(p.abs() < 1e-12, "{pc:?}: {p}");
+        }
+    }
+
+    #[test]
+    fn average_strike_exchange_parity_is_exact() {
+        // C - P = e^{-rT} (E[S_T] - E[G]) for jointly lognormal legs
+        for n in [Some(4), Some(12), None] {
+            let c = geometric_average_strike_price(S, R, Q, SIG, 1.0, n, PutOrCall::Call);
+            let p = geometric_average_strike_price(S, R, Q, SIG, 1.0, n, PutOrCall::Put);
+            let b = R - Q;
+            let (mf, vf) = match n {
+                Some(n) => {
+                    let nf = n as f64;
+                    ((nf + 1.0) / (2.0 * nf), (nf + 1.0) * (2.0 * nf + 1.0) / (6.0 * nf * nf))
+                }
+                None => (0.5, 1.0 / 3.0),
+            };
+            let e_st = S * b.exp();
+            let e_g = S * ((b - 0.5 * SIG * SIG) * mf + 0.5 * SIG * SIG * vf).exp();
+            let parity = (-R * 1.0f64).exp() * (e_st - e_g);
+            assert!((c - p - parity).abs() < 1e-12, "n = {n:?}");
+        }
+    }
+
+    #[test]
+    fn arithmetic_average_strike_preserves_exact_parity() {
+        // the Henderson-Wojakowski swap preserves put-call parity
+        // C - P = e^{-rT} (E[S_T] - E[A]) exactly, with
+        // E[A] = S (e^{bT} - 1)/(bT)
+        let t = 1.0;
+        let b = R - Q;
+        let c = turnbull_wakeman_average_strike_price(S, R, Q, SIG, t, PutOrCall::Call);
+        let p = turnbull_wakeman_average_strike_price(S, R, Q, SIG, t, PutOrCall::Put);
+        let parity = (-R * t).exp() * (S * (b * t).exp() - S * ((b * t).exp() - 1.0) / (b * t));
+        assert!((c - p - parity).abs() < 1e-12, "{}", c - p - parity);
+        // and the zero-carry branch works through the swap (b' = -b = 0)
+        let c0 = turnbull_wakeman_average_strike_price(S, 0.03, 0.03, SIG, t, PutOrCall::Call);
+        let p0 = turnbull_wakeman_average_strike_price(S, 0.03, 0.03, SIG, t, PutOrCall::Put);
+        assert!(c0 > 0.0 && p0 > 0.0);
+        assert!((c0 - p0).abs() < 1e-12, "b = 0 parity: E[S_T] = E[A]");
+    }
+
+    #[test]
+    fn arithmetic_average_strike_orders_against_geometric_by_am_gm() {
+        // the arithmetic average dominates the geometric, so the
+        // average-strike CALL is cheaper and the PUT richer than the
+        // geometric-average versions
+        let t = 1.0;
+        let arith_call = turnbull_wakeman_average_strike_price(S, R, Q, SIG, t, PutOrCall::Call);
+        let geo_call = geometric_average_strike_price(S, R, Q, SIG, t, None, PutOrCall::Call);
+        assert!(arith_call < geo_call, "call: arith {arith_call} vs geo {geo_call}");
+        let arith_put = turnbull_wakeman_average_strike_price(S, R, Q, SIG, t, PutOrCall::Put);
+        let geo_put = geometric_average_strike_price(S, R, Q, SIG, t, None, PutOrCall::Put);
+        assert!(arith_put > geo_put, "put: arith {arith_put} vs geo {geo_put}");
+    }
+
+    #[test]
+    fn average_strike_value_grows_with_fixings_toward_the_continuous_limit() {
+        let price = |n| geometric_average_strike_price(S, R, Q, SIG, 1.0, n, PutOrCall::Call);
+        assert!(price(Some(2)) > 0.0);
+        assert!(price(Some(4)) > price(Some(2)));
+        assert!(price(Some(12)) > price(Some(4)));
+        let continuous = price(None);
+        assert!(price(Some(12)) < continuous);
+        assert!((price(Some(5000)) - continuous).abs() < 2e-3, "limit");
+    }
     const T: f64 = 1.0;
 
     #[test]
