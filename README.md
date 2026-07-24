@@ -340,6 +340,14 @@ the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo
   parity and replication identities at 1e-10, cross-engine agreement tests, and
   bit-reproducible Monte Carlo. Engines refuse unsupported combinations with a
   clear error instead of silently mispricing.
+- **Typed errors, no panics at the boundary** — every fallible operation
+  returns `RustyQLibError` (`InvalidInput` naming the offending field,
+  `UnsupportedEngine`, `CalibrationFailed` with iterations and residual,
+  `NumericalError`, `ParseError`). Pricing is fallible via
+  `Instrument::try_npv()` / `try_from_json()`; the infallible `npv()` /
+  `from_json()` remain as conveniences for validated instruments. Batch
+  pricing reports failures per contract in the output's `error` field and
+  keeps going instead of aborting the file.
 
 ## Roadmap
 
@@ -351,7 +359,6 @@ the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo
 - Stulz closed forms for two-asset best-of/worst-of; per-asset smiles and
   path-dependent multi-asset payoffs; SVI smile parameterization with
   no-arbitrage checks; pathwise / likelihood-ratio Greeks
-- `Result`-based error API for the library surface
 
 ## License
 

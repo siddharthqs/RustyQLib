@@ -1,5 +1,6 @@
 pub mod aad;
 pub mod curves;
+pub mod errors;
 pub mod daycount;
 pub mod fd_solvers;
 pub mod linalg;

@@ -33,6 +33,7 @@ use crate::core::traits::Instrument;
 use crate::equity::barrier::{barrier_price, BarrierDirection, KnockType};
 use rand::Rng;
 use rand_distr::StandardNormal;
+use crate::core::errors::RustyQLibError;
 
 /// Which side of the trade the holder accrues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,18 +98,33 @@ pub struct Accumulator {
 }
 
 impl Accumulator {
-    fn validate(&self) {
-        assert!(self.observations >= 1 && self.t > 0.0 && self.sigma > 0.0);
-        assert!(self.gearing >= 0.0 && self.shares_per_day > 0.0);
+    fn validate(&self) -> Result<(), RustyQLibError> {
+        if self.observations < 1 || self.t <= 0.0 || self.sigma <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "accumulator",
+                "observations must be >= 1, maturity and volatility must be positive",
+            ));
+        }
+        if self.gearing < 0.0 || self.shares_per_day <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "accumulator",
+                "gearing must be non-negative and shares_per_day positive",
+            ));
+        }
         match self.side {
-            AccumulatorSide::Accumulator => assert!(
-                self.barrier > self.s0,
-                "accumulator knock-out must be above the spot"
-            ),
-            AccumulatorSide::Decumulator => assert!(
-                self.barrier < self.s0,
-                "decumulator knock-out must be below the spot"
-            ),
+            AccumulatorSide::Accumulator if self.barrier <= self.s0 => {
+                Err(RustyQLibError::invalid_input(
+                    "barrier",
+                    "accumulator knock-out must be above the spot",
+                ))
+            }
+            AccumulatorSide::Decumulator if self.barrier >= self.s0 => {
+                Err(RustyQLibError::invalid_input(
+                    "barrier",
+                    "decumulator knock-out must be below the spot",
+                ))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -198,23 +214,40 @@ impl Accumulator {
         }
     }
 
+    /// Build from contract data, panicking on any invalid field. Fallible
+    /// callers should use [`Accumulator::try_from_json`].
     pub fn from_json(data: &AccumulatorData) -> Box<Accumulator> {
+        Self::try_from_json(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub fn try_from_json(data: &AccumulatorData) -> Result<Box<Accumulator>, RustyQLibError> {
         let today = Local::now().date_naive();
         let maturity = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
-            .expect("Invalid maturity date");
+            .map_err(|_| RustyQLibError::invalid_input(
+                "maturity",
+                format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
+            ))?;
         let t = (maturity - today).num_days() as f64 / 365.0;
-        assert!(t > 0.0, "accumulator is expired");
+        if t <= 0.0 {
+            return Err(RustyQLibError::invalid_input("maturity", "accumulator is expired"));
+        }
         let side = match data.side.trim().to_lowercase().as_str() {
             "accumulator" | "accu" => AccumulatorSide::Accumulator,
             "decumulator" | "decu" => AccumulatorSide::Decumulator,
-            other => panic!("Invalid accumulator side '{other}'"),
+            other => return Err(RustyQLibError::invalid_input(
+                "side",
+                format!("invalid accumulator side '{other}' (use accumulator or decumulator)"),
+            )),
         };
         let pricer = match data.pricer.as_deref().map(str::trim) {
             None | Some("Analytical") | Some("analytical") => AccumulatorPricer::Analytical,
             Some("MonteCarlo") | Some("montecarlo") | Some("MC") | Some("mc") => {
                 AccumulatorPricer::MonteCarlo
             }
-            Some(other) => panic!("Invalid accumulator pricer '{other}'"),
+            Some(other) => return Err(RustyQLibError::invalid_input(
+                "pricer",
+                format!("invalid accumulator pricer '{other}' (use Analytical or MonteCarlo)"),
+            )),
         };
         let out = Accumulator {
             side,
@@ -232,14 +265,14 @@ impl Accumulator {
             paths: data.simulation.unwrap_or(100_000) as usize,
             seed: data.mc_seed.unwrap_or(42),
         };
-        out.validate();
-        Box::new(out)
+        out.validate()?;
+        Ok(Box::new(out))
     }
 }
 
 impl Instrument for Accumulator {
-    fn npv(&self) -> f64 {
-        self.price()
+    fn try_npv(&self) -> Result<f64, RustyQLibError> {
+        Ok(self.price())
     }
 }
 

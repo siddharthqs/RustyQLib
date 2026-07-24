@@ -1,20 +1,21 @@
 //! Householder QR decomposition and numerically stable linear least
 //! squares (no `A^T A` squaring of the condition number).
+use crate::core::errors::RustyQLibError;
 
 /// Thin QR of an `m x n` matrix with `m >= n`: returns `(Q, R)` with `Q`
 /// an `m x n` orthonormal-column matrix and `R` upper triangular `n x n`
 /// such that `A = Q R`.
-pub fn qr(a: &[Vec<f64>]) -> Result<(Vec<Vec<f64>>, Vec<Vec<f64>>), String> {
+pub fn qr(a: &[Vec<f64>]) -> Result<(Vec<Vec<f64>>, Vec<Vec<f64>>), RustyQLibError> {
     let m = a.len();
     if m == 0 {
-        return Err("empty matrix".to_string());
+        return Err(RustyQLibError::NumericalError("empty matrix".to_string()));
     }
     let n = a[0].len();
     if a.iter().any(|row| row.len() != n) {
-        return Err("ragged matrix".to_string());
+        return Err(RustyQLibError::NumericalError("ragged matrix".to_string()));
     }
     if m < n {
-        return Err("QR needs at least as many rows as columns".to_string());
+        return Err(RustyQLibError::NumericalError("QR needs at least as many rows as columns".to_string()));
     }
     let mut r = a.to_vec();
     // householder vectors, v[k] has zeros above row k
@@ -74,12 +75,12 @@ pub fn qr(a: &[Vec<f64>]) -> Result<(Vec<Vec<f64>>, Vec<Vec<f64>>), String> {
 /// Least-squares solution of the overdetermined system `A x ~ b` via QR:
 /// `x = R^{-1} Q^T b`. Errs on rank deficiency (use
 /// [`pseudo_solve`](super::svd::pseudo_solve) there).
-pub fn least_squares(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, String> {
+pub fn least_squares(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, RustyQLibError> {
     let (q, r) = qr(a)?;
     let m = a.len();
     let n = r.len();
     if b.len() != m {
-        return Err("dimension mismatch".to_string());
+        return Err(RustyQLibError::NumericalError("dimension mismatch".to_string()));
     }
     // Q^T b
     let qtb: Vec<f64> = (0..n).map(|j| (0..m).map(|i| q[i][j] * b[i]).sum()).collect();
@@ -87,7 +88,7 @@ pub fn least_squares(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, String> {
     let mut x = vec![0.0; n];
     for i in (0..n).rev() {
         if r[i][i].abs() < 1e-12 {
-            return Err("matrix is rank deficient".to_string());
+            return Err(RustyQLibError::NumericalError("matrix is rank deficient".to_string()));
         }
         let s: f64 = (i + 1..n).map(|k| r[i][k] * x[k]).sum();
         x[i] = (qtb[i] - s) / r[i][i];

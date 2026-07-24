@@ -35,6 +35,7 @@
 //! let fit = minimize(&OptimConfig::default(), Method::Bfgs, &problem).unwrap();
 //! assert!((fit.x[0] - 1.0).abs() < 1e-5 && (fit.x[1] - 1.0).abs() < 1e-5);
 //! ```
+use crate::core::errors::RustyQLibError;
 
 pub mod bfgs;
 pub mod conjugate_gradient;
@@ -157,7 +158,7 @@ pub fn minimize(
     cfg: &OptimConfig,
     method: Method,
     problem: &Problem,
-) -> Result<OptimResult, String> {
+) -> Result<OptimResult, RustyQLibError> {
     // the scalar view of the problem, however it was posed
     let sum_sq;
     let f: &dyn Fn(&[f64]) -> f64 = match (problem.f, problem.residuals) {
@@ -166,7 +167,7 @@ pub fn minimize(
             sum_sq = move |x: &[f64]| r(x).iter().map(|e| e * e).sum::<f64>();
             &sum_sq
         }
-        (None, None) => return Err("Problem has neither a scalar objective nor residuals".into()),
+        (None, None) => return Err(RustyQLibError::invalid_input("optimization problem", "Problem has neither a scalar objective nor residuals")),
     };
     match method {
         Method::SteepestDescent => Ok(steepest_descent(cfg, f, problem.gradient, &problem.x0)),
@@ -175,7 +176,7 @@ pub fn minimize(
         Method::LevenbergMarquardt => {
             let r = problem
                 .residuals
-                .ok_or("Levenberg-Marquardt needs residuals: use Problem::least_squares")?;
+                .ok_or(RustyQLibError::invalid_input("optimization problem", "Levenberg-Marquardt needs residuals: use Problem::least_squares"))?;
             Ok(levenberg_marquardt(cfg, r, problem.jacobian, &problem.x0))
         }
         Method::NelderMead => Ok(nelder_mead(cfg, f, &problem.x0)),
@@ -183,7 +184,7 @@ pub fn minimize(
             let bounds = problem
                 .bounds
                 .as_deref()
-                .ok_or("differential evolution needs bounds: use Problem::with_bounds")?;
+                .ok_or(RustyQLibError::invalid_input("optimization problem", "differential evolution needs bounds: use Problem::with_bounds"))?;
             Ok(differential_evolution(cfg, f, bounds, problem.seed))
         }
     }

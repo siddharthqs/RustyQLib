@@ -5,6 +5,7 @@ use crate::core::quotes::Quote;
 use crate::core::traits::Instrument;
 use crate::core::utils::{Contract,ContractStyle};
 use crate::equity::utils::LongShort;
+use crate::core::errors::RustyQLibError;
 //use crate::equity::vanilla_option::EquityOption;
 
 pub struct EquityFuture {
@@ -31,25 +32,31 @@ pub struct EquityFuture {
 }
 
 impl EquityFuture {
+    /// Build from contract data, panicking on any invalid field. Fallible
+    /// callers should use [`EquityFuture::try_from_json`].
     pub fn from_json(data: &EquityFutureData) -> Box<Self> {
-        //let market_data = data.market_data.as_ref().unwrap();
-        //let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
+        Self::try_from_json(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub fn try_from_json(data: &EquityFutureData) -> Result<Box<Self>, RustyQLibError> {
         let today = Local::now().date_naive();
         let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
-            .expect("Invalid maturity date");
+            .map_err(|_| RustyQLibError::invalid_input(
+                "maturity",
+                format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
+            ))?;
 
         let underlying_quote = Quote::new(data.base.underlying_price);
-        let quote = Some(data.current_price).unwrap();
-        let current_quote = Quote::new(quote.unwrap_or(0.0));
-        let risk_free_rate = Some(data.base.risk_free_rate).unwrap();
-        let dividend = Some(data.dividend).unwrap();
+        let current_quote = Quote::new(data.current_price.unwrap_or(0.0));
+        let risk_free_rate = data.base.risk_free_rate;
+        let dividend = data.dividend;
         let long_short = data.base.long_short.unwrap_or(1);
         let position = match long_short{
             1=>LongShort::LONG,
             -1=>LongShort::SHORT,
             _=>LongShort::LONG,
         };
-        Box::new(Self {
+        Ok(Box::new(Self {
             symbol:data.base.symbol.clone(),
             currency: data.base.currency.clone(),
             exchange:data.base.exchange.clone(),
@@ -68,7 +75,7 @@ impl EquityFuture {
             maturity_date: maturity_date,
             valuation_date: today,
             long_short:position
-        })
+        }))
     }
     fn notional(&self) -> f64 {
         self.multiplier * self.current_price.value()
@@ -96,8 +103,8 @@ impl EquityFuture {
     }
 }
 impl Instrument for EquityFuture {
-    fn npv(&self) -> f64 {
-        self.pnl()
+    fn try_npv(&self) -> Result<f64, RustyQLibError> {
+        Ok(self.pnl())
     }
 }
 impl EquityFuture{

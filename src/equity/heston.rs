@@ -90,12 +90,12 @@ pub struct HestonParams {
 }
 
 impl HestonParams {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
         if self.v0 <= 0.0 || self.theta <= 0.0 || self.kappa <= 0.0 || self.vol_of_vol <= 0.0 {
-            return Err("Heston v0, kappa, theta, vol_of_vol must be positive".to_string());
+            return Err(RustyQLibError::invalid_input("heston params", "Heston v0, kappa, theta, vol_of_vol must be positive".to_string()));
         }
         if !(-1.0..=1.0).contains(&self.rho) {
-            return Err("Heston rho must be in [-1, 1]".to_string());
+            return Err(RustyQLibError::invalid_input("heston params", "Heston rho must be in [-1, 1]".to_string()));
         }
         Ok(())
     }
@@ -356,6 +356,7 @@ pub fn heston_binary_asset_price(
 
 use crate::equity::utils::PayoffType;
 use crate::equity::vanilla_option::{BinaryPayoff, BinaryType, EquityOption};
+use crate::core::errors::RustyQLibError;
 
 /// Reprice the option under Heston with additive bumps to
 /// (spot, vol shift, rate, expiry). The vol bump shifts sqrt(v0) and

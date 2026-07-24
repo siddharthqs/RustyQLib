@@ -15,6 +15,7 @@ use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::vols::VolSurface;
 use super::super::core::traits::{Instrument,Greeks};
+use crate::core::errors::RustyQLibError;
 
 pub struct BlackScholesPricer;
 impl BlackScholesPricer {
@@ -972,9 +973,9 @@ pub fn implied_vol_from_price(
     t: f64,
     target: f64,
     put_or_call: PutOrCall,
-) -> Result<f64, String> {
+) -> Result<f64, RustyQLibError> {
     if t <= 0.0 {
-        return Err("option is expired".to_string());
+        return Err(RustyQLibError::NumericalError("option is expired".to_string()));
     }
     let lower_bound = bs_price(s, k, r, q, 0.0, t, put_or_call);
     let upper_bound = match put_or_call {
@@ -982,9 +983,9 @@ pub fn implied_vol_from_price(
         PutOrCall::Put => k * exp(-r * t),
     };
     if target < lower_bound - 1e-12 || target > upper_bound + 1e-12 {
-        return Err(format!(
+        return Err(RustyQLibError::NumericalError(format!(
             "price {target} violates arbitrage bounds [{lower_bound}, {upper_bound}]"
-        ));
+        )));
     }
 
     let (lo, hi) = (IMPLIED_VOL_MIN, IMPLIED_VOL_MAX);
@@ -992,7 +993,7 @@ pub fn implied_vol_from_price(
         return Ok(lo); // at or below the vol floor
     }
     if bs_price(s, k, r, q, hi, t, put_or_call) < target {
-        return Err(format!("implied vol above {IMPLIED_VOL_MAX}"));
+        return Err(RustyQLibError::NumericalError(format!("implied vol above {IMPLIED_VOL_MAX}")));
     }
 
     // price is increasing in vol (vega > 0), the shape newton_safeguarded

@@ -1,8 +1,23 @@
 use chrono::NaiveDate;
+use crate::core::errors::RustyQLibError;
 use crate::rates::utils::DayCountConvention;
 use crate::rates::utils::TermStructure;
-pub trait Instrument{
-    fn npv(&self)-> f64;
+
+pub trait Instrument {
+    /// Present value, or a typed error when the instrument cannot be priced
+    /// (invalid inputs, or an engine/product combination the library
+    /// refuses to price).
+    fn try_npv(&self) -> Result<f64, RustyQLibError>;
+
+    /// Present value, panicking on any pricing error. Convenience for
+    /// instruments already known to be valid; fallible callers (batch
+    /// pricing, services) should use [`Instrument::try_npv`].
+    fn npv(&self) -> f64 {
+        match self.try_npv() {
+            Ok(v) => v,
+            Err(e) => panic!("{e}"),
+        }
+    }
 }
 
 pub trait Greeks{

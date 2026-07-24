@@ -27,6 +27,7 @@ use crate::core::utils::norm_cdf;
 use crate::equity::montecarlo::{McStats, Sampler};
 use crate::equity::utils::Engine;
 use crate::core::montecarlo::{path_normals, QmcSequence};
+use crate::core::errors::RustyQLibError;
 
 const PATH_CHUNK: usize = 4096;
 
@@ -104,71 +105,97 @@ struct Params {
 }
 
 impl RainbowOption {
+    /// Build from contract data, panicking on any invalid field. Fallible
+    /// callers should use [`RainbowOption::try_from_json`].
     pub fn from_json(data: &RainbowOptionData) -> Box<RainbowOption> {
+        Self::try_from_json(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub fn try_from_json(data: &RainbowOptionData) -> Result<Box<RainbowOption>, RustyQLibError> {
         let valuation_date = Local::now().date_naive();
         let n = data.assets.len();
-        assert!(n >= 2, "rainbow options need at least two assets");
+        if n < 2 {
+            return Err(RustyQLibError::invalid_input("assets", "rainbow options need at least two assets"));
+        }
         let rainbow_type = match data.rainbow_type.trim().to_lowercase().as_str() {
             "best_of" | "bestof" | "max" => RainbowType::BestOf,
             "worst_of" | "worstof" | "min" => RainbowType::WorstOf,
             "spread" => RainbowType::Spread,
             "basket" => RainbowType::Basket,
             "exchange" | "margrabe" => RainbowType::Exchange,
-            other => panic!("Invalid rainbow_type '{other}'"),
+            other => return Err(RustyQLibError::invalid_input(
+                "rainbow_type",
+                format!("invalid rainbow_type '{other}'"),
+            )),
         };
-        if matches!(rainbow_type, RainbowType::Spread | RainbowType::Exchange) {
-            assert!(n == 2, "spread and exchange options take exactly two assets");
+        if matches!(rainbow_type, RainbowType::Spread | RainbowType::Exchange) && n != 2 {
+            return Err(RustyQLibError::invalid_input(
+                "assets",
+                "spread and exchange options take exactly two assets",
+            ));
         }
         let put_or_call = match data.put_or_call.as_deref().unwrap_or("C").trim() {
             "C" | "c" | "Call" | "call" => PutOrCall::Call,
             "P" | "p" | "Put" | "put" => PutOrCall::Put,
-            other => panic!("Invalid put_or_call '{other}'"),
+            other => return Err(RustyQLibError::invalid_input(
+                "put_or_call",
+                format!("invalid put_or_call '{other}' (use 'C' or 'P')"),
+            )),
         };
         let strike_price = data.strike_price.unwrap_or(0.0);
-        if rainbow_type != RainbowType::Exchange {
-            assert!(data.strike_price.is_some(), "strike_price is required");
+        if rainbow_type != RainbowType::Exchange && data.strike_price.is_none() {
+            return Err(RustyQLibError::invalid_input("strike_price", "strike_price is required"));
         }
         let weights = match &data.weights {
             Some(w) => {
-                assert!(w.len() == n, "weights must match the number of assets");
+                if w.len() != n {
+                    return Err(RustyQLibError::invalid_input(
+                        "weights",
+                        "weights must match the number of assets",
+                    ));
+                }
                 w.clone()
             }
             None => vec![1.0 / n as f64; n],
         };
-        assert!(
-            data.correlations.len() == n && data.correlations.iter().all(|row| row.len() == n),
-            "correlations must be an n x n matrix"
-        );
+        if data.correlations.len() != n || data.correlations.iter().any(|row| row.len() != n) {
+            return Err(RustyQLibError::invalid_input(
+                "correlations",
+                "correlations must be an n x n matrix",
+            ));
+        }
         // an empirical / hand-stressed matrix that fails PSD is repaired
         // with Higham's nearest-correlation projection; asymmetry or a
-        // non-unit diagonal is a data error and still panics
+        // non-unit diagonal is a data error and still rejected
         let chol = match cholesky(&data.correlations) {
             Ok(l) => l,
-            Err(e) if e.contains("positive semi-definite") => {
+            Err(RustyQLibError::NumericalError(ref msg))
+                if msg.contains("positive semi-definite") =>
+            {
                 eprintln!(
                     "warning: correlation matrix is not PSD; \
                      projecting to the nearest correlation matrix (Higham)"
                 );
-                let repaired = nearest_correlation(&data.correlations, 1e-12, 200)
-                    .expect("nearest-correlation projection failed");
-                cholesky(&repaired).expect("projected matrix must factorize")
+                let repaired = nearest_correlation(&data.correlations, 1e-12, 200)?;
+                cholesky(&repaired)?
             }
-            Err(e) => panic!("invalid correlation matrix: {e}"),
+            Err(e) => return Err(e),
         };
         let discount_curve = match &data.discount_curve {
-            Some(input) => YieldCurve::from_input(input, valuation_date)
-                .expect("Invalid discount curve"),
+            Some(input) => YieldCurve::from_input(input, valuation_date)?,
             None => YieldCurve::flat(
                 data.risk_free_rate.unwrap_or(0.0),
                 valuation_date,
                 DayCountConvention::Act365,
                 Compounding::Continuous,
-            )
-            .expect("Invalid risk free rate"),
+            )?,
         };
-        let maturity_date =
-            NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d").expect("Invalid date format");
-        Box::new(RainbowOption {
+        let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
+            .map_err(|_| RustyQLibError::invalid_input(
+                "maturity",
+                format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
+            ))?;
+        Ok(Box::new(RainbowOption {
             symbol: data.symbol.clone(),
             rainbow_type,
             put_or_call,
@@ -184,17 +211,24 @@ impl RainbowOption {
             engine: match data.pricer.as_deref().map_or("MC", |v| v).trim() {
                 "Analytical" | "analytical" => Engine::BlackScholes,
                 "MonteCarlo" | "montecarlo" | "MC" | "mc" => Engine::MonteCarlo,
-                other => panic!("Invalid pricer '{other}' for rainbow (Analytical or MC)"),
+                other => return Err(RustyQLibError::invalid_input(
+                    "pricer",
+                    format!("invalid pricer '{other}' for rainbow (Analytical or MC)"),
+                )),
             },
             paths: data.simulation.unwrap_or(100_000) as usize,
             sampler: data
                 .mc_sampler
                 .as_deref()
-                .map(|s| s.parse::<Sampler>().expect("Invalid mc_sampler"))
+                .map(|s| s.parse::<Sampler>().map_err(|_| RustyQLibError::invalid_input(
+                    "mc_sampler",
+                    format!("invalid mc_sampler '{s}'"),
+                )))
+                .transpose()?
                 .unwrap_or(Sampler::Sobol),
             seed: data.mc_seed.unwrap_or(42),
             chol,
-        })
+        }))
     }
 
     pub fn time_to_maturity(&self) -> f64 {

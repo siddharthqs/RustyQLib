@@ -15,6 +15,7 @@
 //! for the small symmetric matrices of basket products.
 
 use super::decomp::eigen::symmetric_eigen;
+use crate::core::errors::RustyQLibError;
 
 /// The nearest correlation matrix to symmetric `a` (unit diagonal, PSD).
 ///
@@ -22,15 +23,15 @@ use super::decomp::eigen::symmetric_eigen;
 /// and `max_iter` caps the projection rounds (typically converges in
 /// tens). The result has an exact unit diagonal and eigenvalues
 /// `>= -1e-12`.
-pub fn nearest_correlation(a: &[Vec<f64>], tol: f64, max_iter: usize) -> Result<Vec<Vec<f64>>, String> {
+pub fn nearest_correlation(a: &[Vec<f64>], tol: f64, max_iter: usize) -> Result<Vec<Vec<f64>>, RustyQLibError> {
     let n = a.len();
     if a.iter().any(|row| row.len() != n) {
-        return Err("matrix must be square".into());
+        return Err(RustyQLibError::NumericalError("matrix must be square".to_string()));
     }
     for i in 0..n {
         for j in 0..n {
             if (a[i][j] - a[j][i]).abs() > 1e-8 {
-                return Err("matrix must be symmetric".into());
+                return Err(RustyQLibError::NumericalError("matrix must be symmetric".to_string()));
             }
         }
     }

@@ -4,6 +4,7 @@
 //! a global cubic spline develops around outliers and flat runs.
 
 use super::pchip::hermite;
+use crate::core::errors::RustyQLibError;
 
 /// An Akima spline interpolant.
 #[derive(Debug, Clone)]
@@ -14,13 +15,13 @@ pub struct Akima {
 }
 
 impl Akima {
-    pub fn new(xs: &[f64], ys: &[f64]) -> Result<Self, String> {
+    pub fn new(xs: &[f64], ys: &[f64]) -> Result<Self, RustyQLibError> {
         let n = xs.len();
         if n < 2 || ys.len() != n {
-            return Err("need at least two knots with matching y values".into());
+            return Err(RustyQLibError::invalid_input("akima", "need at least two knots with matching y values"));
         }
         if xs.windows(2).any(|w| w[1] <= w[0]) {
-            return Err("knots must be strictly increasing".into());
+            return Err(RustyQLibError::invalid_input("akima", "knots must be strictly increasing"));
         }
         // secants with Akima's quadratic extension at both ends:
         // ext[k] corresponds to delta_{k-2} for knot arithmetic below
