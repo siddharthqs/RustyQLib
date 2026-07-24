@@ -14,9 +14,11 @@ put-call parity, replication identities and cross-engine agreement in the test s
 
 ## Highlights
 
-- **Four pricing engines** — analytic closed forms, binomial tree, finite difference
-  (log-spot Crank-Nicolson with Rannacher smoothing), and parallel Monte Carlo —
-  behind one dispatch, so the same contract prices on any suitable engine.
+- **Six pricing engines** — analytic closed forms, two analytic American
+  approximations (Barone-Adesi-Whaley and Bjerksund-Stensland 2002), binomial
+  tree, finite difference (log-spot Crank-Nicolson with Rannacher smoothing),
+  and parallel Monte Carlo — behind one dispatch, so the same contract prices
+  on any suitable engine.
 - **Three models** — Black-Scholes, **Dupire local volatility** (calibrated
   non-parametrically from an implied vol surface), and **Heston stochastic
   volatility** (semi-analytic characteristic-function pricing + Monte Carlo).
@@ -42,7 +44,7 @@ put-call parity, replication identities and cross-engine agreement in the test s
 |---|---|---|---|---|
 | Vanilla European | Black-Scholes / Heston CF | yes | yes (grid Greeks) | yes (+ stderr) |
 | Vanilla on a future | Black-76 (discounted / margined) | — | — | — |
-| Vanilla American | — | yes | Brennan-Schwartz | two-pass Longstaff-Schwartz |
+| Vanilla American | Barone-Adesi-Whaley / Bjerksund-Stensland 2002 (approx.) | yes | Brennan-Schwartz | two-pass Longstaff-Schwartz |
 | Binary (cash / asset) | closed form / Heston CF | yes | yes (Rannacher + cell averaging) | yes |
 | Barrier (8 types) | Reiner-Rubinstein | — | absorbing boundary / parity | Brownian-bridge corrected |
 | Asian (arith / geo, fixed / floating) | Turnbull-Wakeman / exact geometric | — | — | geometric control variate |
@@ -62,15 +64,45 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   coefficients (local vol ready), forward rates from the discount curve per time
   step, cell-averaged terminal conditions for digitals, barrier-aligned absorbing
   boundaries, and delta/gamma/theta read directly off the grid. Grid sizes are
-  configurable per contract.
+  configurable per contract. The numerical kernels live in a reusable
+  `core::fd_solvers` toolkit covering 1-D to 3-D problems: Thomas tridiagonal,
+  Brennan-Schwartz and PSOR obstacle solvers (one- and two-sided), tensor-grid
+  axis operators, and Douglas / Hundsdorfer-Verwer ADI time steppers with
+  explicit mixed-derivative (correlation) terms — the machinery a 2-D Heston or
+  hybrid three-factor PDE needs.
 - **Monte Carlo**: deterministic per-path RNG streams (bit-reproducible under
   rayon parallelism), low-discrepancy sampling through a Brownian bridge,
   exact/Euler/Milstein stepping, antithetic + moment matching, geometric control
   variates for Asians, Brownian-bridge barrier monitoring, and standard errors
   reported with every price. Greeks via common-random-number bumps.
+- **Analytic American approximations**: Barone-Adesi-Whaley (`pricer: "BAW"`,
+  quadratic approximation with a Newton solve for the exercise boundary) and
+  Bjerksund-Stensland 2002 (`pricer: "BS2002"`, two-step flat exercise
+  boundary priced in closed form via the cumulative bivariate normal — a lower
+  bound on the true price, generally the tighter of the two). Both price in
+  under a microsecond, within a few cents of a fine tree, and return true
+  American Greeks (unlike the tree, whose Greeks fall back to the European
+  closed form). Use them when speed matters more than the last basis point.
 - **Calibration workflow**: quoted option prices -> robust implied vols
   (safeguarded Newton with arbitrage bounds) -> implied surface -> Dupire local
-  vol -> reprice anything, including barriers under smile dynamics.
+  vol -> reprice anything, including barriers under smile dynamics. **Heston
+  calibration** fits all five parameters to vanilla quotes by
+  Levenberg-Marquardt in an unconstrained transform space (log/atanh).
+- **Numerical toolkits** in `core`: 1-D root finding (`solvers`: bisection,
+  Newton-Raphson, secant, Halley, safeguarded Newton — pluggable by enum),
+  multi-dimensional optimization (`optimization`: Levenberg-Marquardt, BFGS,
+  conjugate gradient, steepest descent, Nelder-Mead, differential evolution —
+  the fitting layer for Heston today, SABR / Nelson-Siegel tomorrow), FD
+  linear solvers (`fd_solvers`, 1-D to 3-D), asset-agnostic Monte Carlo
+  machinery (`montecarlo`: reproducible per-path RNG streams, Sobol with
+  digital-shift scrambling, Halton with Cranley-Patterson rotation, Brownian
+  bridge, stratified / Latin-hypercube sampling, control variates, moment
+  matching, Welford statistics), an interpolation toolkit (`interpolation`:
+  linear, cubic splines with natural / clamped / not-a-knot boundaries,
+  shape-preserving PCHIP and Akima, bilinear grids and thin-plate splines for
+  2-D vol surfaces), and correlation repair (`linalg`: PSD-tolerant Cholesky
+  plus Higham's nearest-correlation projection, auto-applied to non-PSD
+  rainbow correlation inputs).
 
 ## Running the CLI
 
@@ -124,7 +156,7 @@ Selected fields (all optional unless noted):
 
 | Field | Meaning |
 |---|---|
-| `pricer` | `Analytical`, `Binomial`, `FD`, `MC` |
+| `pricer` | `Analytical`, `Binomial`, `FD`, `MC`, `BAW`, `BS2002` (analytic American) |
 | `payoff_type` | `vanilla`, `binary`, `barrier`, `asian`, `forward_start`, `autocallable` |
 | `exercise_style` | `European` (default), `American` |
 | `binary_type`, `cash_amount` | `cash` / `asset`, cash paid when ITM |

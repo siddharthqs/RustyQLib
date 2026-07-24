@@ -38,7 +38,7 @@ use super::local_vol::LocalVol;
 use super::vanila_option::{AsianPayoff, BarrierPayoff, EquityOption, EquityOptionBase, VanillaPayoff};
 use super::utils::{Engine, LongShort, Payoff};
 use crate::core::trade::PutOrCall;
-use crate::utils::RNG::{
+use crate::core::montecarlo::{
     path_normals, pseudo_normals, sobol_normals, BrownianBridge, QmcSequence,
 };
 use crate::core::quotes::Quote;
@@ -193,10 +193,8 @@ pub struct McStats {
 }
 
 fn stats(sum: f64, sum_sq: f64, n: usize, steps: usize, offset: f64) -> McStats {
-    let nf = n as f64;
-    let mean = sum / nf;
-    let var = (sum_sq / nf - mean * mean).max(0.0);
-    McStats { pv: mean + offset, std_err: (var / nf).sqrt(), paths: n, steps }
+    let (mean, std_err) = crate::core::montecarlo::mean_std_err(sum, sum_sq, n);
+    McStats { pv: mean + offset, std_err, paths: n, steps }
 }
 
 /// Market inputs snapshot; Greeks bump these fields and reprice with the
@@ -360,6 +358,40 @@ pub fn zomma(option: &EquityOption) -> f64 {
             / (hs * hs)
     };
     (gamma_at_vol(p.sigma + hv) - gamma_at_vol(p.sigma - hv)) / (2.0 * hv)
+}
+
+/// Reprice under a shifted market (spot, parallel vol, rate, calendar time)
+/// with the same random draws as the base price, for PnL attribution.
+pub(crate) fn npv_with(
+    option: &EquityOption,
+    d_spot: f64,
+    d_vol: f64,
+    d_rate: f64,
+    d_time: f64,
+) -> f64 {
+    let p = market_params(option);
+    price(
+        option,
+        &MarketParams {
+            s0: p.s0 + d_spot,
+            sigma: p.sigma + d_vol,
+            r: p.r + d_rate,
+            t: (p.t - d_time).max(1e-6),
+            ..p
+        },
+    )
+    .pv
+}
+
+/// Volga (vomma), the second price derivative in volatility, estimated with
+/// a central second difference over common-random-number reprices.
+pub fn volga(option: &EquityOption) -> f64 {
+    let p = market_params(option);
+    let hv = 0.01;
+    (price(option, &MarketParams { sigma: p.sigma + hv, ..p }).pv
+        - 2.0 * price(option, &p).pv
+        + price(option, &MarketParams { sigma: p.sigma - hv, ..p }).pv)
+        / (hv * hv)
 }
 
 // ── Volatility dynamics along a path ────────────────────────────────────

@@ -17,7 +17,7 @@ const SPOT: f64 = 100.0;
 const STRIKE: f64 = 100.0;
 const VOL: f64 = 0.80;
 const RATE: f64 = 0.06;
-const DIV: f64 = 0.00;
+const DIV: f64 = 0.02;
 
 fn asof() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
@@ -186,7 +186,7 @@ fn greek_surfaces() {
                 .dividend_yield(DIV)
                 .valuation_date(asof())
                 .years_to_maturity(years)
-                .vanilla(PutOrCall::Call)
+                .vanilla(PutOrCall::Put)
                 .engine(Engine::BlackScholes)
                 .build();
             select(&option)
@@ -202,6 +202,8 @@ fn greek_surfaces() {
         ("Charm", "charm", |o: &EquityOption| o.charm()),
         ("Gamma P", "gamma_p", |o: &EquityOption| o.gamma_p()),
         ("Zomma", "zomma", |o: &EquityOption| o.zomma()),
+        ("Volga", "volga", |o: &EquityOption| o.volga()),
+        ("Rho", "rho", |o: &EquityOption| o.rho()),
     ] {
         let surface = greek_surface(&moneyness, &mats, greek(select));
         save_surface_html(

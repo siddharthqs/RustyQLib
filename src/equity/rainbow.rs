@@ -21,11 +21,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
+use crate::core::linalg::{cholesky, nearest_correlation};
 use crate::core::trade::PutOrCall;
 use crate::core::utils::N;
 use crate::equity::montecarlo::{McStats, Sampler};
 use crate::equity::utils::Engine;
-use crate::utils::RNG::{path_normals, QmcSequence};
+use crate::core::montecarlo::{path_normals, QmcSequence};
 
 const PATH_CHUNK: usize = 4096;
 
@@ -138,8 +139,22 @@ impl RainbowOption {
             data.correlations.len() == n && data.correlations.iter().all(|row| row.len() == n),
             "correlations must be an n x n matrix"
         );
-        let chol = cholesky(&data.correlations)
-            .expect("correlation matrix must be symmetric positive definite with unit diagonal");
+        // an empirical / hand-stressed matrix that fails PSD is repaired
+        // with Higham's nearest-correlation projection; asymmetry or a
+        // non-unit diagonal is a data error and still panics
+        let chol = match cholesky(&data.correlations) {
+            Ok(l) => l,
+            Err(e) if e.contains("positive semi-definite") => {
+                eprintln!(
+                    "warning: correlation matrix is not PSD; \
+                     projecting to the nearest correlation matrix (Higham)"
+                );
+                let repaired = nearest_correlation(&data.correlations, 1e-12, 200)
+                    .expect("nearest-correlation projection failed");
+                cholesky(&repaired).expect("projected matrix must factorize")
+            }
+            Err(e) => panic!("invalid correlation matrix: {e}"),
+        };
         let discount_curve = match &data.discount_curve {
             Some(input) => YieldCurve::from_input(input, valuation_date)
                 .expect("Invalid discount curve"),
@@ -437,41 +452,6 @@ impl RainbowOption {
         let var = (sum_sq / nf - mean * mean).max(0.0);
         McStats { pv: mean, std_err: (var / nf).sqrt(), paths: self.paths, steps: 1 }
     }
-}
-
-/// Cholesky decomposition of a correlation matrix; Err if the matrix is
-/// not symmetric positive **semi**-definite with a unit diagonal
-/// (perfectly correlated assets are allowed).
-fn cholesky(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
-    let n = m.len();
-    for i in 0..n {
-        if (m[i][i] - 1.0).abs() > 1e-10 {
-            return Err(format!("diagonal element [{i}][{i}] must be 1"));
-        }
-        for j in 0..n {
-            if (m[i][j] - m[j][i]).abs() > 1e-10 {
-                return Err("matrix must be symmetric".to_string());
-            }
-        }
-    }
-    let mut l = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for j in 0..=i {
-            let s: f64 = (0..j).map(|k| l[i][k] * l[j][k]).sum();
-            if i == j {
-                let d = m[i][i] - s;
-                if d < -1e-10 {
-                    return Err("matrix is not positive semi-definite".to_string());
-                }
-                l[i][j] = d.max(0.0).sqrt();
-            } else if l[j][j] > 1e-12 {
-                l[i][j] = (m[i][j] - s) / l[j][j];
-            } else {
-                l[i][j] = 0.0;
-            }
-        }
-    }
-    Ok(l)
 }
 
 #[cfg(test)]

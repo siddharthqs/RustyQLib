@@ -1,5 +1,10 @@
 pub mod curves;
 pub mod daycount;
+pub mod fd_solvers;
+pub mod linalg;
+pub mod montecarlo;
+pub mod optimization;
+pub mod solvers;
 pub mod serialization;
 pub mod vols;
 pub mod interpolation;

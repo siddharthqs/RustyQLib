@@ -317,19 +317,17 @@ impl YieldCurve {
             let z_last = -self.dfs[n - 1].ln() / t_last;
             return (-z_last * t).exp();
         }
-        // first index with times[idx] >= t; idx >= 1 because times[0] = 0 < t
-        let idx = self.times.partition_point(|&x| x < t);
-        let (t0, t1) = (self.times[idx - 1], self.times[idx]);
+        // shared pillar bracketing; idx >= 1 because times[0] = 0 < t
+        let (idx, w) = crate::core::interpolation::bracket(&self.times, t);
         let (df0, df1) = (self.dfs[idx - 1], self.dfs[idx]);
-        let w = (t - t0) / (t1 - t0);
         match self.interpolation {
             InterpolationMethod::LogLinearDf => {
-                (df0.ln() * (1.0 - w) + df1.ln() * w).exp()
+                crate::core::interpolation::lerp(df0.ln(), df1.ln(), w).exp()
             }
             InterpolationMethod::LinearZero => {
                 let z0 = self.pillar_zero(idx - 1);
                 let z1 = self.pillar_zero(idx);
-                let z = z0 * (1.0 - w) + z1 * w;
+                let z = crate::core::interpolation::lerp(z0, z1, w);
                 (-z * t).exp()
             }
         }

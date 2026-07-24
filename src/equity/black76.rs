@@ -167,6 +167,22 @@ pub fn vega(
     df * f * dN(d1) * t.sqrt()
 }
 
+/// Volga (also called vomma), the change in vega per unit change in
+/// volatility, `d(vega)/d(sigma) = vega * d1 * d2 / sigma`. Same for calls
+/// and puts, since put-call parity is volatility-independent. It is negative
+/// near the money (vega is concave in vol there) and positive in the wings.
+pub fn volga(
+    f: f64,
+    k: f64,
+    r: f64,
+    sigma: f64,
+    t: f64,
+    settlement: FuturesSettlement,
+) -> f64 {
+    let (d1, d2) = d1_d2(f, k, sigma, t);
+    vega(f, k, r, sigma, t, settlement) * d1 * d2 / sigma
+}
+
 /// Vanna, the change in futures delta per unit change in volatility.
 pub fn vanna(
     f: f64,
@@ -288,6 +304,28 @@ mod tests {
         assert!((gamma(F, K, R, SIG, T, M) - 0.01314931).abs() < 1e-7);
         assert!((vega(F, K, R, SIG, T, M) - 39.44793309).abs() < 1e-6);
         assert!((theta(F, K, R, SIG, T, PutOrCall::Call, M) + 5.91718996).abs() < 1e-6);
+    }
+
+    #[test]
+    fn volga_matches_vega_bump_and_smile_sign() {
+        for s in [FuturesSettlement::Discounted, FuturesSettlement::Margined] {
+            // volga = d(vega)/d(sigma), checked against a central bump
+            let h = 1e-5;
+            let bump =
+                (vega(F, K, R, SIG + h, T, s) - vega(F, K, R, SIG - h, T, s)) / (2.0 * h);
+            assert!((volga(F, K, R, SIG, T, s) - bump).abs() < 1e-6, "{s:?}");
+            // at the money volga is negative; the wings are positive
+            assert!(volga(F, 100.0, R, SIG, T, s) < 0.0);
+            assert!(volga(F, 70.0, R, SIG, T, s) > 0.0);
+            assert!(volga(F, 130.0, R, SIG, T, s) > 0.0);
+        }
+        // golden values, bump-verified against an independent reference
+        assert!(
+            (volga(F, K, R, SIG, T, FuturesSettlement::Discounted) + 2.81430260).abs() < 1e-6
+        );
+        assert!(
+            (volga(F, K, R, SIG, T, FuturesSettlement::Margined) + 2.95859498).abs() < 1e-6
+        );
     }
 
     #[test]

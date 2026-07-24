@@ -164,6 +164,21 @@ impl BlackScholesPricer {
         }
         self.zomma_bumped(bsd_option)
     }
+    /// Volga / vomma (`d vega / d volatility`). Vanilla and Black-76 use
+    /// closed forms; other analytic payoffs use a central volatility bump.
+    pub fn volga(&self, bsd_option: &EquityOption) -> f64 {
+        if bsd_option.base.is_futures_option() {
+            return self.volga_black76(bsd_option);
+        }
+        if matches!(bsd_option.payoff.payoff_kind(), PayoffType::Vanilla) {
+            return bs_volga(
+                bsd_option.base.effective_spot(), bsd_option.base.strike_price,
+                bsd_option.base.risk_free_rate(), bsd_option.base.carry_yield(),
+                bsd_option.base.volatility(), bsd_option.time_to_maturity(),
+            );
+        }
+        self.volga_bumped(bsd_option)
+    }
     // ── Black-76: European options on a future ─────────────────────────
     // The underlying_price is the futures price F; there is no spot,
     // dividend or carry. Vol is read from the surface at (K, F, T).
@@ -221,6 +236,10 @@ impl BlackScholesPricer {
     fn zomma_black76(&self, o: &EquityOption) -> f64 {
         let (f, k, r, sig, t, _pc, s) = Self::black76_inputs(o);
         crate::equity::black76::zomma(f, k, r, sig, t, s)
+    }
+    fn volga_black76(&self, o: &EquityOption) -> f64 {
+        let (f, k, r, sig, t, _pc, s) = Self::black76_inputs(o);
+        crate::equity::black76::volga(f, k, r, sig, t, s)
     }
     fn npv_vanilla(&self, bsd_option: &EquityOption) -> f64 {
 
@@ -304,8 +323,9 @@ impl BlackScholesPricer {
 
     /// Analytic price with bumpable spot, volatility, rate and expiry.  This
     /// supports the cross-Greeks of payoffs whose first-order formulas are
-    /// deliberately implemented by bump-and-reprice.
-    fn price_with(
+    /// deliberately implemented by bump-and-reprice, and the portfolio
+    /// PnL-attribution reprice.
+    pub(crate) fn price_with(
         bsd_option: &EquityOption,
         ds: f64,
         dsigma: f64,
@@ -357,6 +377,14 @@ impl BlackScholesPricer {
                 / (hs * hs)
         };
         (gamma_at_vol(hv) - gamma_at_vol(-hv)) / (2.0 * hv)
+    }
+    /// Volga as the second price derivative in volatility (`d2 V / d sigma2`).
+    fn volga_bumped(&self, bsd_option: &EquityOption) -> f64 {
+        let hv = 1e-3;
+        (Self::price_with(bsd_option, 0.0, hv, 0.0, 0.0)
+            - 2.0 * Self::price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+            + Self::price_with(bsd_option, 0.0, -hv, 0.0, 0.0))
+            / (hv * hv)
     }
 
     // ── Binary (digital) options ───────────────────────────────────────
@@ -806,6 +834,17 @@ pub fn bs_zomma(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
     gamma * (d1 * d2 - 1.0) / sigma
 }
 
+/// Black-Scholes volga (vomma), the change in vega per unit of volatility,
+/// `vega * d1 * d2 / sigma`. Same for calls and puts (parity is
+/// volatility-independent); negative at the money, positive in the wings.
+pub fn bs_volga(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
+    let sqrt_t = t.sqrt();
+    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    let d2 = d1 - sigma * sqrt_t;
+    let vega = s * exp(-q * t) * dN(d1) * sqrt_t;
+    vega * d1 * d2 / sigma
+}
+
 const IMPLIED_VOL_MIN: f64 = 1e-4;
 const IMPLIED_VOL_MAX: f64 = 5.0;
 
@@ -838,7 +877,7 @@ pub fn implied_vol_from_price(
         ));
     }
 
-    let (mut lo, mut hi) = (IMPLIED_VOL_MIN, IMPLIED_VOL_MAX);
+    let (lo, hi) = (IMPLIED_VOL_MIN, IMPLIED_VOL_MAX);
     if bs_price(s, k, r, q, lo, t, put_or_call) > target {
         return Ok(lo); // at or below the vol floor
     }
@@ -846,30 +885,17 @@ pub fn implied_vol_from_price(
         return Err(format!("implied vol above {IMPLIED_VOL_MAX}"));
     }
 
-    let mut sigma = 0.5_f64.min(hi).max(lo);
+    // price is increasing in vol (vega > 0), the shape newton_safeguarded
+    // wants; the answer is best-effort even if the tolerance isn't met
     let tol = 1e-12 * target.max(1.0);
-    for _ in 0..100 {
-        let diff = bs_price(s, k, r, q, sigma, t, put_or_call) - target;
-        if diff.abs() < tol {
-            return Ok(sigma);
-        }
-        if diff > 0.0 {
-            hi = sigma;
-        } else {
-            lo = sigma;
-        }
-        let vega = bs_vega(s, k, r, q, sigma, t);
-        let newton = sigma - diff / vega;
-        sigma = if vega > 1e-12 && newton > lo && newton < hi {
-            newton
-        } else {
-            0.5 * (lo + hi)
-        };
-        if hi - lo < 1e-14 {
-            return Ok(sigma);
-        }
-    }
-    Ok(sigma)
+    let root = crate::core::solvers::Solver1d::new(tol, 100).newton_safeguarded(
+        |sigma| bs_price(s, k, r, q, sigma, t, put_or_call) - target,
+        |sigma| bs_vega(s, k, r, q, sigma, t),
+        lo,
+        hi,
+        0.5,
+    );
+    Ok(root.x)
 }
 
 pub fn option_pricing() {
@@ -1223,15 +1249,53 @@ mod tests {
         let q = option.base.carry_yield();
         let sigma = option.base.volatility();
         let t = option.time_to_maturity();
+        // zomma = d(gamma)/d(sigma); bump the analytic gamma in vol rather
+        // than a price-based gamma (double price-differencing is far too
+        // noisy to check against a 1e-6 tolerance)
         let gamma_at_vol = |vol: f64| {
-            let hs = 1e-3;
-            (bs_price(s + hs, k, r, q, vol, t, PutOrCall::Call)
-                - 2.0 * bs_price(s, k, r, q, vol, t, PutOrCall::Call)
-                + bs_price(s - hs, k, r, q, vol, t, PutOrCall::Call))
-                / (hs * hs)
+            let d1 = ((s / k).ln() + (r - q + 0.5 * vol * vol) * t) / (vol * t.sqrt());
+            (-q * t).exp() * dN(d1) / (s * vol * t.sqrt())
         };
         let zomma_bump = (gamma_at_vol(sigma + h) - gamma_at_vol(sigma - h)) / (2.0 * h);
         assert_approx_eq!(option.zomma(), zomma_bump, 1e-6);
+    }
+
+    #[test]
+    fn vanilla_volga_matches_vega_bump_and_closed_form() {
+        let option = test_option(PutOrCall::Call, flat_5pct());
+        let s = option.base.effective_spot();
+        let k = option.base.strike_price;
+        let r = option.base.risk_free_rate();
+        let q = option.base.carry_yield();
+        let sigma = option.base.volatility();
+        let t = option.time_to_maturity();
+
+        // the analytic engine returns the closed form
+        assert_approx_eq!(option.volga(), bs_volga(s, k, r, q, sigma, t), 1e-12);
+
+        // volga = d(vega)/d(sigma); bump the analytic vega in vol
+        let h = 1e-5;
+        let vega_at_vol = |vol: f64| bs_vega(s, k, r, q, vol, t);
+        let volga_bump = (vega_at_vol(sigma + h) - vega_at_vol(sigma - h)) / (2.0 * h);
+        assert_approx_eq!(option.volga(), volga_bump, 1e-6);
+
+        // put and call share volga (parity is volatility-independent)
+        let put = test_option(PutOrCall::Put, flat_5pct());
+        assert_approx_eq!(option.volga(), put.volga(), 1e-12);
+    }
+
+    #[test]
+    fn volga_agrees_across_engines() {
+        let analytic = test_option(PutOrCall::Call, flat_5pct()).volga();
+
+        let mut fd = test_option(PutOrCall::Call, flat_5pct());
+        fd.engine = Engine::FiniteDifference;
+        assert!((fd.volga() - analytic).abs() < 0.5, "fd {} vs analytic {analytic}", fd.volga());
+
+        let mut mc = test_option(PutOrCall::Call, flat_5pct());
+        mc.engine = Engine::MonteCarlo;
+        mc.mc.paths = 200_000;
+        assert!((mc.volga() - analytic).abs() < 1.5, "mc {} vs analytic {analytic}", mc.volga());
     }
 
     #[test]

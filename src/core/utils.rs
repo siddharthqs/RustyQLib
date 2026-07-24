@@ -129,6 +129,67 @@ pub fn N(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / SQRT_2))
 }
 
+/// Cumulative bivariate normal distribution `P(X <= a, Y <= b)` for
+/// standard normals with correlation `rho`.
+///
+/// Genz (2004) Gauss-Legendre quadrature on the arcsine form for
+/// `|rho| <= 0.925` (accurate to ~1e-14); an adaptive-free Simpson
+/// integration of `phi(x) N((b - rho x)/sqrt(1-rho^2))` for the highly
+/// correlated tail. Used by the Bjerksund-Stensland (2002) two-boundary
+/// American approximation.
+#[allow(non_snake_case)]
+pub fn bivariate_N(a: f64, b: f64, rho: f64) -> f64 {
+    assert!((-1.0..=1.0).contains(&rho), "correlation must be in [-1, 1]");
+    if rho == 1.0 {
+        return N(a.min(b));
+    }
+    if rho == -1.0 {
+        return (N(a) + N(b) - 1.0).max(0.0);
+    }
+    if rho.abs() <= 0.925 {
+        // 10-point Gauss-Legendre on each half interval
+        const WEIGHTS: [f64; 10] = [
+            0.01761400713915212, 0.04060142980038694, 0.06267204833410906,
+            0.08327674157670475, 0.1019301198172404, 0.1181945319615184,
+            0.1316886384491766, 0.1420961093183821, 0.1491729864726037,
+            0.1527533871307259,
+        ];
+        const ABSCISSAE: [f64; 10] = [
+            0.9931285991850949, 0.9639719272779138, 0.9122344282513259,
+            0.8391169718222188, 0.7463319064601508, 0.6360536807265150,
+            0.5108670019508271, 0.3737060887154196, 0.2277858511416451,
+            0.07652652113349733,
+        ];
+        let (h, k) = (-a, -b);
+        let hs = 0.5 * (h * h + k * k);
+        let asr = rho.asin();
+        let mut sum = 0.0;
+        for (w, x) in WEIGHTS.iter().zip(&ABSCISSAE) {
+            for sign in [-1.0, 1.0] {
+                let sn = (asr * (sign * x + 1.0) / 2.0).sin();
+                sum += w * ((sn * h * k - hs) / (1.0 - sn * sn)).exp();
+            }
+        }
+        sum * asr / (4.0 * PI) + N(-h) * N(-k)
+    } else {
+        // high correlation: integrate the conditional CDF directly
+        let denom = (1.0 - rho * rho).sqrt();
+        let lo = -8.5_f64;
+        if a <= lo {
+            return 0.0;
+        }
+        let n_steps = 2000;
+        let dx = (a - lo) / n_steps as f64;
+        let f = |x: f64| dN(x) * N((b - rho * x) / denom);
+        let mut sum = f(lo) + f(a);
+        for i in 1..n_steps {
+            let x = lo + i as f64 * dx;
+            sum += if i % 2 == 1 { 4.0 } else { 2.0 } * f(x);
+        }
+        sum * dx / 3.0
+    }
+}
+
 /// Inverse of the standard normal CDF (quantile function).
 ///
 /// Acklam's rational approximation refined with one Halley step against the
@@ -173,7 +234,7 @@ pub fn inv_N(p: f64) -> f64 {
         (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
             / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     };
-    let mut x = if p < P_LOW {
+    let x = if p < P_LOW {
         tail((-2.0 * p.ln()).sqrt())
     } else if p <= 1.0 - P_LOW {
         let q = p - 0.5;
@@ -183,10 +244,48 @@ pub fn inv_N(p: f64) -> f64 {
     } else {
         -tail((-2.0 * (1.0 - p).ln()).sqrt())
     };
-    // one Halley refinement step
-    let e = N(x) - p;
-    let u = e * (2.0 * PI).sqrt() * (x * x / 2.0).exp();
-    x -= u / (1.0 + x * u / 2.0);
-    x
+    // one Halley refinement step on f(x) = N(x) - p (f' = phi, f'' = -x phi)
+    crate::core::solvers::Solver1d::new(0.0, 1)
+        .halley(|x| N(x) - p, dN, |x| -x * dN(x), x)
+        .x
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bivariate_normal_identities() {
+        // exact identity at the origin: 1/4 + asin(rho)/(2 pi)
+        for rho in [-0.9_f64, -0.5, 0.0, 0.3, 0.786, 0.9] {
+            let exact = 0.25 + rho.asin() / (2.0 * PI);
+            assert!(
+                (bivariate_N(0.0, 0.0, rho) - exact).abs() < 1e-12,
+                "rho {rho}"
+            );
+        }
+        // independence factorizes
+        assert!((bivariate_N(1.0, -0.5, 0.0) - N(1.0) * N(-0.5)).abs() < 1e-12);
+        // symmetry in the arguments
+        assert!(
+            (bivariate_N(0.7, -0.2, 0.4) - bivariate_N(-0.2, 0.7, 0.4)).abs() < 1e-12
+        );
+        // golden value from the cross-checked reference implementation
+        assert!((bivariate_N(0.5, -0.3, 0.786) - 0.367657814886).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bivariate_normal_high_correlation_branch() {
+        // rho -> 1: P(X <= a, Y <= b) -> N(min(a, b))
+        assert!((bivariate_N(0.5, 1.2, 1.0) - N(0.5)).abs() < 1e-14);
+        // the Simpson branch (|rho| > 0.925) must join the Genz branch
+        // smoothly: compare both at rho just inside each side
+        let genz = bivariate_N(0.4, -0.1, 0.92);
+        let simpson = bivariate_N(0.4, -0.1, 0.93);
+        assert!((genz - simpson).abs() < 5e-3, "{genz} vs {simpson}");
+        // and rho = 0.99 stays close to the perfect-correlation limit
+        let near = bivariate_N(0.5, 1.2, 0.99);
+        assert!(near < N(0.5) + 1e-9 && near > N(0.5) - 0.02, "{near}");
+    }
+}

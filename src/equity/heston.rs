@@ -115,6 +115,98 @@ impl HestonParams {
         };
         HestonParams { v0: bump(self.v0), theta: bump(self.theta), ..*self }
     }
+
+    /// Map to the unconstrained calibration space: `ln` for the positive
+    /// parameters and `atanh` for the correlation, so any point the
+    /// optimizer visits maps back to a valid parameter set.
+    fn to_unconstrained(&self) -> Vec<f64> {
+        vec![
+            self.v0.ln(),
+            self.kappa.ln(),
+            self.theta.ln(),
+            self.vol_of_vol.ln(),
+            // atanh, clamped away from the +-1 poles
+            self.rho.clamp(-0.999, 0.999).atanh(),
+        ]
+    }
+
+    fn from_unconstrained(u: &[f64]) -> HestonParams {
+        HestonParams {
+            v0: u[0].exp(),
+            kappa: u[1].exp(),
+            theta: u[2].exp(),
+            vol_of_vol: u[3].exp(),
+            rho: u[4].tanh(),
+        }
+    }
+}
+
+// ── Calibration ─────────────────────────────────────────────────────────
+
+/// One vanilla market quote for calibration.
+#[derive(Debug, Clone, Copy)]
+pub struct HestonQuote {
+    pub strike: f64,
+    /// Year fraction to expiry.
+    pub maturity: f64,
+    /// Market price of the option.
+    pub price: f64,
+    pub put_or_call: PutOrCall,
+}
+
+/// Calibration outcome: fitted parameters plus fit diagnostics.
+#[derive(Debug, Clone)]
+pub struct HestonFit {
+    pub params: HestonParams,
+    /// Root-mean-square price error over the quotes.
+    pub rmse: f64,
+    pub iterations: usize,
+    pub converged: bool,
+}
+
+/// Calibrate Heston parameters to European vanilla quotes.
+///
+/// A Levenberg-Marquardt least-squares fit (the calibration workhorse in
+/// [`core::optimization`](crate::core::optimization)) on price residuals,
+/// run in an unconstrained transform space (`ln` for the positive
+/// parameters, `atanh` for rho) so every trial parameter set is valid —
+/// the same pattern any parametric fit (SABR, Nelson-Siegel) should use.
+/// `start` seeds the search; a poor start on a multimodal quote set can
+/// be globalized first with
+/// [`Method::DifferentialEvolution`](crate::core::optimization::Method).
+pub fn calibrate(
+    s: f64,
+    r: f64,
+    q: f64,
+    quotes: &[HestonQuote],
+    start: &HestonParams,
+) -> HestonFit {
+    use crate::core::optimization::{levenberg_marquardt, OptimConfig};
+
+    assert!(!quotes.is_empty(), "calibration needs at least one quote");
+    start.validate().expect("invalid starting parameters");
+    let residuals = |u: &[f64]| -> Vec<f64> {
+        let p = HestonParams::from_unconstrained(u);
+        quotes
+            .iter()
+            .map(|quote| {
+                heston_price(s, quote.strike, r, q, quote.maturity, &p, quote.put_or_call)
+                    - quote.price
+            })
+            .collect()
+    };
+    let fit = levenberg_marquardt(
+        &OptimConfig::new(1e-12, 100),
+        &residuals,
+        None,
+        &start.to_unconstrained(),
+    );
+    HestonFit {
+        params: HestonParams::from_unconstrained(&fit.x),
+        rmse: (fit.value / quotes.len() as f64).sqrt(),
+        iterations: fit.iterations,
+        converged: fit.converged,
+    }
 }
 
 // ── Characteristic function and pricing ─────────────────────────────────
@@ -257,7 +349,7 @@ use crate::equity::vanila_option::{BinaryPayoff, BinaryType, EquityOption};
 /// Reprice the option under Heston with additive bumps to
 /// (spot, vol shift, rate, expiry). The vol bump shifts sqrt(v0) and
 /// sqrt(theta) in parallel.
-fn price_with(option: &EquityOption, ds: f64, dvol: f64, dr: f64, dt_shift: f64) -> f64 {
+pub(crate) fn price_with(option: &EquityOption, ds: f64, dvol: f64, dr: f64, dt_shift: f64) -> f64 {
     let hp = option
         .heston
         .expect("heston parameters are required for the Heston model")
@@ -346,6 +438,16 @@ pub fn analytic_zomma(option: &EquityOption) -> f64 {
     };
     (gamma_at_vol(hv) - gamma_at_vol(-hv)) / (2.0 * hv)
 }
+/// Volga: change in vega for a parallel shift of the Heston instantaneous
+/// and long-run volatility levels (second price derivative in that shift).
+/// A larger step than vega tempers the roundoff of a second difference
+/// against the characteristic-function integration error.
+pub fn analytic_volga(option: &EquityOption) -> f64 {
+    let hv = 1e-2;
+    (price_with(option, 0.0, hv, 0.0, 0.0) - 2.0 * price_with(option, 0.0, 0.0, 0.0, 0.0)
+        + price_with(option, 0.0, -hv, 0.0, 0.0))
+        / (hv * hv)
+}
 
 #[cfg(test)]
 mod tests {
@@ -354,6 +456,33 @@ mod tests {
 
     fn params() -> HestonParams {
         HestonParams { v0: 0.09, kappa: 2.0, theta: 0.09, vol_of_vol: 0.4, rho: -0.7 }
+    }
+
+    #[test]
+    fn calibration_recovers_the_generating_parameters() {
+        // price a strike ladder from known parameters, perturb the start,
+        // and calibrate back: the fit must reprice the quotes to sub-cent
+        // accuracy and land near the generating v0 / vol_of_vol / rho
+        let truth = HestonParams { v0: 0.04, kappa: 1.5, theta: 0.05, vol_of_vol: 0.5, rho: -0.7 };
+        let (s, r, q, t) = (100.0, 0.03, 0.01, 1.0);
+        let quotes: Vec<HestonQuote> = [80.0, 90.0, 100.0, 110.0, 120.0]
+            .iter()
+            .map(|&k| HestonQuote {
+                strike: k,
+                maturity: t,
+                price: heston_price(s, k, r, q, t, &truth, PutOrCall::Call),
+                put_or_call: PutOrCall::Call,
+            })
+            .collect();
+
+        let start = HestonParams { v0: 0.06, kappa: 1.0, theta: 0.04, vol_of_vol: 0.3, rho: -0.3 };
+        let fit = calibrate(s, r, q, &quotes, &start);
+
+        assert!(fit.rmse < 1e-3, "price rmse {} too large: {:?}", fit.rmse, fit.params);
+        // the smile pins v0 (level), vol_of_vol (curvature) and rho (skew)
+        assert!((fit.params.v0 - truth.v0).abs() < 0.01, "v0 {}", fit.params.v0);
+        assert!((fit.params.rho - truth.rho).abs() < 0.1, "rho {}", fit.params.rho);
+        assert!(fit.params.validate().is_ok());
     }
 
     #[test]

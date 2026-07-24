@@ -122,21 +122,13 @@ struct Smile {
 }
 
 impl Smile {
-    /// Linear in vol on the coordinate; flat beyond the wings.
+    /// Linear in vol on the coordinate; flat beyond the wings
+    /// (via the shared [`interp_pairs`](crate::core::interpolation::interp_pairs)).
     fn vol(&self, x: f64) -> f64 {
-        let pts = &self.points;
-        let n = pts.len();
-        if x <= pts[0].0 {
-            return pts[0].1;
+        if self.points.len() == 1 {
+            return self.points[0].1;
         }
-        if x >= pts[n - 1].0 {
-            return pts[n - 1].1;
-        }
-        let idx = pts.partition_point(|&(xi, _)| xi < x);
-        let (x0, v0) = pts[idx - 1];
-        let (x1, v1) = pts[idx];
-        let w = (x - x0) / (x1 - x0);
-        v0 * (1.0 - w) + v1 * w
+        crate::core::interpolation::interp_pairs(&self.points, x)
     }
 }
 

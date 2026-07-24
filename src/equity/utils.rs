@@ -12,7 +12,12 @@ pub enum Engine{
     BlackScholes,
     MonteCarlo,
     Binomial,
-    FiniteDifference
+    FiniteDifference,
+    /// Barone-Adesi-Whaley quadratic approximation for American vanillas.
+    BaroneAdesiWhaley,
+    /// Bjerksund-Stensland (2002) two-boundary approximation for
+    /// American vanillas — a lower bound, generally tighter than BAW.
+    BjerksundStensland,
 }
 #[derive(Debug)]
 pub enum LongShort{

@@ -1,6 +1,6 @@
 use std::error::Error;
 use chrono::{Datelike, Local, NaiveDate};
-use crate::equity::{binomial,finite_difference,montecarlo};
+use crate::equity::{baw,bjerksund_stensland,binomial,finite_difference,montecarlo};
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::vols::VolSurface;
@@ -491,6 +491,10 @@ impl EquityOption {
                 "MonteCarlo" | "montecarlo" | "MC" | "mc" => Engine::MonteCarlo,
                 "Binomial" | "binomial" | "bino" => Engine::Binomial,
                 "FiniteDifference" | "finitdifference" | "FD" | "fd" => Engine::FiniteDifference,
+                "BaroneAdesiWhaley" | "baw" | "BAW" => Engine::BaroneAdesiWhaley,
+                "BjerksundStensland" | "bjerksund_stensland" | "bs2002" | "BS2002" => {
+                    Engine::BjerksundStensland
+                }
                 _ => {
                     panic!("Invalid pricer");
                 }
@@ -699,6 +703,30 @@ impl Instrument for EquityOption  {
             Engine::MonteCarlo => montecarlo::npv(&self),
             Engine::Binomial => binomial::npv(&self),
             Engine::FiniteDifference => finite_difference::npv(&self),
+            Engine::BaroneAdesiWhaley => {
+                if !matches!(self.payoff.payoff_kind(), PayoffType::Vanilla) {
+                    panic!("Barone-Adesi-Whaley approximates vanilla options only");
+                }
+                if heston {
+                    panic!(
+                        "Barone-Adesi-Whaley assumes constant-vol Black-Scholes dynamics, \
+                         not Heston"
+                    );
+                }
+                baw::npv(&self)
+            }
+            Engine::BjerksundStensland => {
+                if !matches!(self.payoff.payoff_kind(), PayoffType::Vanilla) {
+                    panic!("Bjerksund-Stensland approximates vanilla options only");
+                }
+                if heston {
+                    panic!(
+                        "Bjerksund-Stensland assumes constant-vol Black-Scholes dynamics, \
+                         not Heston"
+                    );
+                }
+                bjerksund_stensland::npv(&self)
+            }
         }
     }
 }
@@ -717,6 +745,8 @@ impl EquityOption {
         match self.engine {
             Engine::MonteCarlo => montecarlo::delta(&self),
             Engine::FiniteDifference => finite_difference::delta(&self),
+            Engine::BaroneAdesiWhaley => baw::delta(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::delta(&self),
             _ if self.analytic_heston() => heston::analytic_delta(&self),
             _ => BlackScholesPricer::new().delta(&self),
         }
@@ -725,6 +755,8 @@ impl EquityOption {
         match self.engine {
             Engine::MonteCarlo => montecarlo::gamma(&self),
             Engine::FiniteDifference => finite_difference::gamma(&self),
+            Engine::BaroneAdesiWhaley => baw::gamma(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::gamma(&self),
             _ if self.analytic_heston() => heston::analytic_gamma(&self),
             _ => BlackScholesPricer::new().gamma(&self),
         }
@@ -733,6 +765,8 @@ impl EquityOption {
         match self.engine {
             Engine::MonteCarlo => montecarlo::vega(&self),
             Engine::FiniteDifference => finite_difference::vega(&self),
+            Engine::BaroneAdesiWhaley => baw::vega(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::vega(&self),
             _ if self.analytic_heston() => heston::analytic_vega(&self),
             _ => BlackScholesPricer::new().vega(&self),
         }
@@ -741,6 +775,8 @@ impl EquityOption {
         match self.engine {
             Engine::MonteCarlo => montecarlo::theta(&self),
             Engine::FiniteDifference => finite_difference::theta(&self),
+            Engine::BaroneAdesiWhaley => baw::theta(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::theta(&self),
             _ if self.analytic_heston() => heston::analytic_theta(&self),
             _ => BlackScholesPricer::new().theta(&self),
         }
@@ -749,6 +785,8 @@ impl EquityOption {
         match self.engine {
             Engine::MonteCarlo => montecarlo::rho(&self),
             Engine::FiniteDifference => finite_difference::rho(&self),
+            Engine::BaroneAdesiWhaley => baw::rho(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::rho(&self),
             _ if self.analytic_heston() => heston::analytic_rho(&self),
             _ => BlackScholesPricer::new().rho(&self),
         }
@@ -758,6 +796,8 @@ impl EquityOption {
         match self.engine {
             Engine::MonteCarlo => montecarlo::vanna(&self),
             Engine::FiniteDifference => finite_difference::vanna(&self),
+            Engine::BaroneAdesiWhaley => baw::vanna(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::vanna(&self),
             _ if self.analytic_heston() => heston::analytic_vanna(&self),
             _ => BlackScholesPricer::new().vanna(&self),
         }
@@ -767,6 +807,8 @@ impl EquityOption {
         match self.engine {
             Engine::MonteCarlo => montecarlo::charm(&self),
             Engine::FiniteDifference => finite_difference::charm(&self),
+            Engine::BaroneAdesiWhaley => baw::charm(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::charm(&self),
             _ if self.analytic_heston() => heston::analytic_charm(&self),
             _ => BlackScholesPricer::new().charm(&self),
         }
@@ -785,8 +827,62 @@ impl EquityOption {
         match self.engine {
             Engine::MonteCarlo => montecarlo::zomma(&self),
             Engine::FiniteDifference => finite_difference::zomma(&self),
+            Engine::BaroneAdesiWhaley => baw::zomma(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::zomma(&self),
             _ if self.analytic_heston() => heston::analytic_zomma(&self),
             _ => BlackScholesPricer::new().zomma(&self),
+        }
+    }
+    /// Volga (vomma): change in vega per unit change in implied volatility.
+    pub fn volga(&self) -> f64 {
+        match self.engine {
+            Engine::MonteCarlo => montecarlo::volga(&self),
+            Engine::FiniteDifference => finite_difference::volga(&self),
+            Engine::BaroneAdesiWhaley => baw::volga(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::volga(&self),
+            _ if self.analytic_heston() => heston::analytic_volga(&self),
+            _ => BlackScholesPricer::new().volga(&self),
+        }
+    }
+    /// Reprice under a shifted market: spot `+ d_spot`, a parallel implied
+    /// vol shift `+ d_vol`, rate `+ d_rate`, and `d_time` years of elapsed
+    /// calendar time. `price_with(0, 0, 0, 0)` is the base price; the
+    /// portfolio PnL attribution uses the difference of the two.
+    ///
+    /// Monte Carlo repricing uses common random numbers, so the difference is
+    /// free of sampling noise. The binomial tree has no bump machinery and
+    /// falls back to the analytic reprice, mirroring its Greeks.
+    pub fn price_with(&self, d_spot: f64, d_vol: f64, d_rate: f64, d_time: f64) -> f64 {
+        if self.base.is_futures_option() {
+            let f = self.base.underlying_price.value();
+            let k = self.base.strike_price;
+            let t = self.time_to_maturity();
+            let sigma = self.base.vol_surface.vol(k, f, t);
+            return crate::equity::black76::price(
+                f + d_spot,
+                k,
+                self.base.risk_free_rate() + d_rate,
+                sigma + d_vol,
+                (t - d_time).max(1e-6),
+                *self.payoff.put_or_call(),
+                self.base.futures_settlement.expect("futures option must carry a settlement"),
+            );
+        }
+        match self.engine {
+            Engine::MonteCarlo => montecarlo::npv_with(&self, d_spot, d_vol, d_rate, d_time),
+            Engine::FiniteDifference => {
+                finite_difference::npv_with(&self, d_spot, d_vol, d_rate, d_time)
+            }
+            Engine::BaroneAdesiWhaley => baw::price_with(&self, d_spot, d_vol, d_rate, d_time),
+            Engine::BjerksundStensland => {
+                bjerksund_stensland::price_with(&self, d_spot, d_vol, d_rate, d_time)
+            }
+            // price_with shifts the maturity, so elapsed calendar time enters
+            // with the opposite sign
+            _ if self.analytic_heston() => {
+                heston::price_with(&self, d_spot, d_vol, d_rate, -d_time)
+            }
+            _ => BlackScholesPricer::price_with(&self, d_spot, d_vol, d_rate, -d_time),
         }
     }
 }

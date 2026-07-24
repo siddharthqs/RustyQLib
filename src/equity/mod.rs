@@ -19,3 +19,6 @@ pub mod binary_option;
 pub mod equity_future;
 pub mod handle_equity_contracts;
 pub mod equity_forward;
+pub mod portfolio;
+pub mod baw;
+pub mod bjerksund_stensland;

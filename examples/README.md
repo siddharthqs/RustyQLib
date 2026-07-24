@@ -24,6 +24,8 @@ Release mode matters: the Monte Carlo examples run 50k–100k paths.
 | `futures_option` | Options on futures (Black-76) | discounted vs margined settlement; zero rho when margined; Black-76 on the forward = spot Black-Scholes; strike skew |
 | `convert_format` | JSON <-> XML conversion | transcoding contract documents between the two supported formats |
 | `dividends_and_borrow` | Carry inputs | borrow cost as carry; escrowed vs jump dividend models per engine; where the difference matters |
+| `portfolio_pnl` | Book of options on one underlying | quantity-weighted Greek aggregation; second-order PnL attribution (delta/gamma/vega/volga/vanna/theta/rho) vs full reprice; the unexplained residual growing with the move |
+| `american_baw` | American vanillas, analytic approximations | Barone-Adesi-Whaley and Bjerksund-Stensland 2002 vs binomial / FD / LSMC; early-exercise premium and critical boundary; the BS2002 lower-bound property; true American Greeks; ~cents of error for a huge speed-up |
 
 ## Reading the output
 
