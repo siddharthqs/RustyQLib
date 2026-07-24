@@ -3,14 +3,15 @@
 //! [`decomp::cholesky`](super::decomp::cholesky).
 
 use super::decomp::cholesky::cholesky_factor;
+use crate::core::errors::RustyQLibError;
 
 /// Cholesky decomposition of a correlation matrix; Err if the matrix is
 /// not symmetric positive **semi**-definite with a unit diagonal
 /// (perfectly correlated assets are allowed).
-pub fn cholesky(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
+pub fn cholesky(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, RustyQLibError> {
     for (i, row) in m.iter().enumerate() {
         if (row[i] - 1.0).abs() > 1e-10 {
-            return Err(format!("diagonal element [{i}][{i}] must be 1"));
+            return Err(RustyQLibError::NumericalError(format!("diagonal element [{i}][{i}] must be 1")));
         }
     }
     cholesky_factor(m)

@@ -8,6 +8,7 @@
 //! toward a smoother least-squares surface (useful for noisy quotes).
 
 use crate::core::optimization::numerics::solve_dense;
+use crate::core::errors::RustyQLibError;
 
 #[derive(Debug, Clone)]
 pub struct ThinPlateSpline {
@@ -24,10 +25,10 @@ fn phi_sq(r_sq: f64) -> f64 {
 impl ThinPlateSpline {
     /// Fit to scattered points; `smoothing = 0` interpolates exactly.
     /// Needs at least three non-collinear points.
-    pub fn new(points: &[(f64, f64, f64)], smoothing: f64) -> Result<Self, String> {
+    pub fn new(points: &[(f64, f64, f64)], smoothing: f64) -> Result<Self, RustyQLibError> {
         let n = points.len();
         if n < 3 {
-            return Err("need at least three points".into());
+            return Err(RustyQLibError::invalid_input("thin_plate", "need at least three points"));
         }
         // augmented system [K + lambda I, P; P^T, 0] [w; a] = [z; 0]
         let dim = n + 3;
@@ -50,7 +51,7 @@ impl ThinPlateSpline {
             b[i] = zi;
         }
         let sol = solve_dense(&mut a, &mut b)
-            .ok_or("thin-plate system is singular (collinear or duplicate points?)")?;
+            .ok_or(RustyQLibError::invalid_input("thin_plate", "thin-plate system is singular (collinear or duplicate points?)"))?;
         Ok(ThinPlateSpline {
             centers: points.iter().map(|&(x, y, _)| (x, y)).collect(),
             w: sol[..n].to_vec(),

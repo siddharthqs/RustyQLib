@@ -14,13 +14,14 @@ use crate::core::curves::Tenor;
 use crate::core::daycount::DayCountConvention;
 use crate::core::vols::VolSurface;
 use super::vanilla_option::EquityOption;
+use crate::core::errors::RustyQLibError;
 
 /// Build an implied vol surface from quoted options. Quotes without a
 /// positive market price or violating arbitrage bounds are skipped (with a
 /// warning); at least one valid quote is required.
-pub fn build_implied_vol_surface(contracts: &[Box<EquityOption>]) -> Result<VolSurface, String> {
+pub fn build_implied_vol_surface(contracts: &[Box<EquityOption>]) -> Result<VolSurface, RustyQLibError> {
     if contracts.is_empty() {
-        return Err("no contracts provided".to_string());
+        return Err(RustyQLibError::invalid_input("vol surface", "no contracts provided".to_string()));
     }
     let reference_date = contracts[0].base.valuation_date;
     let mut smiles: BTreeMap<NaiveDate, Vec<(f64, f64)>> = BTreeMap::new();
@@ -47,7 +48,7 @@ pub fn build_implied_vol_surface(contracts: &[Box<EquityOption>]) -> Result<VolS
         }
     }
     if smiles.is_empty() {
-        return Err(format!("no valid quotes ({skipped} skipped)"));
+        return Err(RustyQLibError::invalid_input("vol surface", format!("no valid quotes ({skipped} skipped)")));
     }
 
     let mut tenors = Vec::new();
@@ -59,5 +60,5 @@ pub fn build_implied_vol_surface(contracts: &[Box<EquityOption>]) -> Result<VolS
         smile_points.push(points);
     }
     VolSurface::from_strike_smiles(&tenors, &smile_points, reference_date, DayCountConvention::Act365)
-        .map_err(|e| e.to_string())
+        .map_err(RustyQLibError::from)
 }

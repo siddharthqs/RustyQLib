@@ -16,6 +16,7 @@
 //! slope (curvature is not continued — safer for financial data).
 
 use crate::core::optimization::numerics::solve_dense;
+use crate::core::errors::RustyQLibError;
 
 /// Boundary condition for [`CubicSpline`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,13 +40,13 @@ impl CubicSpline {
     /// Build a spline through the knots (`xs` strictly increasing,
     /// at least two points; Not-a-Knot needs at least four and falls
     /// back to Natural below that).
-    pub fn new(xs: &[f64], ys: &[f64], bc: BoundaryCondition) -> Result<Self, String> {
+    pub fn new(xs: &[f64], ys: &[f64], bc: BoundaryCondition) -> Result<Self, RustyQLibError> {
         let n = xs.len();
         if n < 2 || ys.len() != n {
-            return Err("need at least two knots with matching y values".into());
+            return Err(RustyQLibError::invalid_input("cubic_spline", "need at least two knots with matching y values"));
         }
         if xs.windows(2).any(|w| w[1] <= w[0]) {
-            return Err("knots must be strictly increasing".into());
+            return Err(RustyQLibError::invalid_input("cubic_spline", "knots must be strictly increasing"));
         }
         if n == 2 {
             // a segment: linear, zero curvature
@@ -91,7 +92,7 @@ impl CubicSpline {
                 a[n - 1][n - 1] = h[n - 3];
             }
         }
-        let m = solve_dense(&mut a, &mut b).ok_or("singular spline system")?;
+        let m = solve_dense(&mut a, &mut b).ok_or(RustyQLibError::invalid_input("cubic_spline", "singular spline system"))?;
         Ok(CubicSpline { xs: xs.to_vec(), ys: ys.to_vec(), m })
     }
 

@@ -31,6 +31,7 @@ use std::path::Path;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde_json::{Map, Value};
+use crate::core::errors::RustyQLibError;
 
 /// Element name that marks array members in XML.
 pub const ARRAY_ITEM: &str = "item";
@@ -76,21 +77,21 @@ impl Format {
 // ── Input ───────────────────────────────────────────────────────────────
 
 /// Parse a document in either format into a [`Value`].
-pub fn parse_value(content: &str, format: Format) -> Result<Value, String> {
+pub fn parse_value(content: &str, format: Format) -> Result<Value, RustyQLibError> {
     match format {
-        Format::Json => serde_json::from_str(content).map_err(|e| format!("invalid JSON: {e}")),
+        Format::Json => serde_json::from_str(content).map_err(|e| RustyQLibError::ParseError(format!("invalid JSON: {e}"))),
         Format::Xml => xml_to_value(content),
     }
 }
 
 /// Parse a document into any deserializable type, in either format.
-pub fn parse<T: serde::de::DeserializeOwned>(content: &str, format: Format) -> Result<T, String> {
+pub fn parse<T: serde::de::DeserializeOwned>(content: &str, format: Format) -> Result<T, RustyQLibError> {
     let value = parse_value(content, format)?;
-    serde_json::from_value(value).map_err(|e| format!("document does not match the schema: {e}"))
+    serde_json::from_value(value).map_err(|e| RustyQLibError::ParseError(format!("document does not match the schema: {e}")))
 }
 
 /// Transcode an XML document into the equivalent [`Value`].
-pub fn xml_to_value(xml: &str) -> Result<Value, String> {
+pub fn xml_to_value(xml: &str) -> Result<Value, RustyQLibError> {
     let mut reader = Reader::from_str(xml);
     // text is accumulated raw and trimmed when the element closes, so
     // indentation is discarded without collapsing interior whitespace
@@ -112,14 +113,14 @@ pub fn xml_to_value(xml: &str) -> Result<Value, String> {
                 if let Some(node) = stack.last_mut() {
                     let text = e
                         .decode()
-                        .map_err(|err| format!("invalid text content: {err}"))?;
+                        .map_err(|err| RustyQLibError::ParseError(format!("invalid text content: {err}")))?;
                     node.text.push_str(text.as_ref());
                 }
             }
             Ok(Event::CData(e)) => {
                 if let Some(node) = stack.last_mut() {
                     let text = String::from_utf8(e.into_inner().into_owned())
-                        .map_err(|err| format!("invalid CDATA: {err}"))?;
+                        .map_err(|err| RustyQLibError::ParseError(format!("invalid CDATA: {err}")))?;
                     node.text.push_str(&text);
                 }
             }
@@ -130,22 +131,22 @@ pub fn xml_to_value(xml: &str) -> Result<Value, String> {
                 }
             }
             Ok(Event::End(_)) => {
-                let node = stack.pop().ok_or_else(|| "unbalanced closing tag".to_string())?;
+                let node = stack.pop().ok_or_else(|| RustyQLibError::ParseError("unbalanced closing tag".to_string()))?;
                 let (name, value) = node.finish();
                 attach(&mut stack, &mut root, name, value)?;
             }
             Ok(Event::Eof) => break,
             Ok(_) => {} // declaration, comments, processing instructions
-            Err(e) => return Err(format!("malformed XML at byte {}: {e}", reader.buffer_position())),
+            Err(e) => return Err(RustyQLibError::ParseError(format!("malformed XML at byte {}: {e}", reader.buffer_position()))),
         }
     }
     if !stack.is_empty() {
-        return Err("unbalanced XML: unclosed elements".to_string());
+        return Err(RustyQLibError::ParseError("unbalanced XML: unclosed elements".to_string()));
     }
     match root {
         // the document element is the top-level object
         Some((_, value)) => Ok(value),
-        None => Err("empty XML document".to_string()),
+        None => Err(RustyQLibError::ParseError("empty XML document".to_string())),
     }
 }
 
@@ -159,17 +160,17 @@ struct Node {
 }
 
 impl Node {
-    fn start(e: &quick_xml::events::BytesStart) -> Result<Node, String> {
+    fn start(e: &quick_xml::events::BytesStart) -> Result<Node, RustyQLibError> {
         let name = String::from_utf8(e.name().as_ref().to_vec())
-            .map_err(|err| format!("invalid element name: {err}"))?;
+            .map_err(|err| RustyQLibError::ParseError(format!("invalid element name: {err}")))?;
         let mut attrs = Vec::new();
         for attr in e.attributes() {
-            let attr = attr.map_err(|err| format!("invalid attribute in <{name}>: {err}"))?;
+            let attr = attr.map_err(|err| RustyQLibError::ParseError(format!("invalid attribute in <{name}>: {err}")))?;
             let key = String::from_utf8(attr.key.as_ref().to_vec())
-                .map_err(|err| format!("invalid attribute name: {err}"))?;
+                .map_err(|err| RustyQLibError::ParseError(format!("invalid attribute name: {err}")))?;
             let raw = attr
                 .unescape_value()
-                .map_err(|err| format!("invalid attribute value in <{name}>: {err}"))?;
+                .map_err(|err| RustyQLibError::ParseError(format!("invalid attribute value in <{name}>: {err}")))?;
             attrs.push((key, infer_scalar(raw.as_ref())));
         }
         Ok(Node { name, attrs, children: Vec::new(), text: String::new() })
@@ -212,24 +213,24 @@ impl Node {
 
 /// Resolve an entity reference: the five predefined XML entities plus
 /// numeric character references (`&#38;`, `&#x26;`).
-fn resolve_entity(e: &quick_xml::events::BytesRef) -> Result<String, String> {
+fn resolve_entity(e: &quick_xml::events::BytesRef) -> Result<String, RustyQLibError> {
     if e.is_char_ref() {
         return match e.resolve_char_ref() {
             Ok(Some(c)) => Ok(c.to_string()),
-            Ok(None) => Err("unresolvable character reference".to_string()),
-            Err(err) => Err(format!("invalid character reference: {err}")),
+            Ok(None) => Err(RustyQLibError::ParseError("unresolvable character reference".to_string())),
+            Err(err) => Err(RustyQLibError::ParseError(format!("invalid character reference: {err}"))),
         };
     }
-    let name = e.decode().map_err(|err| format!("invalid entity reference: {err}"))?;
+    let name = e.decode().map_err(|err| RustyQLibError::ParseError(format!("invalid entity reference: {err}")))?;
     match name.as_ref() {
         "amp" => Ok("&".to_string()),
         "lt" => Ok("<".to_string()),
         "gt" => Ok(">".to_string()),
         "quot" => Ok("\"".to_string()),
         "apos" => Ok("'".to_string()),
-        other => Err(format!(
+        other => Err(RustyQLibError::ParseError(format!(
             "unknown entity '&{other};' (only the predefined XML entities are supported)"
-        )),
+        ))),
     }
 }
 
@@ -238,7 +239,7 @@ fn attach(
     root: &mut Option<(String, Value)>,
     name: String,
     value: Value,
-) -> Result<(), String> {
+) -> Result<(), RustyQLibError> {
     match stack.last_mut() {
         Some(parent) => {
             parent.children.push((name, value));
@@ -246,7 +247,7 @@ fn attach(
         }
         None => {
             if root.is_some() {
-                return Err("XML documents must have a single root element".to_string());
+                return Err(RustyQLibError::ParseError("XML documents must have a single root element".to_string()));
             }
             *root = Some((name, value));
             Ok(())

@@ -3,6 +3,7 @@
 /// Provides types for managing interest rate term structures with various
 /// day count conventions and interpolation methods.
 use std::fmt;
+use crate::core::errors::RustyQLibError;
 
 // ─── Day Count Convention ────────────────────────────────────────────────────
 
@@ -220,22 +221,22 @@ impl TermStructure {
         day_count_convention: DayCountConvention,
         interpolation_method: InterpolationMethod,
         asof_date: Date,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, RustyQLibError> {
         // Validation
         if dates.len() != discount_factors.len() {
-            return Err("dates and discount_factors must have the same length".into());
+            return Err(RustyQLibError::invalid_input("term structure", "dates and discount_factors must have the same length"));
         }
         if dates.len() < 2 {
-            return Err("Need at least 2 points to define a term structure".into());
+            return Err(RustyQLibError::invalid_input("term structure", "Need at least 2 points to define a term structure"));
         }
         if !dates.windows(2).all(|w| w[0] < w[1]) {
-            return Err("dates must be strictly increasing".into());
+            return Err(RustyQLibError::invalid_input("term structure", "dates must be strictly increasing"));
         }
         if !discount_factors.iter().all(|&df| df > 0.0) {
-            return Err("Discount factors must be positive".into());
+            return Err(RustyQLibError::invalid_input("term structure", "Discount factors must be positive"));
         }
         if !discount_factors.iter().all(|&df| df <= 1.0) {
-            return Err("Discount factors must be <= 1.0".into());
+            return Err(RustyQLibError::invalid_input("term structure", "Discount factors must be <= 1.0"));
         }
 
         let year_fractions: Vec<f64> = dates
@@ -275,7 +276,7 @@ impl TermStructure {
         asof_date: Date,
         day_count_convention: DayCountConvention,
         max_tenor_years: f64,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, RustyQLibError> {
         let tenors = [0.001, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, max_tenor_years];
         let dates: Vec<Date> = tenors
             .iter()
@@ -298,9 +299,9 @@ impl TermStructure {
         zero_rates: Vec<f64>,
         day_count_convention: DayCountConvention,
         asof_date: Date,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, RustyQLibError> {
         if dates.len() != zero_rates.len() {
-            return Err("dates and zero_rates must have the same length".into());
+            return Err(RustyQLibError::invalid_input("term structure", "dates and zero_rates must have the same length"));
         }
         let discount_factors: Vec<f64> = dates
             .iter()
@@ -360,16 +361,16 @@ impl TermStructure {
     }
 
     /// Continuously-compounded forward rate between two dates.
-    pub fn forward_rate(&self, start_date: Date, end_date: Date) -> Result<f64, String> {
+    pub fn forward_rate(&self, start_date: Date, end_date: Date) -> Result<f64, RustyQLibError> {
         let t1 = self.day_count_convention.year_fraction(self.asof_date, start_date);
         let t2 = self.day_count_convention.year_fraction(self.asof_date, end_date);
         self.forward_rate_at_time(t1, t2)
     }
 
     /// Continuously-compounded forward rate between two times.
-    pub fn forward_rate_at_time(&self, t1: f64, t2: f64) -> Result<f64, String> {
+    pub fn forward_rate_at_time(&self, t1: f64, t2: f64) -> Result<f64, RustyQLibError> {
         if t2 <= t1 {
-            return Err("t2 must be greater than t1".into());
+            return Err(RustyQLibError::invalid_input("term structure", "t2 must be greater than t1"));
         }
         let df1 = self.discount_factor_at_time(t1);
         let df2 = self.discount_factor_at_time(t2);

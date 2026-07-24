@@ -2,6 +2,7 @@
 //! sign-changing bracket, at a linear rate.
 
 use super::solver_1d::{Root, Solver1d};
+use crate::core::errors::RustyQLibError;
 
 /// Bisection on a sign-changing bracket `[lo, hi]`. Errors when the
 /// bracket does not straddle a root.
@@ -10,7 +11,7 @@ pub fn bisection(
     f: impl Fn(f64) -> f64,
     lo: f64,
     hi: f64,
-) -> Result<Root, String> {
+) -> Result<Root, RustyQLibError> {
     let (mut lo, mut hi) = (lo.min(hi), lo.max(hi));
     let f_lo = f(lo);
     if f_lo.abs() <= cfg.tol {
@@ -21,9 +22,9 @@ pub fn bisection(
         return Ok(Root { x: hi, iterations: 0, converged: true });
     }
     if f_lo * f_hi > 0.0 {
-        return Err(format!(
+        return Err(RustyQLibError::NumericalError(format!(
             "bisection needs a sign change: f({lo}) = {f_lo}, f({hi}) = {f_hi}"
-        ));
+        )));
     }
     let mut x = 0.5 * (lo + hi);
     for i in 1..=cfg.max_iter {

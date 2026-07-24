@@ -118,6 +118,29 @@ pub struct ContractOutput {
     pub error: Option<String>
 }
 
+impl ContractOutput {
+    /// Output for a contract that could not be priced: all figures zero,
+    /// with the failure recorded in `error`.
+    pub fn from_error(message: String) -> Self {
+        ContractOutput {
+            pv: 0.0,
+            delta: 0.0,
+            gamma: 0.0,
+            vega: 0.0,
+            theta: 0.0,
+            rho: 0.0,
+            vanna: 0.0,
+            charm: 0.0,
+            gamma_p: 0.0,
+            zomma: 0.0,
+            std_err: None,
+            deltas: None,
+            vegas: None,
+            error: Some(message),
+        }
+    }
+}
+
 /// Probability density function of a standard normal random variable x.
 pub fn norm_pdf(x: f64) -> f64 {
     let t = -0.5 * x * x;

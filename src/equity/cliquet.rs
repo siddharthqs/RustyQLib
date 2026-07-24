@@ -35,6 +35,7 @@ use crate::core::utils::norm_cdf;
 use crate::equity::heston::HestonParams;
 use rand::Rng;
 use rand_distr::StandardNormal;
+use crate::core::errors::RustyQLibError;
 
 /// Pricing engine choice for a cliquet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,12 +148,12 @@ impl Cliquet {
     /// periods are independent, so the sum prices term by term. Errs
     /// when a global cap/floor is present (it couples the periods) or
     /// Heston dynamics are requested.
-    pub fn analytic_npv(&self) -> Result<f64, String> {
+    pub fn analytic_npv(&self) -> Result<f64, RustyQLibError> {
         if self.global_floor.is_some() || self.global_cap.is_some() {
-            return Err("global cap/floor couples the periods: use Monte Carlo".into());
+            return Err(RustyQLibError::UnsupportedEngine("global cap/floor couples the periods: use Monte Carlo".to_string()));
         }
         if self.heston.is_some() {
-            return Err("Heston cliquets price by Monte Carlo".into());
+            return Err(RustyQLibError::UnsupportedEngine("Heston cliquets price by Monte Carlo".to_string()));
         }
         let dt = self.t / self.resets as f64;
         let fwd = ((self.r - self.q) * dt).exp();
@@ -179,7 +180,7 @@ impl Cliquet {
                 Ok(df_n * (coupon - self.resets as f64 * ratio_put_at_one))
             }
             CliquetStyle::Napoleon { .. } => {
-                Err("the Napoleon's worst-of statistic prices by Monte Carlo".into())
+                Err(RustyQLibError::UnsupportedEngine("the Napoleon's worst-of statistic prices by Monte Carlo".to_string()))
             }
         }
     }
@@ -249,15 +250,28 @@ impl Cliquet {
         }
     }
 
+    /// Build from contract data, panicking on any invalid field. Fallible
+    /// callers should use [`Cliquet::try_from_json`].
     pub fn from_json(data: &CliquetOptionData) -> Box<Cliquet> {
+        Self::try_from_json(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub fn try_from_json(data: &CliquetOptionData) -> Result<Box<Cliquet>, RustyQLibError> {
         let today = Local::now().date_naive();
         let maturity = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
-            .expect("Invalid maturity date");
+            .map_err(|_| RustyQLibError::invalid_input(
+                "maturity",
+                format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
+            ))?;
         let t = (maturity - today).num_days() as f64 / 365.0;
-        assert!(t > 0.0, "cliquet is expired");
-        assert!(data.resets >= 1, "need at least one reset period");
+        if t <= 0.0 {
+            return Err(RustyQLibError::invalid_input("maturity", "cliquet is expired"));
+        }
+        if data.resets < 1 {
+            return Err(RustyQLibError::invalid_input("resets", "need at least one reset period"));
+        }
         if let Some(hp) = &data.heston {
-            hp.validate().expect("invalid Heston parameters");
+            hp.validate()?;
         }
         let pricer = match data.pricer.as_deref().map(str::trim) {
             None | Some("Analytical") | Some("analytical") | Some("bs") => {
@@ -266,19 +280,31 @@ impl Cliquet {
             Some("MonteCarlo") | Some("montecarlo") | Some("MC") | Some("mc") => {
                 CliquetPricer::MonteCarlo
             }
-            Some(other) => panic!("Invalid cliquet pricer '{other}'"),
+            Some(other) => return Err(RustyQLibError::invalid_input(
+                "pricer",
+                format!("invalid cliquet pricer '{other}' (use Analytical or MonteCarlo)"),
+            )),
+        };
+        let need_coupon = |style: &str| {
+            data.coupon.ok_or_else(|| RustyQLibError::invalid_input(
+                "coupon",
+                format!("{style} cliquet needs a coupon"),
+            ))
         };
         let style = match data.style.as_deref().map(str::trim) {
             None | Some("standard") | Some("Standard") => CliquetStyle::Standard,
             Some("reverse") | Some("Reverse") => CliquetStyle::Reverse {
-                coupon: data.coupon.expect("reverse cliquet needs a coupon"),
+                coupon: need_coupon("reverse")?,
             },
             Some("napoleon") | Some("Napoleon") => CliquetStyle::Napoleon {
-                coupon: data.coupon.expect("napoleon needs a coupon"),
+                coupon: need_coupon("napoleon")?,
             },
-            Some(other) => panic!("Invalid cliquet style: {other}"),
+            Some(other) => return Err(RustyQLibError::invalid_input(
+                "style",
+                format!("invalid cliquet style '{other}' (use standard, reverse or napoleon)"),
+            )),
         };
-        Box::new(Cliquet {
+        Ok(Box::new(Cliquet {
             resets: data.resets,
             t,
             r: data.risk_free_rate,
@@ -294,13 +320,13 @@ impl Cliquet {
             pricer,
             paths: data.simulation.unwrap_or(100_000) as usize,
             seed: data.mc_seed.unwrap_or(42),
-        })
+        }))
     }
 }
 
 impl Instrument for Cliquet {
-    fn npv(&self) -> f64 {
-        self.price()
+    fn try_npv(&self) -> Result<f64, RustyQLibError> {
+        Ok(self.price())
     }
 }
 

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::trade::PutOrCall;
 use crate::equity::heston::{characteristic_fn, probabilities_with_cf, Cpx, HestonParams, I};
+use crate::core::errors::RustyQLibError;
 
 // ── Jump specifications ─────────────────────────────────────────────────
 
@@ -39,15 +40,15 @@ pub struct MertonJumps {
 }
 
 impl MertonJumps {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
         if self.intensity < 0.0 {
-            return Err("jump intensity must be non-negative".into());
+            return Err(RustyQLibError::invalid_input("bates params", "jump intensity must be non-negative"));
         }
         if self.mean_jump <= -1.0 {
-            return Err("mean jump must be greater than -100%".into());
+            return Err(RustyQLibError::invalid_input("bates params", "mean jump must be greater than -100%"));
         }
         if self.jump_vol <= 0.0 {
-            return Err("jump vol must be positive".into());
+            return Err(RustyQLibError::invalid_input("bates params", "jump vol must be positive"));
         }
         Ok(())
     }
@@ -84,18 +85,18 @@ pub struct KouJumps {
 }
 
 impl KouJumps {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
         if self.intensity < 0.0 {
-            return Err("jump intensity must be non-negative".into());
+            return Err(RustyQLibError::invalid_input("bates params", "jump intensity must be non-negative"));
         }
         if !(0.0..=1.0).contains(&self.p_up) {
-            return Err("p_up must be in [0, 1]".into());
+            return Err(RustyQLibError::invalid_input("bates params", "p_up must be in [0, 1]"));
         }
         if self.eta_up <= 1.0 {
-            return Err("eta_up must exceed 1 (finite expected up-jump)".into());
+            return Err(RustyQLibError::invalid_input("bates params", "eta_up must exceed 1 (finite expected up-jump)"));
         }
         if self.eta_down <= 0.0 {
-            return Err("eta_down must be positive".into());
+            return Err(RustyQLibError::invalid_input("bates params", "eta_down must be positive"));
         }
         Ok(())
     }
@@ -135,14 +136,14 @@ pub struct BatesDoubleExpParams {
 }
 
 impl BatesParams {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
         self.heston.validate()?;
         self.jumps.validate()
     }
 }
 
 impl BatesDoubleExpParams {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
         self.heston.validate()?;
         self.jumps.validate()
     }

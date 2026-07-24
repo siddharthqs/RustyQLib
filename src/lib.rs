@@ -30,6 +30,7 @@ pub mod risk;
 pub mod utils;
 
 pub use crate::core::curves::{Compounding, CurveInput, InterpolationMethod, Tenor, YieldCurve};
+pub use crate::core::errors::RustyQLibError;
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;
 pub use crate::core::daycount::DayCountConvention;

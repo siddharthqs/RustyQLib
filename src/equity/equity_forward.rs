@@ -1,3 +1,4 @@
+use crate::core::errors::RustyQLibError;
 use chrono::{Local, NaiveDate};
 use crate::core::data_models::EquityForwardData;
 use crate::core::quotes::Quote;
@@ -30,16 +31,22 @@ pub struct EquityForward {
     pub notional:f64
 }
 impl EquityForward  {
+    /// Build from contract data, panicking on any invalid field. Fallible
+    /// callers should use [`EquityForward::try_from_json`].
     pub fn from_json(data: &EquityForwardData) -> Box<Self> {
-        //let market_data = data.market_data.as_ref().unwrap();
-        //let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
+        Self::try_from_json(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub fn try_from_json(data: &EquityForwardData) -> Result<Box<Self>, RustyQLibError> {
         let today = Local::now().date_naive();
         let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
-            .expect("Invalid maturity date");
+            .map_err(|_| RustyQLibError::invalid_input(
+                "maturity",
+                format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
+            ))?;
 
         let underlying_price = Quote::new(data.base.underlying_price);
-        let quote = Some(data.entry_price).unwrap();
-        let entry_quote = Quote::new(quote.unwrap_or(0.0));
+        let entry_quote = Quote::new(data.entry_price.unwrap_or(0.0));
         let risk_free_rate = data.base.risk_free_rate.unwrap_or(0.0);
         let dividend = data.dividend.unwrap_or(0.0);
         let long_short = data.base.long_short.unwrap_or(1);
@@ -48,7 +55,7 @@ impl EquityForward  {
             -1=>LongShort::SHORT,
             _=>LongShort::LONG,
         };
-        Box::new(Self {
+        Ok(Box::new(Self {
             symbol:data.base.symbol.clone(),
             currency: data.base.currency.clone(),
             exchange:data.base.exchange.clone(),
@@ -67,7 +74,7 @@ impl EquityForward  {
             valuation_date: today,
             notional:data.notional.unwrap_or(1.0),
             long_short:position
-        })
+        }))
     }
 
     fn time_to_maturity(&self) -> f64 {
@@ -85,15 +92,14 @@ impl EquityForward  {
     }
 }
 impl Instrument for EquityForward {
-    fn npv(&self) -> f64 {
+    fn try_npv(&self) -> Result<f64, crate::core::errors::RustyQLibError> {
         // e −r(T−t) (Ft −K),
         let df_r = 1.0/(self.risk_free_rate*self.time_to_maturity()).exp();
         let share = self.notional/self.forward_price.value();
-        match self.long_short{
+        Ok(match self.long_short{
             LongShort::LONG => (self.forward()-self.forward_price.value()) * share *df_r,
             LongShort::SHORT => -(self.forward()-self.forward_price.value()) * share *df_r,
-        }
-
+        })
     }
 }
 

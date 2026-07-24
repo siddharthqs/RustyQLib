@@ -2,6 +2,7 @@
 //! scheme for strike x expiry volatility grids.
 
 use super::linear::bracket;
+use crate::core::errors::RustyQLibError;
 
 /// A rectangular grid `z[i][j]` sampled at `(xs[i], ys[j])`, both axes
 /// strictly increasing. Queries outside the grid are clamped (flat
@@ -14,15 +15,15 @@ pub struct BilinearGrid {
 }
 
 impl BilinearGrid {
-    pub fn new(xs: &[f64], ys: &[f64], z: &[Vec<f64>]) -> Result<Self, String> {
+    pub fn new(xs: &[f64], ys: &[f64], z: &[Vec<f64>]) -> Result<Self, RustyQLibError> {
         if xs.len() < 2 || ys.len() < 2 {
-            return Err("need at least a 2 x 2 grid".into());
+            return Err(RustyQLibError::invalid_input("bilinear", "need at least a 2 x 2 grid"));
         }
         if xs.windows(2).any(|w| w[1] <= w[0]) || ys.windows(2).any(|w| w[1] <= w[0]) {
-            return Err("grid axes must be strictly increasing".into());
+            return Err(RustyQLibError::invalid_input("bilinear", "grid axes must be strictly increasing"));
         }
         if z.len() != xs.len() || z.iter().any(|row| row.len() != ys.len()) {
-            return Err("z must be an xs.len() x ys.len() matrix".into());
+            return Err(RustyQLibError::invalid_input("bilinear", "z must be an xs.len() x ys.len() matrix"));
         }
         Ok(BilinearGrid { xs: xs.to_vec(), ys: ys.to_vec(), z: z.to_vec() })
     }

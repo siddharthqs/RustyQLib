@@ -40,6 +40,7 @@ use serde::Deserialize;
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::utils::PayoffType;
 use crate::equity::vanilla_option::EquityOption;
+use crate::core::errors::RustyQLibError;
 
 /// How a shock size is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -98,34 +99,34 @@ pub struct StressConfig {
 
 impl StressConfig {
     /// Parse from TOML text.
-    pub fn from_toml_str(text: &str) -> Result<StressConfig, String> {
+    pub fn from_toml_str(text: &str) -> Result<StressConfig, RustyQLibError> {
         let config: StressConfig =
-            toml::from_str(text).map_err(|e| format!("invalid stress config: {e}"))?;
+            toml::from_str(text).map_err(|e| RustyQLibError::ParseError(format!("invalid stress config: {e}")))?;
         config.validate()?;
         Ok(config)
     }
 
     /// Load and parse a TOML file.
-    pub fn from_toml_file(path: &str) -> Result<StressConfig, String> {
+    pub fn from_toml_file(path: &str) -> Result<StressConfig, RustyQLibError> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read stress config '{path}': {e}"))?;
+            .map_err(|e| RustyQLibError::ParseError(format!("cannot read stress config '{path}': {e}")))?;
         Self::from_toml_str(&text)
     }
 
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), RustyQLibError> {
         if self.scenarios.is_empty() {
-            return Err("stress config has no scenarios".into());
+            return Err(RustyQLibError::ParseError("stress config has no scenarios".to_string()));
         }
         for scenario in &self.scenarios {
             if scenario.shocks.is_empty() {
-                return Err(format!("scenario '{}' has no shocks", scenario.name));
+                return Err(RustyQLibError::ParseError(format!("scenario '{}' has no shocks", scenario.name)));
             }
             for shock in &scenario.shocks {
                 if shock.factor == RiskFactor::Time && shock.mode == BumpMode::Relative {
-                    return Err(format!(
+                    return Err(RustyQLibError::ParseError(format!(
                         "scenario '{}': time shocks must be absolute (days)",
                         scenario.name
-                    ));
+                    )));
                 }
             }
         }

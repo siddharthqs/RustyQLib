@@ -37,6 +37,7 @@ use crate::core::curves::Tenor;
 use crate::core::daycount::DayCountConvention;
 use crate::core::optimization::{levenberg_marquardt, OptimConfig};
 use crate::core::vols::{VolError, VolSurface};
+use crate::core::errors::RustyQLibError;
 
 // ── SVI: one expiry ─────────────────────────────────────────────────────
 
@@ -74,18 +75,18 @@ impl SviParams {
 
     /// Static parameter constraints: `b >= 0`, `|rho| < 1`, `sigma > 0`
     /// and non-negative minimum variance `a + b sigma sqrt(1 - rho^2)`.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
         if self.b < 0.0 {
-            return Err("b must be non-negative".into());
+            return Err(RustyQLibError::invalid_input("svi params", "b must be non-negative"));
         }
         if !(-1.0..1.0).contains(&self.rho) && self.rho != -1.0 {
-            return Err("rho must be in (-1, 1)".into());
+            return Err(RustyQLibError::invalid_input("svi params", "rho must be in (-1, 1)"));
         }
         if self.sigma <= 0.0 {
-            return Err("sigma must be positive".into());
+            return Err(RustyQLibError::invalid_input("svi params", "sigma must be positive"));
         }
         if self.a + self.b * self.sigma * (1.0 - self.rho * self.rho).sqrt() < 0.0 {
-            return Err("minimum total variance is negative".into());
+            return Err(RustyQLibError::invalid_input("svi params", "minimum total variance is negative"));
         }
         Ok(())
     }
@@ -240,34 +241,34 @@ impl Ssvi {
     /// sufficient condition `eta (1 + |rho|) <= 2`, and the per-pillar
     /// butterfly bounds `theta phi (1 + |rho|) <= 4` and
     /// `theta phi^2 (1 + |rho|) <= 4`.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
         if !(-1.0..1.0).contains(&self.rho) {
-            return Err("rho must be in (-1, 1)".into());
+            return Err(RustyQLibError::invalid_input("svi params", "rho must be in (-1, 1)"));
         }
         if self.eta <= 0.0 {
-            return Err("eta must be positive".into());
+            return Err(RustyQLibError::invalid_input("svi params", "eta must be positive"));
         }
         if !(0.0..=1.0).contains(&self.gamma) || self.gamma == 0.0 {
-            return Err("gamma must be in (0, 1]".into());
+            return Err(RustyQLibError::invalid_input("svi params", "gamma must be in (0, 1]"));
         }
         if self.theta_pillars.is_empty() {
-            return Err("need at least one theta pillar".into());
+            return Err(RustyQLibError::invalid_input("svi params", "need at least one theta pillar"));
         }
         if self.theta_pillars.iter().any(|&(t, w)| t <= 0.0 || w <= 0.0) {
-            return Err("theta pillars must have positive times and variances".into());
+            return Err(RustyQLibError::invalid_input("svi params", "theta pillars must have positive times and variances"));
         }
         if self.theta_pillars.windows(2).any(|p| p[1].0 <= p[0].0 || p[1].1 < p[0].1) {
-            return Err("theta pillars must be increasing in time and nondecreasing in variance (calendar arbitrage)".into());
+            return Err(RustyQLibError::invalid_input("svi params", "theta pillars must be increasing in time and nondecreasing in variance (calendar arbitrage)"));
         }
         if self.eta * (1.0 + self.rho.abs()) > 2.0 {
-            return Err("eta (1 + |rho|) must not exceed 2 (static arbitrage)".into());
+            return Err(RustyQLibError::invalid_input("svi params", "eta (1 + |rho|) must not exceed 2 (static arbitrage)"));
         }
         for &(_, theta) in &self.theta_pillars {
             let phi = self.phi(theta);
             if theta * phi * (1.0 + self.rho.abs()) > 4.0
                 || theta * phi * phi * (1.0 + self.rho.abs()) > 4.0
             {
-                return Err("butterfly bound violated at a theta pillar".into());
+                return Err(RustyQLibError::invalid_input("svi params", "butterfly bound violated at a theta pillar"));
             }
         }
         Ok(())

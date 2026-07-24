@@ -7,6 +7,7 @@
 //! with an enum value.
 
 use super::{bisection, halley, newton_raphson, newton_safeguarded, secant};
+use crate::core::errors::RustyQLibError;
 
 /// Result of a 1-D root search.
 #[derive(Debug, Clone, Copy)]
@@ -42,7 +43,7 @@ impl Solver1d {
     // ── direct calls (method fixed at the call site) ────────────────────
 
     /// [Bisection](bisection::bisection) on a sign-changing bracket.
-    pub fn bisection(&self, f: impl Fn(f64) -> f64, lo: f64, hi: f64) -> Result<Root, String> {
+    pub fn bisection(&self, f: impl Fn(f64) -> f64, lo: f64, hi: f64) -> Result<Root, RustyQLibError> {
         bisection::bisection(self, f, lo, hi)
     }
 
@@ -93,7 +94,7 @@ impl Solver1d {
     /// finite differences, so Newton/Halley run on derivative-free
     /// problems too. `Bisection` and `NewtonSafeguarded` require a
     /// bracket and error without one.
-    pub fn solve(&self, method: Method, problem: &Problem) -> Result<Root, String> {
+    pub fn solve(&self, method: Method, problem: &Problem) -> Result<Root, RustyQLibError> {
         let f = |x: f64| (problem.f)(x);
         let df = |x: f64| match problem.df {
             Some(df) => df(x),
@@ -106,7 +107,7 @@ impl Solver1d {
         let bracket = |name: &str| {
             problem
                 .bracket
-                .ok_or_else(|| format!("{name} needs a bracket: use Problem::with_bracket"))
+                .ok_or_else(|| RustyQLibError::NumericalError(format!("{name} needs a bracket: use Problem::with_bracket")))
         };
         match method {
             Method::Bisection => {

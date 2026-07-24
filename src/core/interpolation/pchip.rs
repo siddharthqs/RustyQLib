@@ -3,6 +3,7 @@
 //! wherever the data are, so it never overshoots or invents wiggles the
 //! way an unconstrained cubic spline can. The safe choice for curves
 //! that must stay monotone (discount factors, CDFs) or non-negative.
+use crate::core::errors::RustyQLibError;
 
 /// A monotonicity-preserving cubic Hermite interpolant.
 #[derive(Debug, Clone)]
@@ -14,13 +15,13 @@ pub struct Pchip {
 }
 
 impl Pchip {
-    pub fn new(xs: &[f64], ys: &[f64]) -> Result<Self, String> {
+    pub fn new(xs: &[f64], ys: &[f64]) -> Result<Self, RustyQLibError> {
         let n = xs.len();
         if n < 2 || ys.len() != n {
-            return Err("need at least two knots with matching y values".into());
+            return Err(RustyQLibError::invalid_input("pchip", "need at least two knots with matching y values"));
         }
         if xs.windows(2).any(|w| w[1] <= w[0]) {
-            return Err("knots must be strictly increasing".into());
+            return Err(RustyQLibError::invalid_input("pchip", "knots must be strictly increasing"));
         }
         let h: Vec<f64> = xs.windows(2).map(|w| w[1] - w[0]).collect();
         let delta: Vec<f64> =

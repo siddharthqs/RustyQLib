@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::traits::Instrument;
 use crate::core::utils::norm_cdf;
 use crate::core::vols::{VolInput, VolSurface};
+use crate::core::errors::RustyQLibError;
 
 /// Annualized realized variance of a log-return series, market
 /// convention (mean **not** subtracted).
@@ -282,17 +283,30 @@ impl VarianceSwap {
             * (self.expected_total_variance() - self.strike_variance)
     }
 
+    /// Build from contract data, panicking on any invalid field. Fallible
+    /// callers should use [`VarianceSwap::try_from_json`].
     pub fn from_json(data: &VarianceSwapData) -> Box<VarianceSwap> {
+        Self::try_from_json(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub fn try_from_json(data: &VarianceSwapData) -> Result<Box<VarianceSwap>, RustyQLibError> {
         let today = Local::now().date_naive();
         let maturity = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
-            .expect("Invalid maturity date");
+            .map_err(|_| RustyQLibError::invalid_input(
+                "maturity",
+                format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
+            ))?;
         let t = (maturity - today).num_days() as f64 / 365.0;
-        assert!(t > 0.0, "variance swap is expired");
+        if t <= 0.0 {
+            return Err(RustyQLibError::invalid_input("maturity", "variance swap is expired"));
+        }
         let q = data.dividend.unwrap_or(0.0);
         let forward = data.underlying_price * ((data.risk_free_rate - q) * t).exp();
-        let surface = data.vol_surface.as_ref().map(|input| {
-            VolSurface::from_input(input, today).expect("invalid vol surface")
-        });
+        let surface = data
+            .vol_surface
+            .as_ref()
+            .map(|input| VolSurface::from_input(input, today))
+            .transpose()?;
         let flat = data.volatility;
         let smile = |k: f64| match &surface {
             Some(s) => s.vol(k, forward, t),
@@ -310,30 +324,41 @@ impl VarianceSwap {
                 data.corridor_high.unwrap_or(f64::INFINITY),
                 smile,
             ),
-            Some(other) => panic!("Invalid swap_type '{other}'"),
+            Some(other) => return Err(RustyQLibError::invalid_input(
+                "swap_type",
+                format!("invalid swap_type '{other}' (use variance, gamma or corridor)"),
+            )),
         };
         let accrued = match (data.elapsed, data.accrued_variance) {
             (Some(e), Some(v)) => {
-                assert!(e >= 0.0 && v >= 0.0);
+                if e < 0.0 || v < 0.0 {
+                    return Err(RustyQLibError::invalid_input(
+                        "accrued_variance",
+                        "elapsed and accrued_variance must be non-negative",
+                    ));
+                }
                 Some((e, v))
             }
             (None, None) => None,
-            _ => panic!("seasoned swaps need both elapsed and accrued_variance"),
+            _ => return Err(RustyQLibError::invalid_input(
+                "accrued_variance",
+                "seasoned swaps need both elapsed and accrued_variance",
+            )),
         };
-        Box::new(VarianceSwap {
+        Ok(Box::new(VarianceSwap {
             notional: data.notional,
             strike_variance: data.strike_vol * data.strike_vol,
             t_remaining: t,
             r: data.risk_free_rate,
             fair_remaining_variance: fair,
             accrued,
-        })
+        }))
     }
 }
 
 impl Instrument for VarianceSwap {
-    fn npv(&self) -> f64 {
-        self.mtm()
+    fn try_npv(&self) -> Result<f64, RustyQLibError> {
+        Ok(self.mtm())
     }
 }
 
