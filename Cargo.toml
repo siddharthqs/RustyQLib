@@ -1,5 +1,5 @@
 [package]
-name = "RustyQLib"
+name = "rustyqlib"
 version = "0.0.2"
 edition = "2021"
 authors = ["Siddharth Singh"]
@@ -48,3 +48,4 @@ ndarray = "0.15"
 assert_approx_eq = "1.1.0"
 rayon = "1.5.1"
 quick-xml = { version = "0.41.0", default-features = false }
+toml = "0.8"
