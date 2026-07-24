@@ -37,7 +37,7 @@ fn base(put_or_call: PutOrCall) -> EquityOptionBuilder {
 }
 
 fn priced(builder: EquityOptionBuilder, engine: Engine) -> EquityOption {
-    builder.engine(engine).build()
+    builder.engine(engine).build().expect("option must build")
 }
 
 fn main() {
@@ -59,7 +59,7 @@ fn main() {
         //             c.sampler = Sampler::PseudoRandom;
         //             c
         //         })
-        //         .build(),
+        //         .build().expect("option must build"),
         // );
     }
 
@@ -68,11 +68,11 @@ fn main() {
     // let european_put = priced(base(PutOrCall::Put), Engine::BlackScholes).npv();
     // common::row(
     //     "Analytical (rejects American)",
-    //     &base(PutOrCall::Put).american().vanilla(PutOrCall::Put).engine(Engine::BlackScholes).build(),
+    //     &base(PutOrCall::Put).american().vanilla(PutOrCall::Put).engine(Engine::BlackScholes).build().expect("option must build"),
     // );
     // common::row(
     //     "Binomial",
-    //     &base(PutOrCall::Put).american().vanilla(PutOrCall::Put).engine(Engine::Binomial).build(),
+    //     &base(PutOrCall::Put).american().vanilla(PutOrCall::Put).engine(Engine::Binomial).build().expect("option must build"),
     // );
     // common::row(
     //     "Finite difference (Brennan-Schwartz)",
@@ -80,7 +80,7 @@ fn main() {
     //         .american()
     //         .vanilla(PutOrCall::Put)
     //         .engine(Engine::FiniteDifference)
-    //         .build(),
+    //         .build().expect("option must build"),
     // );
     // common::row(
     //     "Monte Carlo (Longstaff-Schwartz)",
@@ -89,7 +89,7 @@ fn main() {
     //         .vanilla(PutOrCall::Put)
     //         .engine(Engine::MonteCarlo)
     //         .paths(50_000)
-    //         .build(),
+    //         .build().expect("option must build"),
     // );
     // common::note(&format!("European put for reference: {european_put:.6}"));
     //common::note("FD and MC report true American Greeks (grid / LSMC repricing);");
@@ -104,7 +104,7 @@ fn main() {
     //        .engine(Engine::MonteCarlo)
     //        .model(McModel::LocalVol)
     //        .paths(50_000)
-    //        .build(),
+    //        .build().expect("option must build"),
     //);
     // common::row(
     //     "Heston (vol-of-vol -> 0)",
@@ -118,7 +118,7 @@ fn main() {
     //             rho: 0.0,
     //         })
     //         .paths(50_000)
-    //         .build(),
+    //         .build().expect("option must build"),
     // );
     //common::note("all three must agree: flat surface and zero vol-of-vol are Black-Scholes");
 
@@ -148,8 +148,8 @@ fn main() {
     //
     // common::section("Greeks vs bump-and-reprice (finite difference of the closed form)");
     // let h = 0.01;
-    // let up = base(PutOrCall::Call).spot(SPOT + h).engine(Engine::BlackScholes).build();
-    // let dn = base(PutOrCall::Call).spot(SPOT - h).engine(Engine::BlackScholes).build();
+    // let up = base(PutOrCall::Call).spot(SPOT + h).engine(Engine::BlackScholes).build().expect("option must build");
+    // let dn = base(PutOrCall::Call).spot(SPOT - h).engine(Engine::BlackScholes).build().expect("option must build");
     // common::check("delta", call.delta(), (up.npv() - dn.npv()) / (2.0 * h), 1e-6);
     // common::check(
     //     "gamma",
@@ -188,7 +188,7 @@ fn greek_surfaces() {
                 .years_to_maturity(years)
                 .vanilla(PutOrCall::Put)
                 .engine(Engine::BlackScholes)
-                .build();
+                .build().expect("option must build");
             select(&option)
         }
     };

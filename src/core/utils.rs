@@ -118,6 +118,27 @@ pub struct ContractOutput {
     pub error: Option<String>
 }
 
+impl From<crate::core::results::PricingResult> for ContractOutput {
+    fn from(r: crate::core::results::PricingResult) -> Self {
+        ContractOutput {
+            pv: r.pv,
+            delta: r.greeks.delta,
+            gamma: r.greeks.gamma,
+            vega: r.greeks.vega,
+            theta: r.greeks.theta,
+            rho: r.greeks.rho,
+            vanna: r.greeks.vanna,
+            charm: r.greeks.charm,
+            gamma_p: r.greeks.gamma_p,
+            zomma: r.greeks.zomma,
+            std_err: r.std_err,
+            deltas: None,
+            vegas: None,
+            error: None,
+        }
+    }
+}
+
 impl ContractOutput {
     /// Output for a contract that could not be priced: all figures zero,
     /// with the failure recorded in `error`.

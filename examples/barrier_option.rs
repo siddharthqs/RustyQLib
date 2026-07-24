@@ -54,7 +54,7 @@ fn main() {
     ] {
         common::row(
             &format!("{dir:?}-and-{knock:?} {pc:?} H={level}"),
-            &base().barrier(pc, dir, knock, level).engine(Engine::BlackScholes).build(),
+            &base().barrier(pc, dir, knock, level).engine(Engine::BlackScholes).build().expect("option must build"),
         );
     }
 
@@ -71,22 +71,22 @@ fn main() {
             &base()
                 .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 90.0)
                 .engine(engine)
-                .build(),
+                .build().expect("option must build"),
         );
     }
     common::note("MC applies a bridge crossing correction, so monitoring is effectively continuous");
 
     common::section("In-out parity: KI + KO = vanilla");
-    let vanilla = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build();
+    let vanilla = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build");
     for level in [80.0, 90.0, 99.0] {
         let ki = base()
             .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::In, level)
             .engine(Engine::BlackScholes)
-            .build();
+            .build().expect("option must build");
         let ko = base()
             .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, level)
             .engine(Engine::BlackScholes)
-            .build();
+            .build().expect("option must build");
         common::check(
             &format!("H={level}: KI + KO"),
             ki.npv() + ko.npv(),
@@ -113,7 +113,7 @@ fn main() {
         base()
             .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, SPOT)
             .engine(Engine::BlackScholes)
-            .build()
+            .build().expect("option must build")
             .npv(),
         0.0,
         1e-12,
@@ -127,7 +127,7 @@ fn main() {
             &base()
                 .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, level)
                 .engine(Engine::BlackScholes)
-                .build(),
+                .build().expect("option must build"),
         );
     }
     common::note("value decreases as the barrier approaches spot; delta can exceed 1 near it");
@@ -152,7 +152,7 @@ fn main() {
             .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 90.0)
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Local vol (skewed surface)",
@@ -162,7 +162,7 @@ fn main() {
             .engine(Engine::MonteCarlo)
             .model(McModel::LocalVol)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::note("downside skew raises the knock-out probability, lowering the price");
     println!();

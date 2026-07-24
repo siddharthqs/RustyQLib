@@ -1,5 +1,6 @@
 use chrono::NaiveDate;
 use crate::core::errors::RustyQLibError;
+use crate::core::results::PricingResult;
 use crate::rates::utils::DayCountConvention;
 use crate::rates::utils::TermStructure;
 
@@ -18,24 +19,15 @@ pub trait Instrument {
             Err(e) => panic!("{e}"),
         }
     }
-}
 
-pub trait Greeks{
-    fn delta(&self) -> f64;
-    fn gamma(&self) -> f64;
-    fn vega(&self) -> f64;
-    fn theta(&self) -> f64;
-    fn rho(&self) -> f64;
-    /// Change in delta for a one-unit change in implied volatility,
-    /// `d²V / (dS dσ)`.
-    fn vanna(&self) -> f64;
-    /// Change in delta as calendar time passes, `d²V / (dS dt)`.
-    fn charm(&self) -> f64;
-    /// Delta elasticity: the percentage change in delta for a percentage
-    /// change in the underlying, `S * gamma / delta`.
-    fn gamma_p(&self) -> f64;
-    /// Zomma, the change in gamma per unit change in implied volatility.
-    fn zomma(&self) -> f64;
+    /// Price the instrument once, returning value, Greeks and (for Monte
+    /// Carlo engines) the standard error together in a [`PricingResult`].
+    ///
+    /// The default implementation reports the present value with zero
+    /// Greeks; instruments that compute sensitivities override it.
+    fn price(&self) -> Result<PricingResult, RustyQLibError> {
+        Ok(PricingResult::from_pv(self.try_npv()?))
+    }
 }
 
 

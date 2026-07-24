@@ -207,13 +207,6 @@ impl Accumulator {
         mean_std_err(sum, sum_sq, self.paths)
     }
 
-    pub fn price(&self) -> f64 {
-        match self.pricer {
-            AccumulatorPricer::Analytical => self.analytic_npv(),
-            AccumulatorPricer::MonteCarlo => self.mc_npv().0,
-        }
-    }
-
     /// Build from contract data, panicking on any invalid field. Fallible
     /// callers should use [`Accumulator::try_from_json`].
     pub fn from_json(data: &AccumulatorData) -> Box<Accumulator> {
@@ -272,7 +265,18 @@ impl Accumulator {
 
 impl Instrument for Accumulator {
     fn try_npv(&self) -> Result<f64, RustyQLibError> {
-        Ok(self.price())
+        Ok(self.price()?.pv)
+    }
+
+    fn price(&self) -> Result<crate::core::results::PricingResult, RustyQLibError> {
+        let (pv, std_err) = match self.pricer {
+            AccumulatorPricer::Analytical => (self.analytic_npv(), None),
+            AccumulatorPricer::MonteCarlo => {
+                let (pv, se) = self.mc_npv();
+                (pv, Some(se))
+            }
+        };
+        Ok(crate::core::results::PricingResult { pv, greeks: Default::default(), std_err })
     }
 }
 

@@ -16,7 +16,6 @@ use crate::cmdty::cmdty_option;
 use crate::core::traits::{Instrument, Rates};
 use crate::core::utils::{Contract,CombinedContract, ContractOutput, Contracts, OutputJson,EngineType};
 use crate::core::utils::ContractStyle;
-use crate::core::traits::Greeks;
 use std::io::Write;
 use std::env::temp_dir;
 //use crate::read_csv::read_ts;

@@ -8,7 +8,7 @@ use crate::equity::asian::{AsianStrikeType, AveragingType};
 use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::heston;
 use super::super::core::quotes::Quote;
-use super::super::core::traits::{Instrument,Greeks};
+use super::super::core::traits::Instrument;
 use super::blackscholes;
 use crate::equity::utils::{Engine, PayoffType, Payoff, LongShort};
 use crate::core::trade::{PutOrCall,Transection};
@@ -18,6 +18,7 @@ use serde::Deserialize;
 use blackscholes::BlackScholesPricer;
 use crate::core::data_models::EquityOptionData;
 use crate::core::errors::RustyQLibError;
+use crate::core::results::PricingResult;
 
 #[derive(Debug)]
 pub struct VanillaPayoff {
@@ -807,8 +808,10 @@ impl EquityOption {
 }
 
 
-impl Instrument for EquityOption  {
-    fn try_npv(&self) -> Result<f64, RustyQLibError> {
+impl EquityOption {
+    /// Reject engine/model/payoff combinations the library cannot price,
+    /// with an error naming the engine that can.
+    pub(crate) fn check_engine_support(&self) -> Result<(), RustyQLibError> {
         let unsupported = |msg: &str| Err(RustyQLibError::UnsupportedEngine(msg.to_string()));
         let american = matches!(self.payoff.exercise_style(), ContractStyle::American);
         if self.base.is_futures_option() {
@@ -852,47 +855,73 @@ impl Instrument for EquityOption  {
             );
         }
         match self.engine {
-            Engine::BlackScholes => {
-                if american {
-                    return unsupported(
-                        "Analytical engine cannot price American exercise; \
-                         use Binomial, FiniteDifference or MonteCarlo",
-                    );
-                }
-                if heston {
-                    Ok(heston::analytic_npv(&self))
-                } else {
-                    Ok(BlackScholesPricer::new().npv(&self))
-                }
-            }
-            Engine::MonteCarlo => Ok(montecarlo::npv(&self)),
-            Engine::Binomial => Ok(binomial::npv(&self)),
-            Engine::FiniteDifference => Ok(finite_difference::npv(&self)),
-            Engine::BaroneAdesiWhaley => {
+            Engine::BlackScholes if american => unsupported(
+                "Analytical engine cannot price American exercise; \
+                 use Binomial, FiniteDifference or MonteCarlo",
+            ),
+            Engine::BaroneAdesiWhaley | Engine::BjerksundStensland => {
+                let name = match self.engine {
+                    Engine::BaroneAdesiWhaley => "Barone-Adesi-Whaley",
+                    _ => "Bjerksund-Stensland",
+                };
                 if !matches!(self.payoff.payoff_kind(), PayoffType::Vanilla) {
-                    return unsupported("Barone-Adesi-Whaley approximates vanilla options only");
+                    return Err(RustyQLibError::UnsupportedEngine(format!(
+                        "{name} approximates vanilla options only"
+                    )));
                 }
                 if heston {
-                    return unsupported(
-                        "Barone-Adesi-Whaley assumes constant-vol Black-Scholes dynamics, \
-                         not Heston",
-                    );
+                    return Err(RustyQLibError::UnsupportedEngine(format!(
+                        "{name} assumes constant-vol Black-Scholes dynamics, not Heston"
+                    )));
                 }
-                Ok(baw::npv(&self))
+                Ok(())
             }
-            Engine::BjerksundStensland => {
-                if !matches!(self.payoff.payoff_kind(), PayoffType::Vanilla) {
-                    return unsupported("Bjerksund-Stensland approximates vanilla options only");
-                }
-                if heston {
-                    return unsupported(
-                        "Bjerksund-Stensland assumes constant-vol Black-Scholes dynamics, \
-                         not Heston",
-                    );
-                }
-                Ok(bjerksund_stensland::npv(&self))
-            }
+            _ => Ok(()),
         }
+    }
+}
+
+impl Instrument for EquityOption  {
+    fn try_npv(&self) -> Result<f64, RustyQLibError> {
+        self.check_engine_support()?;
+        let heston = self.mc.model == montecarlo::McModel::Heston;
+        Ok(match self.engine {
+            Engine::BlackScholes if heston => heston::analytic_npv(&self),
+            Engine::BlackScholes => BlackScholesPricer::new().npv(&self),
+            Engine::MonteCarlo => montecarlo::npv(&self),
+            Engine::Binomial => binomial::npv(&self),
+            Engine::FiniteDifference => finite_difference::npv(&self),
+            Engine::BaroneAdesiWhaley => baw::npv(&self),
+            Engine::BjerksundStensland => bjerksund_stensland::npv(&self),
+        })
+    }
+
+    /// Value, all nine Greeks, and (on the Monte Carlo engine) the
+    /// standard error, from one call.
+    fn price(&self) -> Result<PricingResult, RustyQLibError> {
+        self.check_engine_support()?;
+        let (pv, std_err) = match self.engine {
+            Engine::MonteCarlo => {
+                let stats = montecarlo::npv_with_stats(self);
+                (stats.pv, Some(stats.std_err))
+            }
+            _ => (self.try_npv()?, None),
+        };
+        Ok(PricingResult {
+            pv,
+            greeks: crate::core::results::Greeks {
+                delta: self.delta(),
+                gamma: self.gamma(),
+                vega: self.vega(),
+                theta: self.theta(),
+                rho: self.rho(),
+                vanna: self.vanna(),
+                charm: self.charm(),
+                gamma_p: self.gamma_p(),
+                zomma: self.zomma(),
+            },
+            std_err,
+        })
     }
 }
 

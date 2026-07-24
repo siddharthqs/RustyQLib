@@ -42,7 +42,7 @@ fn main() {
         &base()
             .asian(PutOrCall::Call, AveragingType::Geometric, AsianStrikeType::FixedStrike)
             .engine(Engine::BlackScholes)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Geometric, Monte Carlo",
@@ -50,14 +50,14 @@ fn main() {
             .asian(PutOrCall::Call, AveragingType::Geometric, AsianStrikeType::FixedStrike)
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Arithmetic, Turnbull-Wakeman",
         &base()
             .asian(PutOrCall::Call, AveragingType::Arithmetic, AsianStrikeType::FixedStrike)
             .engine(Engine::BlackScholes)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Arithmetic, MC + geometric CV",
@@ -65,7 +65,7 @@ fn main() {
             .asian(PutOrCall::Call, AveragingType::Arithmetic, AsianStrikeType::FixedStrike)
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
 
     common::section("Control variate effect (same path count)");
@@ -74,7 +74,7 @@ fn main() {
         .asian(PutOrCall::Call, AveragingType::Arithmetic, AsianStrikeType::FixedStrike)
         .engine(Engine::MonteCarlo)
         .paths(20_000)
-        .build();
+        .build().expect("option must build");
     let without_cv = base()
         .asian(PutOrCall::Call, AveragingType::Arithmetic, AsianStrikeType::FixedStrike)
         .engine(Engine::MonteCarlo)
@@ -87,7 +87,7 @@ fn main() {
             c.time_steps = 100;
             c
         })
-        .build();
+        .build().expect("option must build");
     common::row("with geometric control variate", &with_cv);
     common::row("without (Euler path route)", &without_cv);
     common::note("compare the std err column: the CV collapses the variance");
@@ -101,19 +101,19 @@ fn main() {
                 .asian(pc, AveragingType::Arithmetic, AsianStrikeType::FloatingStrike)
                 .engine(Engine::MonteCarlo)
                 .paths(50_000)
-                .build(),
+                .build().expect("option must build"),
         );
         common::row(
             &format!("Analytic (unsupported), {pc:?}"),
             &base()
                 .asian(pc, AveragingType::Arithmetic, AsianStrikeType::FloatingStrike)
                 .engine(Engine::BlackScholes)
-                .build(),
+                .build().expect("option must build"),
         );
     }
 
     common::section("Orderings and limits");
-    let vanilla = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().npv();
+    let vanilla = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build").npv();
     let geo = geometric_asian_price(SPOT, STRIKE, RATE, DIV, VOL, 1.0, None, PutOrCall::Call);
     let arith = turnbull_wakeman_price(SPOT, STRIKE, RATE, DIV, VOL, 1.0, PutOrCall::Call);
     println!("  geometric {geo:.6} < arithmetic {arith:.6} < vanilla {vanilla:.6}");

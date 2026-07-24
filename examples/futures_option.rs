@@ -32,7 +32,7 @@ fn futures_option(pc: PutOrCall, settlement: FuturesSettlement) -> EquityOption 
         .vanilla(pc)
         .on_future(settlement)
         .engine(Engine::BlackScholes)
-        .build()
+        .build().expect("option must build")
 }
 
 fn main() {
@@ -97,7 +97,7 @@ fn main() {
                 .vanilla(PutOrCall::Put)
                 .on_future(FuturesSettlement::Discounted)
                 .engine(Engine::BlackScholes)
-                .build(),
+                .build().expect("option must build"),
         );
     }
     println!();

@@ -296,6 +296,8 @@ use rustyqlib::equity::utils::Engine;
 use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::Instrument;
 
+// build() validates every input and the engine/payoff combination:
+// an option that builds is guaranteed to price
 let option = EquityOptionBuilder::new()
     .spot(100.0)
     .strike(100.0)
@@ -305,12 +307,17 @@ let option = EquityOptionBuilder::new()
     .years_to_maturity(1.0)
     .vanilla(PutOrCall::Call)
     .engine(Engine::FiniteDifference)
-    .build();
+    .build()?;
 
+// one call returns value, all Greeks and (on MC engines) the std error
+let result = option.price()?;
 println!(
     "pv {:.6}  delta {:.4}  vanna {:.4}  charm {:.4}",
-    option.npv(), option.delta(), option.vanna(), option.charm()
+    result.pv, result.greeks.delta, result.greeks.vanna, result.greeks.charm
 );
+
+// ...or use the per-Greek accessors individually
+println!("npv {:.6}  gamma {:.4}", option.npv(), option.gamma());
 ```
 
 ...or deserialize the same JSON the CLI consumes:
@@ -345,7 +352,12 @@ the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo
   `UnsupportedEngine`, `CalibrationFailed` with iterations and residual,
   `NumericalError`, `ParseError`). Pricing is fallible via
   `Instrument::try_npv()` / `try_from_json()`; the infallible `npv()` /
-  `from_json()` remain as conveniences for validated instruments. Batch
+  `from_json()` remain as conveniences for validated instruments.
+  `Instrument::price()` returns a structured `PricingResult { pv, greeks,
+  std_err }` — value, all nine Greeks and the Monte Carlo standard error
+  from a single call. `EquityOptionBuilder::build()` validates every field
+  and the engine/payoff combination up front, so an option that builds is
+  guaranteed to price — and setter order never matters. Batch
   pricing reports failures per contract in the output's `error` field and
   keeps going instead of aborting the file.
 

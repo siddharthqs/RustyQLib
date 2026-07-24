@@ -240,16 +240,6 @@ impl Cliquet {
 
     /// Price with the configured engine (analytic falls back to Monte
     /// Carlo when global constraints or Heston dynamics require it).
-    pub fn price(&self) -> f64 {
-        match self.pricer {
-            CliquetPricer::Analytical => match self.analytic_npv() {
-                Ok(v) => v,
-                Err(_) => self.mc_npv().0,
-            },
-            CliquetPricer::MonteCarlo => self.mc_npv().0,
-        }
-    }
-
     /// Build from contract data, panicking on any invalid field. Fallible
     /// callers should use [`Cliquet::try_from_json`].
     pub fn from_json(data: &CliquetOptionData) -> Box<Cliquet> {
@@ -326,7 +316,28 @@ impl Cliquet {
 
 impl Instrument for Cliquet {
     fn try_npv(&self) -> Result<f64, RustyQLibError> {
-        Ok(self.price())
+        Ok(self.price()?.pv)
+    }
+
+    /// Analytic where the payoff permits (falling back to Monte Carlo
+    /// otherwise, mirroring the documented pricing policy); the standard
+    /// error is reported whenever a simulation produced the value.
+    fn price(&self) -> Result<crate::core::results::PricingResult, RustyQLibError> {
+        let (pv, std_err) = match self.pricer {
+            CliquetPricer::Analytical => match self.analytic_npv() {
+                Ok(v) => (v, None),
+                Err(_) => {
+                    let (pv, se) = self.mc_npv();
+                    (pv, Some(se))
+                }
+            },
+            CliquetPricer::MonteCarlo => {
+                let (pv, se) = self.mc_npv();
+                (pv, Some(se))
+            }
+        };
+        // the return-based payoff is spot-homogeneous: no spot Greeks
+        Ok(crate::core::results::PricingResult { pv, greeks: Default::default(), std_err })
     }
 }
 

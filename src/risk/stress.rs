@@ -300,7 +300,7 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(pc)
             .engine(Engine::BlackScholes)
-            .build()
+            .build().expect("option must build")
     }
 
     fn book() -> EquityPortfolio {

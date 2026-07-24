@@ -372,7 +372,7 @@ mod tests {
                 .american()
                 .vanilla(PutOrCall::Put)
                 .engine(engine)
-                .build()
+                .build().expect("option must build")
         };
         let euro = EquityOptionBuilder::new()
             .symbol("ACME")
@@ -385,7 +385,7 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
             .vanilla(PutOrCall::Put)
             .engine(Engine::BlackScholes)
-            .build();
+            .build().expect("option must build");
 
         let baw_opt = build(Engine::BaroneAdesiWhaley);
         let tree = build(Engine::Binomial);

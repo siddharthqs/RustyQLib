@@ -41,11 +41,11 @@ fn contract() -> EquityOptionBuilder {
 }
 
 fn american(put_or_call: PutOrCall, engine: Engine) -> EquityOption {
-    contract().american().vanilla(put_or_call).engine(engine).build()
+    contract().american().vanilla(put_or_call).engine(engine).build().expect("option must build")
 }
 
 fn european(put_or_call: PutOrCall) -> EquityOption {
-    contract().vanilla(put_or_call).engine(Engine::BlackScholes).build()
+    contract().vanilla(put_or_call).engine(Engine::BlackScholes).build().expect("option must build")
 }
 
 fn main() {
@@ -59,7 +59,7 @@ fn main() {
         common::row("Binomial (CRR tree)", &american(pc, Engine::Binomial));
         common::row("Finite difference (Brennan-Schwartz)", &american(pc, Engine::FiniteDifference));
         common::row("Monte Carlo (Longstaff-Schwartz)",
-            &contract().american().vanilla(pc).engine(Engine::MonteCarlo).paths(50_000).build());
+            &contract().american().vanilla(pc).engine(Engine::MonteCarlo).paths(50_000).build().expect("option must build"));
         // the analytic Black-Scholes engine has no American method and says so
         common::row("Black-Scholes (rejects American)", &american(pc, Engine::BlackScholes));
 
@@ -80,17 +80,17 @@ fn main() {
     common::table_header();
     for k in [80.0, 90.0, 100.0, 110.0, 120.0] {
         let baw_opt = contract().strike(k).american().vanilla(PutOrCall::Put)
-            .engine(Engine::BaroneAdesiWhaley).build();
+            .engine(Engine::BaroneAdesiWhaley).build().expect("option must build");
         common::row(&format!("BAW    put K={k}"), &baw_opt);
     }
     for k in [80.0, 90.0, 100.0, 110.0, 120.0] {
         let bs = contract().strike(k).american().vanilla(PutOrCall::Put)
-            .engine(Engine::BjerksundStensland).build();
+            .engine(Engine::BjerksundStensland).build().expect("option must build");
         common::row(&format!("BS2002 put K={k}"), &bs);
     }
     for k in [80.0, 90.0, 100.0, 110.0, 120.0] {
         let tree = contract().strike(k).american().vanilla(PutOrCall::Put)
-            .engine(Engine::Binomial).build();
+            .engine(Engine::Binomial).build().expect("option must build");
         common::row(&format!("tree   put K={k}"), &tree);
     }
     common::note("BS2002 uses a feasible two-step exercise boundary, so it is a lower");
@@ -144,12 +144,12 @@ fn main() {
         .symbol("ACME").spot(SPOT).strike(STRIKE).flat_vol(VOL).flat_rate(RATE)
         .dividend_yield(0.0)
         .valuation_date(asof()).maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
-        .american().vanilla(PutOrCall::Call).engine(Engine::BaroneAdesiWhaley).build();
+        .american().vanilla(PutOrCall::Call).engine(Engine::BaroneAdesiWhaley).build().expect("option must build");
     let euro_call = EquityOptionBuilder::new()
         .symbol("ACME").spot(SPOT).strike(STRIKE).flat_vol(VOL).flat_rate(RATE)
         .dividend_yield(0.0)
         .valuation_date(asof()).maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
-        .vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build();
+        .vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build");
     common::check("non-dividend American call = European", call_no_div.npv(), euro_call.npv(), 1e-9);
     println!();
 }

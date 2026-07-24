@@ -331,7 +331,7 @@ mod tests {
                 .american()
                 .vanilla(PutOrCall::Put)
                 .engine(engine)
-                .build()
+                .build().expect("option must build")
         };
         let bs2002 = build(Engine::BjerksundStensland);
         let tree = build(Engine::Binomial);

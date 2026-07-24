@@ -39,7 +39,7 @@ fn option(put_or_call: PutOrCall, strike: f64, months: u32) -> EquityOption {
         .maturity_date(maturity)
         .vanilla(put_or_call)
         .engine(Engine::BlackScholes)
-        .build()
+        .build().expect("option must build")
 }
 
 fn print_attribution(a: &PnlAttribution) {

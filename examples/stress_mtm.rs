@@ -24,7 +24,7 @@ fn option(pc: PutOrCall, strike: f64, months: u32) -> rustyqlib::equity::vanilla
         .maturity_date(NaiveDate::from_ymd_opt(2026, 1 + months, 1).unwrap())
         .vanilla(pc)
         .engine(Engine::BlackScholes)
-        .build()
+        .build().expect("option must build")
 }
 
 fn main() {

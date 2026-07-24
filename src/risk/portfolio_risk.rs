@@ -154,7 +154,7 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
             .vanilla(pc)
             .engine(qty_engine)
-            .build()
+            .build().expect("option must build")
     }
 
     fn book(positions: &[(PutOrCall, f64, f64)]) -> EquityPortfolio {

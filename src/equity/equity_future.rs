@@ -106,6 +106,14 @@ impl Instrument for EquityFuture {
     fn try_npv(&self) -> Result<f64, RustyQLibError> {
         Ok(self.pnl())
     }
+
+    fn price(&self) -> Result<crate::core::results::PricingResult, RustyQLibError> {
+        Ok(crate::core::results::PricingResult {
+            pv: self.try_npv()?,
+            greeks: crate::core::results::Greeks { delta: self.delta(), ..Default::default() },
+            std_err: None,
+        })
+    }
 }
 impl EquityFuture{
     pub fn delta(&self) -> f64 { 1.0 }

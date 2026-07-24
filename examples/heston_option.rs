@@ -53,16 +53,16 @@ fn main() {
     for pc in [PutOrCall::Call, PutOrCall::Put] {
         common::row(
             &format!("Analytical (char. function), {pc:?}"),
-            &base().vanilla(pc).engine(Engine::BlackScholes).build(),
+            &base().vanilla(pc).engine(Engine::BlackScholes).build().expect("option must build"),
         );
         common::row(
             &format!("Monte Carlo (full-trunc Euler), {pc:?}"),
-            &base().vanilla(pc).engine(Engine::MonteCarlo).paths(100_000).build(),
+            &base().vanilla(pc).engine(Engine::MonteCarlo).paths(100_000).build().expect("option must build"),
         );
     }
     common::row(
         "Finite difference (unsupported)",
-        &base().vanilla(PutOrCall::Call).engine(Engine::FiniteDifference).build(),
+        &base().vanilla(PutOrCall::Call).engine(Engine::FiniteDifference).build().expect("option must build"),
     );
     common::note("MC vega/theta bump sqrt(v0) and sqrt(theta) in parallel");
 
@@ -73,7 +73,7 @@ fn main() {
         &base()
             .binary(PutOrCall::Call, BinaryType::CashOrNothing, 1.0)
             .engine(Engine::BlackScholes)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Cash-or-nothing call (MC)",
@@ -81,14 +81,14 @@ fn main() {
             .binary(PutOrCall::Call, BinaryType::CashOrNothing, 1.0)
             .engine(Engine::MonteCarlo)
             .paths(100_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Asset-or-nothing call (analytic)",
         &base()
             .binary(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0)
             .engine(Engine::BlackScholes)
-            .build(),
+            .build().expect("option must build"),
     );
 
     common::section("Path-dependent payoffs (Monte Carlo only)");
@@ -99,7 +99,7 @@ fn main() {
             .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 85.0)
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Down-and-in put H=85",
@@ -107,22 +107,22 @@ fn main() {
             .barrier(PutOrCall::Put, BarrierDirection::Down, KnockType::In, 85.0)
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
 
     common::section("Identities");
-    let call = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build();
-    let put = base().vanilla(PutOrCall::Put).engine(Engine::BlackScholes).build();
+    let call = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build");
+    let put = base().vanilla(PutOrCall::Put).engine(Engine::BlackScholes).build().expect("option must build");
     let parity = SPOT * (-DIV * 1.0_f64).exp() - STRIKE * (-RATE * 1.0_f64).exp();
     common::check("put-call parity", call.npv() - put.npv(), parity, 1e-10);
     let asset = base()
         .binary(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0)
         .engine(Engine::BlackScholes)
-        .build();
+        .build().expect("option must build");
     let k_cash = base()
         .binary(PutOrCall::Call, BinaryType::CashOrNothing, STRIKE)
         .engine(Engine::BlackScholes)
-        .build();
+        .build().expect("option must build");
     common::check("vanilla = asset digital - K cash digitals", call.npv(), asset.npv() - k_cash.npv(), 1e-10);
     common::check(
         "vol-of-vol -> 0 degenerates to Black-Scholes",

@@ -41,26 +41,26 @@ fn main() {
 
     common::section("Continuous carry: dividend yield and borrow cost are interchangeable");
     common::table_header();
-    common::row("no carry", &base().vanilla(PutOrCall::Call).build());
-    common::row("q = 4%", &base().dividend_yield(0.04).vanilla(PutOrCall::Call).build());
-    common::row("borrow = 4%", &base().borrow_cost(0.04).vanilla(PutOrCall::Call).build());
+    common::row("no carry", &base().vanilla(PutOrCall::Call).build().expect("option must build"));
+    common::row("q = 4%", &base().dividend_yield(0.04).vanilla(PutOrCall::Call).build().expect("option must build"));
+    common::row("borrow = 4%", &base().borrow_cost(0.04).vanilla(PutOrCall::Call).build().expect("option must build"));
     common::row(
         "q = 1% + borrow = 3%",
-        &base().dividend_yield(0.01).borrow_cost(0.03).vanilla(PutOrCall::Call).build(),
+        &base().dividend_yield(0.01).borrow_cost(0.03).vanilla(PutOrCall::Call).build().expect("option must build"),
     );
     common::note("carry_yield() = dividend_yield + borrow_cost enters every formula as 'q'");
 
-    let q_only = base().dividend_yield(0.04).vanilla(PutOrCall::Call).build();
-    let split = base().dividend_yield(0.01).borrow_cost(0.03).vanilla(PutOrCall::Call).build();
+    let q_only = base().dividend_yield(0.04).vanilla(PutOrCall::Call).build().expect("option must build");
+    let split = base().dividend_yield(0.01).borrow_cost(0.03).vanilla(PutOrCall::Call).build().expect("option must build");
     common::check("q=4% vs q=1%+b=3%", split.npv(), q_only.npv(), 1e-12);
 
     common::section("Hard-to-borrow names: high borrow cost lowers the forward");
     common::table_header();
     for b in [0.0, 0.02, 0.05, 0.15] {
-        let option = base().borrow_cost(b).vanilla(PutOrCall::Call).build();
+        let option = base().borrow_cost(b).vanilla(PutOrCall::Call).build().expect("option must build");
         common::row(&format!("borrow = {:.0}%", b * 100.0), &option);
     }
-    let hard = base().borrow_cost(0.15).vanilla(PutOrCall::Call).build();
+    let hard = base().borrow_cost(0.15).vanilla(PutOrCall::Call).build().expect("option must build");
     println!(
         "  forward with 15% borrow: {:.4} (vs spot {SPOT})",
         hard.base.forward_price()
@@ -71,7 +71,7 @@ fn main() {
         b.cash_dividend(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(), 1.5)
             .cash_dividend(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(), 1.5)
     };
-    let analytic = with_divs(base()).vanilla(PutOrCall::Call).build();
+    let analytic = with_divs(base()).vanilla(PutOrCall::Call).build().expect("option must build");
     println!(
         "  spot {SPOT} - PV(dividends) {:.6} = escrowed spot {:.6}",
         analytic.base.pv_cash_dividends(),
@@ -81,15 +81,15 @@ fn main() {
     common::row("Analytical (escrowed model)", &analytic);
     common::row(
         "Binomial (escrowed)",
-        &with_divs(base()).vanilla(PutOrCall::Call).engine(Engine::Binomial).build(),
+        &with_divs(base()).vanilla(PutOrCall::Call).engine(Engine::Binomial).build().expect("option must build"),
     );
     common::row(
         "Finite difference (jump model)",
-        &with_divs(base()).vanilla(PutOrCall::Call).engine(Engine::FiniteDifference).build(),
+        &with_divs(base()).vanilla(PutOrCall::Call).engine(Engine::FiniteDifference).build().expect("option must build"),
     );
     common::row(
         "Monte Carlo terminal (escrowed)",
-        &with_divs(base()).vanilla(PutOrCall::Call).engine(Engine::MonteCarlo).build(),
+        &with_divs(base()).vanilla(PutOrCall::Call).engine(Engine::MonteCarlo).build().expect("option must build"),
     );
     common::row(
         "Monte Carlo path-wise (jump model)",
@@ -98,7 +98,7 @@ fn main() {
             .engine(Engine::MonteCarlo)
             .mc_time_steps(200)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::note("escrowed: lognormal on S - PV(divs); jump: dividends subtracted at each ex-date");
     common::note("the two models differ slightly by construction — that gap is expected, not a bug");
@@ -118,11 +118,11 @@ fn main() {
             .american()
             .vanilla(PutOrCall::Put)
             .engine(Engine::FiniteDifference)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "American put, no dividends",
-        &base().american().vanilla(PutOrCall::Put).engine(Engine::FiniteDifference).build(),
+        &base().american().vanilla(PutOrCall::Put).engine(Engine::FiniteDifference).build().expect("option must build"),
     );
     common::row(
         "Down-and-out call H=85, MC (jumps)",
@@ -130,7 +130,7 @@ fn main() {
             .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 85.0)
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Down-and-out call H=85, no dividends",
@@ -138,13 +138,13 @@ fn main() {
             .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 85.0)
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::note("dividend drops push the path toward a down barrier and change exercise timing");
 
     common::section("Put-call parity with full carry");
-    let call = with_divs(base()).borrow_cost(0.02).vanilla(PutOrCall::Call).build();
-    let put = with_divs(base()).borrow_cost(0.02).vanilla(PutOrCall::Put).build();
+    let call = with_divs(base()).borrow_cost(0.02).vanilla(PutOrCall::Call).build().expect("option must build");
+    let put = with_divs(base()).borrow_cost(0.02).vanilla(PutOrCall::Put).build().expect("option must build");
     let parity = call.base.effective_spot() * (-call.base.carry_yield() * 1.0_f64).exp()
         - STRIKE * (-RATE * 1.0_f64).exp();
     common::check("C - P = S_eff e^{-(q+b)T} - K e^{-rT}", call.npv() - put.npv(), parity, 1e-10);

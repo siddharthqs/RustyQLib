@@ -46,7 +46,7 @@ fn main() {
         &base()
             .forward_start(PutOrCall::Call, 1.0, START)
             .engine(Engine::BlackScholes)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Monte Carlo (GBM)",
@@ -54,14 +54,14 @@ fn main() {
             .forward_start(PutOrCall::Call, 1.0, START)
             .engine(Engine::MonteCarlo)
             .paths(100_000)
-            .build(),
+            .build().expect("option must build"),
     );
     common::row(
         "Finite difference (unsupported)",
         &base()
             .forward_start(PutOrCall::Call, 1.0, START)
             .engine(Engine::FiniteDifference)
-            .build(),
+            .build().expect("option must build"),
     );
 
     common::section("Forward smile: Heston vs Black-Scholes");
@@ -69,7 +69,7 @@ fn main() {
     let bs = base()
         .forward_start(PutOrCall::Call, 1.0, START)
         .engine(Engine::BlackScholes)
-        .build()
+        .build().expect("option must build")
         .npv();
     common::row(
         "Heston vol-of-vol=0.001 (-> BS)",
@@ -78,7 +78,7 @@ fn main() {
             .engine(Engine::MonteCarlo)
             .heston(heston_params(1e-3, 0.0))
             .paths(50_000)
-            .build(),
+            .build().expect("option must build"),
     );
     for (vov, rho) in [(0.2, -0.7), (0.4, -0.7), (0.6, -0.7), (0.4, 0.0)] {
         common::row(
@@ -88,7 +88,7 @@ fn main() {
                 .engine(Engine::MonteCarlo)
                 .heston(heston_params(vov, rho))
                 .paths(50_000)
-                .build(),
+                .build().expect("option must build"),
         );
     }
     common::note(&format!("Black-Scholes reference: {bs:.6}"));
@@ -99,7 +99,7 @@ fn main() {
     for k in [0.9, 0.95, 1.0, 1.05, 1.1] {
         common::row(
             &format!("strike = {k} x S(t_f), call"),
-            &base().forward_start(PutOrCall::Call, k, START).engine(Engine::BlackScholes).build(),
+            &base().forward_start(PutOrCall::Call, k, START).engine(Engine::BlackScholes).build().expect("option must build"),
         );
     }
 
@@ -108,7 +108,7 @@ fn main() {
     for start in [0.1, 0.25, 0.5, 0.75, 0.9] {
         common::row(
             &format!("fixing at {:.0}% of life", start * 100.0),
-            &base().forward_start(PutOrCall::Call, 1.0, start).engine(Engine::BlackScholes).build(),
+            &base().forward_start(PutOrCall::Call, 1.0, start).engine(Engine::BlackScholes).build().expect("option must build"),
         );
     }
     common::note("later fixing leaves less time to expiry, so the option is worth less");
@@ -121,7 +121,7 @@ fn main() {
             .strike(SPOT)
             .vanilla(PutOrCall::Call)
             .engine(Engine::BlackScholes)
-            .build()
+            .build().expect("option must build")
             .npv(),
         1e-3,
     );
@@ -131,7 +131,7 @@ fn main() {
     let fs = base()
         .forward_start(PutOrCall::Call, 1.0, START)
         .engine(Engine::BlackScholes)
-        .build();
+        .build().expect("option must build");
     common::check("delta = price / spot (homogeneity)", fs.delta(), fs.npv() / SPOT, 1e-6);
     println!();
 }

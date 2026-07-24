@@ -101,6 +101,14 @@ impl Instrument for EquityForward {
             LongShort::SHORT => -(self.forward()-self.forward_price.value()) * share *df_r,
         })
     }
+
+    fn price(&self) -> Result<crate::core::results::PricingResult, crate::core::errors::RustyQLibError> {
+        Ok(crate::core::results::PricingResult {
+            pv: self.try_npv()?,
+            greeks: crate::core::results::Greeks { delta: self.delta(), ..Default::default() },
+            std_err: None,
+        })
+    }
 }
 
 impl EquityForward{

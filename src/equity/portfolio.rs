@@ -199,7 +199,7 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(put_or_call)
             .engine(Engine::BlackScholes)
-            .build()
+            .build().expect("option must build")
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(PutOrCall::Call)
             .engine(Engine::BlackScholes)
-            .build();
+            .build().expect("option must build");
         let mut book = EquityPortfolio::new();
         book.add(option(PutOrCall::Call, 100.0), 1.0);
         book.add(other, 1.0);

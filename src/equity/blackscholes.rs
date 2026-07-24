@@ -14,7 +14,7 @@ use super::utils::{Engine, PayoffType, Payoff, LongShort};
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::vols::VolSurface;
-use super::super::core::traits::{Instrument,Greeks};
+use super::super::core::traits::Instrument;
 use crate::core::errors::RustyQLibError;
 
 pub struct BlackScholesPricer;
@@ -2052,14 +2052,14 @@ mod tests {
         };
         // double knock-out call: analytic (Ikeda-Kunitomo) vs the direct fn
         let dko = build().double_barrier(PutOrCall::Call, KnockType::Out, 85.0, 120.0)
-            .engine(Engine::BlackScholes).build();
+            .engine(Engine::BlackScholes).build().expect("option must build");
         let direct = crate::equity::barrier::double_barrier_price(
             100.0, 100.0, 85.0, 120.0, 0.05, 0.02, 0.3, 1.0, KnockType::Out, PutOrCall::Call,
         );
         assert_approx_eq!(dko.npv(), direct, 1e-9);
         // MC (discrete monitoring, generic path route) sits above and near
         let mut mc = build().double_barrier(PutOrCall::Call, KnockType::Out, 85.0, 120.0)
-            .engine(Engine::MonteCarlo).build();
+            .engine(Engine::MonteCarlo).build().expect("option must build");
         mc.mc.paths = 50_000;
         mc.mc.time_steps = 500;
         let mc_px = mc.npv();
@@ -2072,18 +2072,18 @@ mod tests {
         let plain = build()
             .barrier(PutOrCall::Call, crate::equity::barrier::BarrierDirection::Up,
                 KnockType::Out, 120.0)
-            .engine(Engine::BlackScholes).build().npv();
+            .engine(Engine::BlackScholes).build().expect("option must build").npv();
         let rebated = build()
             .barrier(PutOrCall::Call, crate::equity::barrier::BarrierDirection::Up,
                 KnockType::Out, 120.0)
             .barrier_rebate(rebate, false)
-            .engine(Engine::BlackScholes).build();
+            .engine(Engine::BlackScholes).build().expect("option must build");
         assert!(rebated.npv() > plain && rebated.npv() < plain + rebate);
         let mut mc_rebate = build()
             .barrier(PutOrCall::Call, crate::equity::barrier::BarrierDirection::Up,
                 KnockType::Out, 120.0)
             .barrier_rebate(rebate, false)
-            .engine(Engine::MonteCarlo).build();
+            .engine(Engine::MonteCarlo).build().expect("option must build");
         mc_rebate.mc.paths = 50_000;
         mc_rebate.mc.time_steps = 500;
         assert!((mc_rebate.npv() - rebated.npv()).abs() < 0.30,
@@ -2093,7 +2093,7 @@ mod tests {
             .barrier(PutOrCall::Call, crate::equity::barrier::BarrierDirection::Up,
                 KnockType::Out, 120.0)
             .barrier_rebate(rebate, true)
-            .engine(Engine::BlackScholes).build();
+            .engine(Engine::BlackScholes).build().expect("option must build");
         assert!(at_hit.npv() > rebated.npv(), "earlier payment is worth more");
     }
 
@@ -2171,7 +2171,7 @@ mod tests {
                 .phoenix(110.0, coupon_barrier, 60.0, 2.0, 8, 100.0, memory)
                 .engine(Engine::MonteCarlo)
                 .paths(30_000)
-                .build()
+                .build().expect("option must build")
         };
         let plain = build(80.0, false).npv();
         let with_memory = build(80.0, true).npv();
@@ -2641,7 +2641,7 @@ mod tests {
             .vanilla(pc)
             .on_future(settlement)
             .engine(Engine::BlackScholes)
-            .build()
+            .build().expect("option must build")
     }
 
     #[test]
@@ -2682,7 +2682,7 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(PutOrCall::Call)
             .on_future(crate::equity::black76::FuturesSettlement::Discounted)
-            .build();
+            .build().expect("option must build");
         let spot_opt = crate::equity::builder::EquityOptionBuilder::new()
             .spot(s)
             .strike(100.0)
@@ -2692,7 +2692,7 @@ mod tests {
             .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(PutOrCall::Call)
-            .build();
+            .build().expect("option must build");
         assert_approx_eq!(futures_opt.npv(), spot_opt.npv(), 1e-10);
     }
 

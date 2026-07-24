@@ -56,7 +56,7 @@ fn main() {
                 .valuation_date(asof())
                 .maturity_date(maturity)
                 .vanilla(PutOrCall::Call)
-                .build();
+                .build().expect("option must build");
             option.base.current_price = Quote::new(price);
             quotes.push(Box::new(option));
         }
@@ -114,7 +114,7 @@ fn main() {
                 .engine(Engine::MonteCarlo)
                 .model(McModel::LocalVol)
                 .paths(50_000)
-                .build(),
+                .build().expect("option must build"),
         );
         println!("{:<34} {expected:>12.6}  <- Black-Scholes target at the quoted smile vol", "");
     }
@@ -134,7 +134,7 @@ fn main() {
                 .vanilla(PutOrCall::Call)
                 .engine(Engine::FiniteDifference)
                 .model(McModel::LocalVol)
-                .build(),
+                .build().expect("option must build"),
         );
     }
 
