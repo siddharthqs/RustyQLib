@@ -19,6 +19,94 @@ pub enum Engine{
     /// American vanillas — a lower bound, generally tighter than BAW.
     BjerksundStensland,
 }
+
+/// The numerical method **with its own settings** — each variant carries
+/// exactly the configuration that engine consults, so an option never
+/// stores dead config for engines it does not use.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PricingEngine {
+    /// Closed forms (Black-Scholes / Black-76 / Heston CF).
+    BlackScholes,
+    MonteCarlo(crate::equity::montecarlo::MonteCarloConfig),
+    Binomial(crate::core::lattice::LatticeConfig),
+    FiniteDifference(crate::equity::finite_difference::FdConfig),
+    BaroneAdesiWhaley,
+    BjerksundStensland,
+}
+
+impl PricingEngine {
+    /// The engine selector without its configuration.
+    pub fn kind(&self) -> Engine {
+        match self {
+            PricingEngine::BlackScholes => Engine::BlackScholes,
+            PricingEngine::MonteCarlo(_) => Engine::MonteCarlo,
+            PricingEngine::Binomial(_) => Engine::Binomial,
+            PricingEngine::FiniteDifference(_) => Engine::FiniteDifference,
+            PricingEngine::BaroneAdesiWhaley => Engine::BaroneAdesiWhaley,
+            PricingEngine::BjerksundStensland => Engine::BjerksundStensland,
+        }
+    }
+
+    /// Build from a selector with default per-engine configuration.
+    pub fn from_kind(kind: Engine) -> PricingEngine {
+        match kind {
+            Engine::BlackScholes => PricingEngine::BlackScholes,
+            Engine::MonteCarlo => PricingEngine::MonteCarlo(Default::default()),
+            Engine::Binomial => PricingEngine::Binomial(Default::default()),
+            Engine::FiniteDifference => PricingEngine::FiniteDifference(Default::default()),
+            Engine::BaroneAdesiWhaley => PricingEngine::BaroneAdesiWhaley,
+            Engine::BjerksundStensland => PricingEngine::BjerksundStensland,
+        }
+    }
+}
+
+/// The dynamics of the underlying — orthogonal to the numerical engine
+/// (Monte Carlo and finite difference both consult it). Heston carries
+/// its parameters, so "Heston selected but parameters missing" cannot be
+/// represented.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Model {
+    /// Black-Scholes dynamics on the option's vol surface.
+    #[default]
+    Gbm,
+    /// Dupire local volatility calibrated from the vol surface.
+    LocalVol,
+    /// Heston stochastic volatility.
+    Heston(crate::equity::heston::HestonParams),
+}
+
+impl Model {
+    pub fn is_heston(&self) -> bool {
+        matches!(self, Model::Heston(_))
+    }
+
+    /// Parse from contract fields: the `mc_model` string plus the
+    /// `heston` parameter block (required when the model is Heston).
+    pub fn from_contract(
+        mc_model: Option<&str>,
+        heston: Option<crate::equity::heston::HestonParams>,
+    ) -> Result<Model, crate::core::errors::RustyQLibError> {
+        use crate::core::errors::RustyQLibError;
+        match mc_model.map(str::trim) {
+            None | Some("gbm") | Some("GBM") | Some("Gbm") => Ok(Model::Gbm),
+            Some("local_vol") | Some("localvol") | Some("LocalVol") | Some("local") => {
+                Ok(Model::LocalVol)
+            }
+            Some("heston") | Some("Heston") => {
+                let params = heston.ok_or_else(|| RustyQLibError::invalid_input(
+                    "heston",
+                    "heston parameters are required when mc_model = heston",
+                ))?;
+                params.validate()?;
+                Ok(Model::Heston(params))
+            }
+            Some(other) => Err(RustyQLibError::invalid_input(
+                "mc_model",
+                format!("unknown model '{other}' (use gbm, local_vol or heston)"),
+            )),
+        }
+    }
+}
 #[derive(Debug)]
 pub enum LongShort{
     LONG,

@@ -60,10 +60,10 @@ fn main() {
             &base().vanilla(pc).engine(Engine::MonteCarlo).paths(100_000).build().expect("option must build"),
         );
     }
-    common::row(
-        "Finite difference (unsupported)",
-        &base().vanilla(PutOrCall::Call).engine(Engine::FiniteDifference).build().expect("option must build"),
-    );
+    match base().vanilla(PutOrCall::Call).engine(Engine::FiniteDifference).build() {
+        Err(e) => common::note(&format!("FD + Heston is refused at build(): {e}")),
+        Ok(_) => panic!("FD + Heston must be rejected"),
+    }
     common::note("MC vega/theta bump sqrt(v0) and sqrt(theta) in parallel");
 
     common::section("Binaries under Heston");

@@ -79,7 +79,7 @@ impl Cpx {
 /// Heston parameters. `theta` is the long-run *variance*, `v0` the initial
 /// variance, `vol_of_vol` the volatility of variance (often written xi or
 /// sigma), `rho` the spot-variance correlation.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
 pub struct HestonParams {
     pub v0: f64,
     pub kappa: f64,
@@ -410,10 +410,7 @@ use crate::core::errors::RustyQLibError;
 /// (spot, vol shift, rate, expiry). The vol bump shifts sqrt(v0) and
 /// sqrt(theta) in parallel.
 pub(crate) fn price_with(option: &EquityOption, ds: f64, dvol: f64, dr: f64, dt_shift: f64) -> f64 {
-    let hp = option
-        .heston
-        .expect("heston parameters are required for the Heston model")
-        .with_vol_shift(dvol);
+    let hp = option.heston_params().with_vol_shift(dvol);
     let s = option.base.effective_spot() + ds;
     let k = option.base.strike_price;
     let r = option.base.risk_free_rate() + dr;

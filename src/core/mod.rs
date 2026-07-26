@@ -5,6 +5,7 @@ pub mod errors;
 pub mod results;
 pub mod daycount;
 pub mod fd_solvers;
+pub mod lattice;
 pub mod linalg;
 pub mod montecarlo;
 pub mod optimization;

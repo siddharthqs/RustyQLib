@@ -98,6 +98,24 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
 
 ### Engine details
 
+- **Binomial lattice**: six parameterizations behind one enum —
+  **Leisen-Reimer** (the default: strike-aware Peizer-Pratt, second-order
+  smooth convergence, at ~100 steps it matches CRR at 1000 — ~90x
+  faster), Cox-Ross-Rubinstein, Jarrow-Rudd, Tian, Trigeorgis and the
+  additive equal-probability tree — selected per contract (`tree_type`,
+  `tree_steps`). The engine lives in `core::lattice`, asset-class
+  agnostic (payoffs and early exercise enter as closures), with two
+  implementations: an optimized rolling-array engine (O(n) memory) and a
+  diagnostic engine that keeps the full spot/value trees, the
+  early-exercise boundary per layer, tree Greeks and wall-clock timing,
+  plus a `convergence_study` helper for step-ladder analysis. A
+  **term-structure lattice** (`tree_term_structure` in JSON,
+  `.tree_term_structure()` on the builder) applies time-dependent
+  parameters directly on the tree: a variance-equal time grid keeps the
+  tree recombining under a vol term structure, while per-step
+  probabilities and discount factors take each step's forward rate and
+  carry from the curve — so rate timing (not just the zero rate to
+  maturity) prices into early exercise.
 - **Finite difference**: theta-scheme in log-spot with per-node, per-step
   coefficients (local vol ready), forward rates from the discount curve per time
   step, cell-averaged terminal conditions for digitals, barrier-aligned absorbing
@@ -201,7 +219,9 @@ regressions against the previous run. Indicative single-threaded numbers:
 a fully-loaded Black-Scholes `npv()` (discount curve and vol surface
 lookups included) runs in ~0.7 µs — about 1.5M prices/sec; a 20-strike
 Heston smile prices in ~1.6 ms via the COS method vs ~137 ms by
-per-strike integration (~90x, the ratio the calibration loop inherits).
+per-strike integration (~90x, the ratio the calibration loop inherits);
+an American put on a Leisen-Reimer 101-step tree prices in ~26 µs vs
+~2.3 ms on the CRR-1000 tree at comparable accuracy.
 
 ## Running the CLI
 
@@ -274,6 +294,8 @@ Selected fields (all optional unless noted):
 | `mc_model` | `gbm` (default), `local_vol`, `heston` (needs `heston` params) |
 | `simulation`, `mc_time_steps`, `mc_scheme`, `mc_sampler`, `mc_seed` | Monte Carlo controls |
 | `fd_spot_steps`, `fd_time_steps` | finite difference grid |
+| `tree_type`, `tree_steps` | binomial lattice: `LeisenReimer` (default), `CRR`, `JarrowRudd`, `Tian`, `Trigeorgis`, `EQP`; steps default 1000 |
+| `tree_term_structure` | apply the discount curve's forward rates and the vol term structure per tree step (variance-equal grid) |
 
 Working examples for every product live in [`src/examples/EQ/`](src/examples/EQ/).
 Monte Carlo outputs include the standard error (`std_err`) alongside price and Greeks.

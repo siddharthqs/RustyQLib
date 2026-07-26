@@ -117,6 +117,16 @@ pub struct EquityOptionData {
     pub protection_barrier: Option<f64>,
     pub autocall_coupon: Option<f64>,
     pub autocall_observations: Option<usize>,
+    /// Binomial tree parameterization: `LeisenReimer` (default), `CRR`,
+    /// `JarrowRudd`, `Tian`, `Trigeorgis`, `EQP`.
+    pub tree_type: Option<String>,
+    /// Binomial tree steps (default 1000; Leisen-Reimer bumps even
+    /// counts to odd).
+    pub tree_steps: Option<usize>,
+    /// Price the tree with term structures of rates and volatility
+    /// applied per step (variance-equal time grid). `tree_type` is then
+    /// ignored.
+    pub tree_term_structure: Option<bool>,
     /// Bermudan exercise dates (`YYYY-MM-DD`, strictly increasing,
     /// after valuation and at or before maturity). Required when
     /// `exercise_style` is `Bermudan`. Expiry is always exercisable

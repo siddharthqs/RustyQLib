@@ -61,7 +61,10 @@ fn main() {
         common::row("Monte Carlo (Longstaff-Schwartz)",
             &contract().american().vanilla(pc).engine(Engine::MonteCarlo).paths(50_000).build().expect("option must build"));
         // the analytic Black-Scholes engine has no American method and says so
-        common::row("Black-Scholes (rejects American)", &american(pc, Engine::BlackScholes));
+        common::row_or_refusal(
+            "Black-Scholes (rejects American)",
+            contract().american().vanilla(pc).engine(Engine::BlackScholes).build(),
+        );
 
         // early-exercise premium and the exercise boundary
         let european = european(pc).npv();

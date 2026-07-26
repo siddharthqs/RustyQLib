@@ -31,14 +31,14 @@ use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::local_vol::LocalVol;
-use crate::equity::montecarlo::McModel;
+use crate::equity::utils::Model;
 use crate::equity::utils::Payoff;
 use crate::equity::vanilla_option::{BarrierPayoff, EquityOption};
 
 const RANNACHER_STEPS: usize = 4;
 const CELL_AVG_POINTS: usize = 16;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FdConfig {
     pub spot_steps: usize,
     pub time_steps: usize,
@@ -227,7 +227,7 @@ fn solve(
     spot_bump: f64,
     knock_out: Option<&BarrierPayoff>,
 ) -> FdSolution {
-    let cfg = &option.fd;
+    let cfg = option.fd_cfg();
     let payoff = option.payoff.as_ref();
     let strike = option.base.strike_price;
     let s0 = option.base.underlying_price.value() + spot_bump;
@@ -253,9 +253,9 @@ fn solve(
     };
     let put = matches!(payoff.put_or_call(), PutOrCall::Put);
 
-    let vol_field = match option.mc.model {
-        McModel::Gbm => FdVol::Const(sigma_ref),
-        McModel::LocalVol => FdVol::Local(LocalVol::new(
+    let vol_field = match option.model {
+        Model::Gbm => FdVol::Const(sigma_ref),
+        Model::LocalVol => FdVol::Local(LocalVol::new(
             &option.base.vol_surface,
             &option.base.discount_curve,
             // A spot bump moves the valuation point, not the calibrated
@@ -264,7 +264,7 @@ fn solve(
             q,
             sigma_bump,
         )),
-        McModel::Heston => panic!(
+        Model::Heston(_) => panic!(
             "The Heston model needs a 2-D (ADI) FD solver, which is future \
              work; use the Analytical or MonteCarlo engines"
         ),

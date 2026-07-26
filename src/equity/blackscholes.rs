@@ -1112,10 +1112,8 @@ pub fn option_pricing() {
     let option = EquityOption {
         base: option,
         payoff:payoff,
-        engine:Engine::BlackScholes,
-        mc: crate::equity::montecarlo::MonteCarloConfig::default(),
-        fd: crate::equity::finite_difference::FdConfig::default(),
-        heston: None
+        engine: crate::equity::utils::PricingEngine::BlackScholes,
+        model: crate::equity::utils::Model::Gbm,
     };
     println!("Theoretical Price ${}", option.npv());
     println!("Premium at risk ${}", option.get_premium_at_risk());
@@ -1254,10 +1252,8 @@ mod tests {
         EquityOption {
             base,
             payoff,
-            engine: Engine::BlackScholes,
-            mc: crate::equity::montecarlo::MonteCarloConfig::default(),
-            fd: crate::equity::finite_difference::FdConfig::default(),
-            heston: None,
+            engine: crate::equity::utils::PricingEngine::BlackScholes,
+            model: crate::equity::utils::Model::Gbm,
         }
     }
 
@@ -1400,12 +1396,12 @@ mod tests {
         let analytic = test_option(PutOrCall::Call, flat_5pct()).volga();
 
         let mut fd = test_option(PutOrCall::Call, flat_5pct());
-        fd.engine = Engine::FiniteDifference;
+        fd.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         assert!((fd.volga() - analytic).abs() < 0.5, "fd {} vs analytic {analytic}", fd.volga());
 
         let mut mc = test_option(PutOrCall::Call, flat_5pct());
-        mc.engine = Engine::MonteCarlo;
-        mc.mc.paths = 200_000;
+        mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc.mc_cfg_mut().paths = 200_000;
         assert!((mc.volga() - analytic).abs() < 1.5, "mc {} vs analytic {analytic}", mc.volga());
     }
 
@@ -1517,7 +1513,7 @@ mod tests {
         let k = 100.0;
         let priced = |engine: Engine, payoff: Box<dyn Payoff>| {
             let mut option = test_option_with(payoff, flat_5pct());
-            option.engine = engine.clone();
+            option.engine = crate::equity::utils::PricingEngine::from_kind(engine.clone());
             option.npv()
         };
         let asset_payoff = || -> Box<dyn Payoff> {
@@ -1566,7 +1562,7 @@ mod tests {
             (Engine::MonteCarlo, 0.05),
         ] {
             let mut option = binary_option_of(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0);
-            option.engine = engine.clone();
+            option.engine = crate::equity::utils::PricingEngine::from_kind(engine.clone());
             let value = option.npv();
             assert!(
                 (value - analytic).abs() < tol,
@@ -1582,7 +1578,7 @@ mod tests {
         for pc in [PutOrCall::Call, PutOrCall::Put] {
             let mut option = test_option(pc, flat_5pct());
             let analytic = option.npv();
-            option.engine = Engine::FiniteDifference;
+            option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
             let fd = option.npv();
             assert!(
                 (fd - analytic).abs() < 0.01,
@@ -1596,7 +1592,7 @@ mod tests {
         for pc in [PutOrCall::Call, PutOrCall::Put] {
             let mut option = binary_option(pc);
             let analytic = option.npv();
-            option.engine = Engine::FiniteDifference;
+            option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
             let fd = option.npv();
             assert!(
                 (fd - analytic).abs() < 0.002,
@@ -1610,13 +1606,13 @@ mod tests {
         for pc in [PutOrCall::Call, PutOrCall::Put] {
             let mut vanilla = test_option(pc, flat_5pct());
             let analytic = vanilla.npv();
-            vanilla.engine = Engine::Binomial;
+            vanilla.engine = crate::equity::utils::PricingEngine::from_kind(Engine::Binomial);
             let tree = vanilla.npv();
             assert!((tree - analytic).abs() < 0.02, "vanilla {pc:?}: tree={tree} bs={analytic}");
 
             let mut binary = binary_option(pc);
             let analytic = binary.npv();
-            binary.engine = Engine::Binomial;
+            binary.engine = crate::equity::utils::PricingEngine::from_kind(Engine::Binomial);
             let tree = binary.npv();
             assert!((tree - analytic).abs() < 0.02, "binary {pc:?}: tree={tree} bs={analytic}");
         }
@@ -1628,13 +1624,13 @@ mod tests {
         for pc in [PutOrCall::Call, PutOrCall::Put] {
             let mut vanilla = test_option(pc, flat_5pct());
             let analytic = vanilla.npv();
-            vanilla.engine = Engine::MonteCarlo;
+            vanilla.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
             let mc = vanilla.npv();
             assert!((mc - analytic).abs() < 0.02, "vanilla {pc:?}: mc={mc} bs={analytic}");
 
             let mut binary = binary_option(pc);
             let analytic = binary.npv();
-            binary.engine = Engine::MonteCarlo;
+            binary.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
             let mc = binary.npv();
             assert!((mc - analytic).abs() < 0.005, "binary {pc:?}: mc={mc} bs={analytic}");
         }
@@ -1643,7 +1639,7 @@ mod tests {
     #[test]
     fn monte_carlo_sobol_beats_default_tolerance_and_is_reproducible() {
         let mut option = test_option(PutOrCall::Call, flat_5pct());
-        option.engine = Engine::MonteCarlo;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
         let first = option.npv();
         let second = option.npv();
         assert_eq!(first, second, "deterministic sampler must reproduce exactly");
@@ -1657,10 +1653,10 @@ mod tests {
         let analytic = test_option(PutOrCall::Call, flat_5pct()).npv();
         for scheme in ["exact", "euler", "milstein"] {
             let mut option = test_option(PutOrCall::Call, flat_5pct());
-            option.engine = Engine::MonteCarlo;
-            option.mc.scheme = scheme.parse().unwrap();
-            option.mc.time_steps = 252;
-            option.mc.paths = 50_000;
+            option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            option.mc_cfg_mut().scheme = scheme.parse().unwrap();
+            option.mc_cfg_mut().time_steps = 252;
+            option.mc_cfg_mut().paths = 50_000;
             let mc = option.npv();
             assert!(
                 (mc - analytic).abs() < 0.35,
@@ -1672,7 +1668,7 @@ mod tests {
     #[test]
     fn monte_carlo_greeks_match_analytic() {
         let mut option = test_option(PutOrCall::Call, flat_5pct());
-        option.engine = Engine::MonteCarlo;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
         // common-random-number bumps against the analytic golden values
         assert!((option.delta() - 0.6242517279).abs() < 0.01, "delta {}", option.delta());
         assert!((option.gamma() - 0.0126477644).abs() < 0.003, "gamma {}", option.gamma());
@@ -1691,7 +1687,7 @@ mod tests {
             }),
             flat_5pct(),
         );
-        tree_option.engine = Engine::Binomial;
+        tree_option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::Binomial);
         let tree = tree_option.npv();
 
         let mut lsmc_option = test_option_with(
@@ -1701,8 +1697,8 @@ mod tests {
             }),
             flat_5pct(),
         );
-        lsmc_option.engine = Engine::MonteCarlo;
-        lsmc_option.mc.paths = 20_000;
+        lsmc_option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        lsmc_option.mc_cfg_mut().paths = 20_000;
         let lsmc = lsmc_option.npv();
 
         // LSMC is biased slightly low (suboptimal exercise policy) but must
@@ -1807,9 +1803,9 @@ mod tests {
         let mut option = test_option(PutOrCall::Call, flat_5pct());
         option.base.strike_price = k;
         option.base.vol_surface = surface;
-        option.engine = Engine::MonteCarlo;
-        option.mc.model = crate::equity::montecarlo::McModel::LocalVol;
-        option.mc.paths = 20_000;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        option.model = crate::equity::utils::Model::LocalVol;
+        option.mc_cfg_mut().paths = 20_000;
         option
     }
 
@@ -1931,8 +1927,8 @@ mod tests {
         for (direction, knock, pc, h) in cases {
             let analytic = barrier_option(pc, direction, knock, h).npv();
             let mut option = barrier_option(pc, direction, knock, h);
-            option.engine = Engine::MonteCarlo;
-            option.mc.paths = 50_000;
+            option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            option.mc_cfg_mut().paths = 50_000;
             let mc = option.npv();
             assert!(
                 (mc - analytic).abs() < 0.3,
@@ -1975,8 +1971,8 @@ mod tests {
     fn geometric_asian_mc_matches_discrete_closed_form() {
         use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
         let mut option = asian_option(PutOrCall::Call, Geometric, FixedStrike);
-        option.engine = Engine::MonteCarlo;
-        option.mc.paths = 50_000;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        option.mc_cfg_mut().paths = 50_000;
         let mc = option.npv(); // generic path route, 100 monitoring steps
         let closed = crate::equity::asian::geometric_asian_price(
             100.0, 100.0, 0.05, 0.02, 0.3, 1.0, Some(100), PutOrCall::Call,
@@ -2000,8 +1996,8 @@ mod tests {
 
         // Monte Carlo (100 discrete fixings) against the discrete form
         let mut mc_option = asian_option(PutOrCall::Call, Geometric, FloatingStrike);
-        mc_option.engine = Engine::MonteCarlo;
-        mc_option.mc.paths = 50_000;
+        mc_option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc_option.mc_cfg_mut().paths = 50_000;
         let mc = mc_option.npv();
         let discrete = crate::equity::asian::geometric_average_strike_price(
             100.0, 0.05, 0.02, 0.3, 1.0, Some(100), PutOrCall::Call,
@@ -2026,8 +2022,8 @@ mod tests {
             assert!(analytic_option.vega() > 0.0, "{pc:?}");
 
             let mut mc_option = asian_option(pc, Arithmetic, FloatingStrike);
-            mc_option.engine = Engine::MonteCarlo;
-            mc_option.mc.paths = 50_000;
+            mc_option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            mc_option.mc_cfg_mut().paths = 50_000;
             let mc = mc_option.npv();
             // TW approximation + discrete-vs-continuous monitoring gap
             assert!((mc - analytic).abs() < 0.2, "{pc:?}: mc={mc} analytic={analytic}");
@@ -2060,8 +2056,8 @@ mod tests {
         // MC (discrete monitoring, generic path route) sits above and near
         let mut mc = build().double_barrier(PutOrCall::Call, KnockType::Out, 85.0, 120.0)
             .engine(Engine::MonteCarlo).build().expect("option must build");
-        mc.mc.paths = 50_000;
-        mc.mc.time_steps = 500;
+        mc.mc_cfg_mut().paths = 50_000;
+        mc.mc_cfg_mut().time_steps = 500;
         let mc_px = mc.npv();
         assert!(mc_px > dko.npv() - 0.02 && (mc_px - dko.npv()).abs() < 0.30,
             "mc {mc_px} vs analytic {}", dko.npv());
@@ -2084,8 +2080,8 @@ mod tests {
                 KnockType::Out, 120.0)
             .barrier_rebate(rebate, false)
             .engine(Engine::MonteCarlo).build().expect("option must build");
-        mc_rebate.mc.paths = 50_000;
-        mc_rebate.mc.time_steps = 500;
+        mc_rebate.mc_cfg_mut().paths = 50_000;
+        mc_rebate.mc_cfg_mut().time_steps = 500;
         assert!((mc_rebate.npv() - rebated.npv()).abs() < 0.30,
             "mc {} vs analytic {}", mc_rebate.npv(), rebated.npv());
         // at-hit rebates are analytic-engine territory
@@ -2128,14 +2124,14 @@ mod tests {
         // MC monitors discretely: below the continuous form for the
         // max/min-based payoffs, and converging as steps grow
         let mut coarse = lookback(LookbackType::FloatingStrike, PutOrCall::Call);
-        coarse.engine = Engine::MonteCarlo;
-        coarse.mc.paths = 40_000;
-        coarse.mc.time_steps = 50;
+        coarse.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        coarse.mc_cfg_mut().paths = 40_000;
+        coarse.mc_cfg_mut().time_steps = 50;
         let coarse_px = coarse.npv();
         let mut fine = lookback(LookbackType::FloatingStrike, PutOrCall::Call);
-        fine.engine = Engine::MonteCarlo;
-        fine.mc.paths = 40_000;
-        fine.mc.time_steps = 400;
+        fine.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        fine.mc_cfg_mut().paths = 40_000;
+        fine.mc_cfg_mut().time_steps = 400;
         let fine_px = fine.npv();
         assert!(coarse_px < direct && fine_px < direct, "{coarse_px} {fine_px} vs {direct}");
         assert!(direct - fine_px < direct - coarse_px, "finer grid must close the gap");
@@ -2148,9 +2144,9 @@ mod tests {
         );
         assert_approx_eq!(fixed_put.npv(), direct_put, 1e-9);
         let mut mc_put = lookback(LookbackType::FixedStrike, PutOrCall::Put);
-        mc_put.engine = Engine::MonteCarlo;
-        mc_put.mc.paths = 40_000;
-        mc_put.mc.time_steps = 400;
+        mc_put.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc_put.mc_cfg_mut().paths = 40_000;
+        mc_put.mc_cfg_mut().time_steps = 400;
         let mc_px = mc_put.npv();
         assert!(mc_px < direct_put && direct_put - mc_px < 1.5, "{mc_px} vs {direct_put}");
     }
@@ -2189,8 +2185,8 @@ mod tests {
         use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
         let analytic = asian_option(PutOrCall::Call, Arithmetic, FixedStrike).npv();
         let mut option = asian_option(PutOrCall::Call, Arithmetic, FixedStrike);
-        option.engine = Engine::MonteCarlo;
-        option.mc.paths = 50_000;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        option.mc_cfg_mut().paths = 50_000;
         let mc = option.npv(); // control-variate route
         // TW is a moment-matching approximation and the MC monitors
         // discretely, so agreement is at the approximation level, not
@@ -2203,12 +2199,12 @@ mod tests {
         use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
         let price_mc = |averaging| {
             let mut option = asian_option(PutOrCall::Call, averaging, FixedStrike);
-            option.engine = Engine::MonteCarlo;
-            option.mc.paths = 20_000;
+            option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            option.mc_cfg_mut().paths = 20_000;
             // force the generic path route for both by disabling the CV's
             // exact-scheme precondition
-            option.mc.scheme = crate::equity::montecarlo::DiscretizationScheme::Euler;
-            option.mc.time_steps = 100;
+            option.mc_cfg_mut().scheme = crate::equity::montecarlo::DiscretizationScheme::Euler;
+            option.mc_cfg_mut().time_steps = 100;
             option.npv()
         };
         assert!(price_mc(Arithmetic) > price_mc(Geometric), "AM-GM inequality");
@@ -2218,8 +2214,8 @@ mod tests {
     fn arithmetic_floating_strike_asian_prices_on_mc() {
         use crate::equity::asian::{AsianStrikeType::*, AveragingType::*};
         let mut option = asian_option(PutOrCall::Call, Arithmetic, FloatingStrike);
-        option.engine = Engine::MonteCarlo;
-        option.mc.paths = 20_000;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        option.mc_cfg_mut().paths = 20_000;
         let price = option.npv();
         // floating-strike call: pays (S_T - average)^+; positive, below vanilla
         let vanilla = test_option(PutOrCall::Call, flat_5pct()).npv();
@@ -2232,7 +2228,7 @@ mod tests {
     #[test]
     fn fd_grid_greeks_match_analytic_for_european() {
         let mut option = test_option(PutOrCall::Call, flat_5pct());
-        option.engine = Engine::FiniteDifference;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         assert!((option.delta() - 0.6242517279).abs() < 1e-3, "delta {}", option.delta());
         assert!((option.gamma() - 0.0126477644).abs() < 1e-4, "gamma {}", option.gamma());
         assert!((option.theta() - -8.1011898970).abs() < 0.03, "theta {}", option.theta());
@@ -2249,7 +2245,7 @@ mod tests {
             }),
             flat_5pct(),
         );
-        american.engine = Engine::FiniteDifference;
+        american.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         let european_delta = -0.3757482721; // analytic European put delta
         // early exercise makes the American put delta more negative and
         // theta less negative than the European
@@ -2270,7 +2266,7 @@ mod tests {
             }),
             flat_5pct(),
         );
-        fd.engine = Engine::FiniteDifference;
+        fd.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         let mut tree = test_option_with(
             Box::new(VanillaPayoff {
                 put_or_call: PutOrCall::Put,
@@ -2278,7 +2274,7 @@ mod tests {
             }),
             flat_5pct(),
         );
-        tree.engine = Engine::Binomial;
+        tree.engine = crate::equity::utils::PricingEngine::from_kind(Engine::Binomial);
         assert!((fd.npv() - tree.npv()).abs() < 0.02, "fd={} tree={}", fd.npv(), tree.npv());
     }
 
@@ -2293,7 +2289,7 @@ mod tests {
         ] {
             let analytic = barrier_option(pc, direction, knock, h).npv();
             let mut option = barrier_option(pc, direction, knock, h);
-            option.engine = Engine::FiniteDifference;
+            option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
             let fd = option.npv();
             assert!(
                 (fd - analytic).abs() < 0.02,
@@ -2307,11 +2303,11 @@ mod tests {
         use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
         let mut ki = barrier_option(PutOrCall::Call, Down, In, 90.0);
         let mut ko = barrier_option(PutOrCall::Call, Down, Out, 90.0);
-        ki.engine = Engine::FiniteDifference;
-        ko.engine = Engine::FiniteDifference;
+        ki.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
+        ko.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         let mut vanilla = test_option(PutOrCall::Call, flat_5pct());
         vanilla.base.dividend_yield = 0.02;
-        vanilla.engine = Engine::FiniteDifference;
+        vanilla.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         assert!((ki.npv() + ko.npv() - vanilla.npv()).abs() < 1e-9);
         assert!((ki.delta() + ko.delta() - vanilla.delta()).abs() < 1e-9);
     }
@@ -2319,8 +2315,8 @@ mod tests {
     #[test]
     fn fd_local_vol_flat_surface_matches_black_scholes() {
         let mut option = test_option(PutOrCall::Call, flat_5pct());
-        option.engine = Engine::FiniteDifference;
-        option.mc.model = crate::equity::montecarlo::McModel::LocalVol;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
+        option.model = crate::equity::utils::Model::LocalVol;
         // flat surface: local vol == implied vol, FD-LV must equal FD-GBM
         assert_approx_eq!(option.npv(), 14.2312547860, 5e-3);
     }
@@ -2328,9 +2324,9 @@ mod tests {
     #[test]
     fn fd_grid_is_configurable() {
         let mut coarse = test_option(PutOrCall::Call, flat_5pct());
-        coarse.engine = Engine::FiniteDifference;
-        coarse.fd.spot_steps = 100;
-        coarse.fd.time_steps = 50;
+        coarse.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
+        coarse.fd_cfg_mut().spot_steps = 100;
+        coarse.fd_cfg_mut().time_steps = 50;
         // still accurate at a quarter of the resolution
         assert!((coarse.npv() - 14.2312547860).abs() < 0.02, "{}", coarse.npv());
     }
@@ -2341,9 +2337,9 @@ mod tests {
     fn qmc_path_wise_prices_accurately() {
         // multi-step path simulation through the Brownian bridge + QMC
         let mut option = test_option(PutOrCall::Call, flat_5pct());
-        option.engine = Engine::MonteCarlo;
-        option.mc.time_steps = 64;
-        option.mc.paths = 20_000;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        option.mc_cfg_mut().time_steps = 64;
+        option.mc_cfg_mut().paths = 20_000;
         let qmc = option.npv();
         assert!((qmc - 14.2312547860).abs() < 0.05, "qmc path-wise {qmc}");
     }
@@ -2351,8 +2347,8 @@ mod tests {
     #[test]
     fn mc_stats_reports_consistent_standard_error() {
         let mut option = test_option(PutOrCall::Call, flat_5pct());
-        option.engine = Engine::MonteCarlo;
-        option.mc.sampler = crate::equity::montecarlo::Sampler::PseudoRandom;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        option.mc_cfg_mut().sampler = crate::equity::montecarlo::Sampler::PseudoRandom;
         let stats = crate::equity::montecarlo::npv_with_stats(&option);
         assert!(stats.std_err > 0.0 && stats.std_err < 1.0);
         assert!(stats.paths == 100_000 && stats.steps == 1);
@@ -2372,10 +2368,10 @@ mod tests {
             [crate::equity::montecarlo::Sampler::Sobol, crate::equity::montecarlo::Sampler::PseudoRandom]
         {
             let mut option = test_option(PutOrCall::Call, flat_5pct());
-            option.engine = Engine::MonteCarlo;
-            option.mc.sampler = sampler;
-            option.mc.time_steps = 32;
-            option.mc.paths = 30_000;
+            option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            option.mc_cfg_mut().sampler = sampler;
+            option.mc_cfg_mut().time_steps = 32;
+            option.mc_cfg_mut().paths = 30_000;
             assert_eq!(option.npv(), option.npv());
         }
     }
@@ -2385,8 +2381,7 @@ mod tests {
     fn heston_option(payoff: Box<dyn Payoff>) -> EquityOption {
         let mut option = test_option_with(payoff, flat_5pct());
         option.base.dividend_yield = 0.02;
-        option.mc.model = crate::equity::montecarlo::McModel::Heston;
-        option.heston = Some(crate::equity::heston::HestonParams {
+        option.model = crate::equity::utils::Model::Heston(crate::equity::heston::HestonParams {
             v0: 0.09,
             kappa: 2.0,
             theta: 0.09,
@@ -2408,8 +2403,8 @@ mod tests {
         for pc in [PutOrCall::Call, PutOrCall::Put] {
             let analytic = heston_vanilla(pc).npv();
             let mut mc = heston_vanilla(pc);
-            mc.engine = Engine::MonteCarlo;
-            mc.mc.paths = 50_000;
+            mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            mc.mc_cfg_mut().paths = 50_000;
             let mc_price = mc.npv();
             // full-truncation Euler bias + sampler noise at 50k x 250
             assert!(
@@ -2431,8 +2426,8 @@ mod tests {
         };
         let analytic = heston_option(payoff()).npv();
         let mut mc = heston_option(payoff());
-        mc.engine = Engine::MonteCarlo;
-        mc.mc.paths = 50_000;
+        mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc.mc_cfg_mut().paths = 50_000;
         assert!((mc.npv() - analytic).abs() < 0.01, "mc={} analytic={analytic}", mc.npv());
     }
 
@@ -2455,8 +2450,8 @@ mod tests {
         use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
         let vanilla = {
             let mut o = heston_vanilla(PutOrCall::Call);
-            o.engine = Engine::MonteCarlo;
-            o.mc.paths = 20_000;
+            o.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            o.mc_cfg_mut().paths = 20_000;
             o.npv()
         };
         let mut ko = heston_option(Box::new(BarrierPayoff {
@@ -2469,8 +2464,8 @@ mod tests {
                 rebate: 0.0,
                 rebate_at_hit: false,
         }));
-        ko.engine = Engine::MonteCarlo;
-        ko.mc.paths = 20_000;
+        ko.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        ko.mc_cfg_mut().paths = 20_000;
         let ko_price = ko.npv();
         assert!(ko_price > 0.0 && ko_price < vanilla, "ko={ko_price} vanilla={vanilla}");
 
@@ -2480,8 +2475,8 @@ mod tests {
             averaging: crate::equity::asian::AveragingType::Arithmetic,
             strike_type: crate::equity::asian::AsianStrikeType::FixedStrike,
         }));
-        asian.engine = Engine::MonteCarlo;
-        asian.mc.paths = 20_000;
+        asian.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        asian.mc_cfg_mut().paths = 20_000;
         let asian_price = asian.npv();
         assert!(asian_price > 0.0 && asian_price < vanilla);
     }
@@ -2494,10 +2489,10 @@ mod tests {
             let mut with_borrow = test_option(PutOrCall::Call, flat_5pct());
             with_borrow.base.dividend_yield = 0.01;
             with_borrow.base.borrow_cost = 0.03;
-            with_borrow.engine = engine.clone();
+            with_borrow.engine = crate::equity::utils::PricingEngine::from_kind(engine.clone());
             let mut with_yield = test_option(PutOrCall::Call, flat_5pct());
             with_yield.base.dividend_yield = 0.04;
-            with_yield.engine = engine.clone();
+            with_yield.engine = crate::equity::utils::PricingEngine::from_kind(engine.clone());
             assert!(
                 (with_borrow.npv() - with_yield.npv()).abs() < 1e-12,
                 "{engine:?}: borrow {} vs yield {}",
@@ -2545,9 +2540,9 @@ mod tests {
         // at the tens-of-basis-points level for moderate dividends
         let analytic = dividend_paying_option(PutOrCall::Call).npv();
         let mut mc = dividend_paying_option(PutOrCall::Call);
-        mc.engine = Engine::MonteCarlo;
-        mc.mc.time_steps = 100;
-        mc.mc.paths = 50_000;
+        mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc.mc_cfg_mut().time_steps = 100;
+        mc.mc_cfg_mut().paths = 50_000;
         assert!((mc.npv() - analytic).abs() < 0.3, "mc={} analytic={analytic}", mc.npv());
     }
 
@@ -2558,11 +2553,11 @@ mod tests {
         // ~0.1-0.2 above the escrowed analytic for a call (the classic
         // escrowed-vs-jump model difference)
         let mut fd = dividend_paying_option(PutOrCall::Call);
-        fd.engine = Engine::FiniteDifference;
+        fd.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         let mut mc = dividend_paying_option(PutOrCall::Call);
-        mc.engine = Engine::MonteCarlo;
-        mc.mc.time_steps = 100;
-        mc.mc.paths = 50_000;
+        mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc.mc_cfg_mut().time_steps = 100;
+        mc.mc_cfg_mut().paths = 50_000;
         assert!((fd.npv() - mc.npv()).abs() < 0.1, "fd={} mc={}", fd.npv(), mc.npv());
         let escrowed = dividend_paying_option(PutOrCall::Call).npv();
         assert!((fd.npv() - escrowed).abs() < 0.3, "fd={} escrowed={escrowed}", fd.npv());
@@ -2620,7 +2615,7 @@ mod tests {
 
         let mut fd = dividend_paying_option(PutOrCall::Call);
         fd.base.borrow_cost = carry;
-        fd.engine = Engine::FiniteDifference;
+        fd.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         assert!((a - fd.npv()).abs() < 0.2, "analytic {a} vs fd {}", fd.npv());
     }
 
@@ -2712,7 +2707,7 @@ mod tests {
     fn futures_option_rejects_non_analytic_engine() {
         let mut option =
             futures_option(PutOrCall::Call, crate::equity::black76::FuturesSettlement::Discounted);
-        option.engine = Engine::MonteCarlo;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
         option.npv();
     }
 
@@ -2734,8 +2729,8 @@ mod tests {
     fn forward_start_analytic_matches_monte_carlo() {
         let analytic = forward_start_option(PutOrCall::Call).npv();
         let mut mc = forward_start_option(PutOrCall::Call);
-        mc.engine = Engine::MonteCarlo;
-        mc.mc.paths = 50_000;
+        mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc.mc_cfg_mut().paths = 50_000;
         assert!((mc.npv() - analytic).abs() < 0.15, "mc={} analytic={analytic}", mc.npv());
     }
 
@@ -2743,10 +2738,10 @@ mod tests {
     fn forward_start_heston_degenerates_to_black_scholes() {
         let bs = forward_start_option(PutOrCall::Call).npv();
         let mut heston = forward_start_option(PutOrCall::Call);
-        heston.engine = Engine::MonteCarlo;
-        heston.mc.model = crate::equity::montecarlo::McModel::Heston;
-        heston.mc.paths = 50_000;
-        heston.heston = Some(crate::equity::heston::HestonParams {
+        heston.engine = crate::equity::utils::PricingEngine::MonteCarlo(
+            crate::equity::montecarlo::MonteCarloConfig { paths: 50_000, ..Default::default() },
+        );
+        heston.model = crate::equity::utils::Model::Heston(crate::equity::heston::HestonParams {
             v0: 0.09,
             kappa: 1.0,
             theta: 0.09,
@@ -2774,8 +2769,8 @@ mod tests {
             }),
             flat_5pct(),
         );
-        option.engine = Engine::MonteCarlo;
-        option.mc.paths = 20_000;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        option.mc_cfg_mut().paths = 20_000;
         option
     }
 
@@ -2817,7 +2812,7 @@ mod tests {
         // flat surface: local vol must reproduce the GBM value
         let gbm = autocall_note(105.0, 70.0, 5.0).npv();
         let mut lv = autocall_note(105.0, 70.0, 5.0);
-        lv.mc.model = crate::equity::montecarlo::McModel::LocalVol;
+        lv.model = crate::equity::utils::Model::LocalVol;
         assert!((lv.npv() - gbm).abs() < 0.5, "lv={} gbm={gbm}", lv.npv());
     }
 
@@ -2825,7 +2820,7 @@ mod tests {
     #[should_panic(expected = "Autocallables price on the MonteCarlo engine only")]
     fn analytic_engine_rejects_autocallables() {
         let mut note = autocall_note(105.0, 70.0, 5.0);
-        note.engine = Engine::BlackScholes;
+        note.engine = crate::equity::utils::PricingEngine::from_kind(Engine::BlackScholes);
         note.npv();
     }
 
@@ -2833,7 +2828,7 @@ mod tests {
     #[should_panic(expected = "only barriers price on the FD")]
     fn fd_engine_rejects_forward_start() {
         let mut option = forward_start_option(PutOrCall::Call);
-        option.engine = Engine::FiniteDifference;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         option.npv();
     }
 
@@ -2841,7 +2836,7 @@ mod tests {
     #[should_panic(expected = "Heston model is supported on the Analytical and MonteCarlo")]
     fn fd_engine_rejects_heston() {
         let mut option = heston_vanilla(PutOrCall::Call);
-        option.engine = Engine::FiniteDifference;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         option.npv();
     }
 
@@ -2850,7 +2845,7 @@ mod tests {
     fn tree_engine_rejects_barrier_options() {
         use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
         let mut option = barrier_option(PutOrCall::Call, Down, Out, 90.0);
-        option.engine = Engine::Binomial;
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::Binomial);
         option.npv();
     }
 
@@ -2878,7 +2873,7 @@ mod tests {
                 }),
                 flat_5pct(),
             );
-            option.engine = engine;
+            option.engine = crate::equity::utils::PricingEngine::from_kind(engine);
             option.npv()
         };
         let fd = american(Engine::FiniteDifference);

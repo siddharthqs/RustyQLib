@@ -109,6 +109,17 @@ fn lattice_and_grid(c: &mut Criterion) {
     let bino = american(Engine::Binomial);
     group.bench_function("binomial_american_npv", |b| b.iter(|| black_box(&bino).npv()));
 
+    // Leisen-Reimer reaches CRR-1000 accuracy at ~100 steps: ~100x faster
+    let mut lr = american(Engine::Binomial);
+    lr.engine = rustyqlib::equity::utils::PricingEngine::Binomial(
+        rustyqlib::core::lattice::LatticeConfig {
+            tree_type: rustyqlib::core::lattice::BinomialTreeType::LeisenReimer,
+            steps: 101,
+            ..Default::default()
+        },
+    );
+    group.bench_function("binomial_lr101_american_npv", |b| b.iter(|| black_box(&lr).npv()));
+
     let fd = american(Engine::FiniteDifference); // default 400 x 400 grid
     group.bench_function("fd_american_400x400_npv", |b| b.iter(|| black_box(&fd).npv()));
 

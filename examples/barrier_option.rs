@@ -9,7 +9,7 @@ use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::barrier::{barrier_price, BarrierDirection, KnockType};
 use rustyqlib::equity::builder::EquityOptionBuilder;
-use rustyqlib::equity::montecarlo::McModel;
+use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
 use rustyqlib::core::vols::VolSurface;
 use rustyqlib::core::daycount::DayCountConvention;
@@ -66,12 +66,12 @@ fn main() {
         ("Monte Carlo (Brownian bridge)", Engine::MonteCarlo),
         ("Binomial (unsupported)", Engine::Binomial),
     ] {
-        common::row(
+        common::row_or_refusal(
             label,
-            &base()
+            base()
                 .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 90.0)
                 .engine(engine)
-                .build().expect("option must build"),
+                .build(),
         );
     }
     common::note("MC applies a bridge crossing correction, so monitoring is effectively continuous");
@@ -160,7 +160,7 @@ fn main() {
             .vol_surface(skewed)
             .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 90.0)
             .engine(Engine::MonteCarlo)
-            .model(McModel::LocalVol)
+            .model(Model::LocalVol)
             .paths(50_000)
             .build().expect("option must build"),
     );

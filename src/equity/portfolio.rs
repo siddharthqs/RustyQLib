@@ -303,7 +303,7 @@ mod tests {
 
         let mut fd_book = EquityPortfolio::new();
         let mut fd = option(PutOrCall::Call, 100.0);
-        fd.engine = Engine::FiniteDifference;
+        fd.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         fd_book.add(fd, 10.0);
         let f = fd_book.pnl_attribution(&m);
 

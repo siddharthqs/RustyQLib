@@ -272,6 +272,39 @@ mod tests {
     }
 
     #[test]
+    fn tree_type_flows_through_the_contract() {
+        let priced = |tree: &str| {
+            let c = contract(serde_json::json!({
+                "product_type": "option",
+                "symbol": "ABC",
+                "underlying_price": 100.0,
+                "put_or_call": "P",
+                "payoff_type": "vanilla",
+                "exercise_style": "American",
+                "strike_price": 100.0,
+                "volatility": 0.3,
+                "valuation_date": "2026-01-05",
+                "maturity": "2027-01-05",
+                "risk_free_rate": 0.05,
+                "pricer": "Binomial",
+                "tree_type": tree,
+                "tree_steps": 501,
+            }));
+            handle_equity_contract(&c)
+        };
+        let lr = priced("LeisenReimer");
+        assert!(lr["output"]["error"].is_null());
+        let crr = priced("CRR");
+        let (lr_pv, crr_pv) =
+            (lr["output"]["pv"].as_f64().unwrap(), crr["output"]["pv"].as_f64().unwrap());
+        assert!((lr_pv - crr_pv).abs() < 0.05, "schemes agree loosely: {lr_pv} vs {crr_pv}");
+        // unknown scheme is rejected naming the field
+        let bad = priced("no_such_tree");
+        let err = bad["output"]["error"].as_str().expect("error must be set");
+        assert!(err.contains("tree_type"), "{err}");
+    }
+
+    #[test]
     fn valid_contract_still_prices_with_no_error() {
         let good = contract(serde_json::json!({
             "product_type": "option",

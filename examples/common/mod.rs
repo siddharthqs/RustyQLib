@@ -36,12 +36,25 @@ pub fn table_header() {
 
 /// Price `option` and print one row. Panics from unsupported combinations
 /// are caught and shown as `unsupported`.
+/// Print a priced row, or the typed build-time refusal for combinations
+/// the library rejects (`build()` now enforces engine support upfront).
+#[allow(dead_code)]
+pub fn row_or_refusal(
+    label: &str,
+    built: Result<EquityOption, rustyqlib::RustyQLibError>,
+) {
+    match built {
+        Ok(option) => row(label, &option),
+        Err(e) => note(&format!("{label}: refused at build() — {e}")),
+    }
+}
+
 pub fn row(label: &str, option: &EquityOption) {
     // keep the table readable: the caught panic is reported in the row
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let (pv, std_err) = if option.engine == Engine::MonteCarlo {
+        let (pv, std_err) = if option.engine.kind() == Engine::MonteCarlo {
             let s = montecarlo::npv_with_stats(option);
             (s.pv, Some(s.std_err))
         } else {

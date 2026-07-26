@@ -114,16 +114,16 @@
 //         };
 //         match data.pricer.trim() {
 //             "Analytical" | "analytical"|"bs" => {
-//                 option.engine = Engine::BlackScholes;
+//                 option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::BlackScholes);
 //             }
 //             "MonteCarlo" | "montecarlo" | "MC"|"mc" => {
-//                 option.engine = Engine::MonteCarlo;
+//                 option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
 //             }
 //             "Binomial" | "binomial"|"bino" => {
-//                 option.engine = Engine::Binomial;
+//                 option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::Binomial);
 //             }
 //             "FiniteDifference" | "finitdifference" |"FD" |"fd" => {
-//                 option.engine = Engine::FiniteDifference;
+//                 option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
 //             }
 //             _ => {
 //                 panic!("Invalid pricer");

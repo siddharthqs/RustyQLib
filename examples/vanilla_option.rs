@@ -9,7 +9,8 @@ use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::blackscholes::bs_price;
 use rustyqlib::equity::builder::EquityOptionBuilder;
-use rustyqlib::equity::montecarlo::{McModel, Sampler};
+use rustyqlib::equity::montecarlo::Sampler;
+use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
 use rustyqlib::equity::vanilla_option::EquityOption;
 
@@ -46,8 +47,8 @@ fn main() {
     for pc in [PutOrCall::Call, PutOrCall::Put] {
         common::section(&format!("European {pc:?}"));
         common::table_header();
-        common::row("Analytical (Black-Scholes)", &priced(base(pc), Engine::BlackScholes));
-        // common::row("Binomial (1000 steps)", &priced(base(pc), Engine::Binomial));
+        //common::row("Analytical (Black-Scholes)", &priced(base(pc), Engine::BlackScholes));
+        common::row("Binomial (1000 steps)", &priced(base(pc), Engine::Binomial));
         // common::row("Finite difference (400x400)", &priced(base(pc), Engine::FiniteDifference));
         // common::row("Monte Carlo (Sobol, 100k)", &priced(base(pc), Engine::MonteCarlo));
         // common::row(
@@ -102,7 +103,7 @@ fn main() {
     //    "Local vol (flat surface)",
     //    &base(PutOrCall::Call)
     //        .engine(Engine::MonteCarlo)
-    //        .model(McModel::LocalVol)
+    //        .model(Model::LocalVol)
     //        .paths(50_000)
     //        .build().expect("option must build"),
     //);

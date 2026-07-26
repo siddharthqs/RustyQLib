@@ -10,7 +10,7 @@ use crate::equity::heston;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::Instrument;
 use super::blackscholes;
-use crate::equity::utils::{Engine, PayoffType, Payoff, LongShort};
+use crate::equity::utils::{Engine, Model, Payoff, PayoffType, PricingEngine, LongShort};
 use crate::core::trade::{PutOrCall,Transection};
 use crate::core::utils::{Contract,ContractStyle};
 use crate::core::trade;
@@ -319,15 +319,66 @@ pub struct EquityOptionBase {
 pub struct EquityOption {
     pub base: EquityOptionBase,
     pub payoff: Box<dyn Payoff>,
-    pub engine: Engine,
-    /// Monte Carlo settings (paths, time steps, scheme, sampler, seed).
-    /// `mc.model` (GBM vs local vol) also applies to the FD engine.
-    pub mc: montecarlo::MonteCarloConfig,
-    /// Finite difference grid settings; only consulted when `engine` is
-    /// [`Engine::FiniteDifference`].
-    pub fd: finite_difference::FdConfig,
-    /// Heston parameters; required when the model is Heston.
-    pub heston: Option<crate::equity::heston::HestonParams>,
+    /// The numerical method, carrying its own settings.
+    pub engine: PricingEngine,
+    /// The dynamics of the underlying (GBM, local vol, or Heston with
+    /// its parameters); consulted by the MC, FD and analytic engines.
+    pub model: Model,
+}
+
+impl EquityOption {
+    /// The Monte Carlo settings. Invariant: only called on the Monte
+    /// Carlo engine's code paths (the dispatch guarantees it).
+    pub(crate) fn mc_cfg(&self) -> &montecarlo::MonteCarloConfig {
+        match &self.engine {
+            PricingEngine::MonteCarlo(cfg) => cfg,
+            _ => unreachable!("Monte Carlo code path reached on a non-MC engine"),
+        }
+    }
+
+    pub(crate) fn fd_cfg(&self) -> &finite_difference::FdConfig {
+        match &self.engine {
+            PricingEngine::FiniteDifference(cfg) => cfg,
+            _ => unreachable!("finite-difference code path reached on a non-FD engine"),
+        }
+    }
+
+    /// Heston parameters. Invariant: only called on Heston-model code
+    /// paths (the model dispatch guarantees it).
+    pub(crate) fn heston_params(&self) -> &crate::equity::heston::HestonParams {
+        match &self.model {
+            Model::Heston(hp) => hp,
+            _ => unreachable!("Heston code path reached on a non-Heston model"),
+        }
+    }
+
+    pub(crate) fn lattice_cfg(&self) -> &crate::core::lattice::LatticeConfig {
+        match &self.engine {
+            PricingEngine::Binomial(cfg) => cfg,
+            _ => unreachable!("lattice code path reached on a non-Binomial engine"),
+        }
+    }
+
+    pub(crate) fn mc_cfg_mut(&mut self) -> &mut montecarlo::MonteCarloConfig {
+        match &mut self.engine {
+            PricingEngine::MonteCarlo(cfg) => cfg,
+            _ => unreachable!("Monte Carlo code path reached on a non-MC engine"),
+        }
+    }
+
+    pub(crate) fn fd_cfg_mut(&mut self) -> &mut finite_difference::FdConfig {
+        match &mut self.engine {
+            PricingEngine::FiniteDifference(cfg) => cfg,
+            _ => unreachable!("finite-difference code path reached on a non-FD engine"),
+        }
+    }
+
+    pub(crate) fn lattice_cfg_mut(&mut self) -> &mut crate::core::lattice::LatticeConfig {
+        match &mut self.engine {
+            PricingEngine::Binomial(cfg) => cfg,
+            _ => unreachable!("lattice code path reached on a non-Binomial engine"),
+        }
+    }
 }
 impl EquityOption{
     pub fn time_to_maturity(&self) -> f64{
@@ -669,41 +720,48 @@ impl EquityOption {
             }
         };
 
-        let equityoption = EquityOption {
-            base: base_option,
-            payoff,
-            engine: match data.pricer.as_ref().map_or("Analytical",|v| v).trim() {
-                "Analytical" | "analytical" | "bs" => Engine::BlackScholes,
-                "MonteCarlo" | "montecarlo" | "MC" | "mc" => Engine::MonteCarlo,
-                "Binomial" | "binomial" | "bino" => Engine::Binomial,
-                "FiniteDifference" | "finitdifference" | "FD" | "fd" => Engine::FiniteDifference,
-                "BaroneAdesiWhaley" | "baw" | "BAW" => Engine::BaroneAdesiWhaley,
-                "BjerksundStensland" | "bjerksund_stensland" | "bs2002" | "BS2002" => {
-                    Engine::BjerksundStensland
-                }
-                other => {
-                    return Err(RustyQLibError::invalid_input(
-                        "pricer",
-                        format!(
-                            "unknown pricer '{other}' (use Analytical, MonteCarlo, Binomial, \
-                             FiniteDifference, BAW or BS2002)"
-                        ),
-                    ));
-                }
-            },
-            mc: montecarlo::MonteCarloConfig::from_data(data),
-            fd: finite_difference::FdConfig::from_data(data),
-            heston: data.heston
+        let engine_kind = match data.pricer.as_ref().map_or("Analytical", |v| v).trim() {
+            "Analytical" | "analytical" | "bs" => Engine::BlackScholes,
+            "MonteCarlo" | "montecarlo" | "MC" | "mc" => Engine::MonteCarlo,
+            "Binomial" | "binomial" | "bino" => Engine::Binomial,
+            "FiniteDifference" | "finitdifference" | "FD" | "fd" => Engine::FiniteDifference,
+            "BaroneAdesiWhaley" | "baw" | "BAW" => Engine::BaroneAdesiWhaley,
+            "BjerksundStensland" | "bjerksund_stensland" | "bs2002" | "BS2002" => {
+                Engine::BjerksundStensland
+            }
+            other => {
+                return Err(RustyQLibError::invalid_input(
+                    "pricer",
+                    format!(
+                        "unknown pricer '{other}' (use Analytical, MonteCarlo, Binomial, \
+                         FiniteDifference, BAW or BS2002)"
+                    ),
+                ));
+            }
         };
-        if equityoption.mc.model == montecarlo::McModel::Heston {
-            equityoption
-                .heston
-                .ok_or_else(|| RustyQLibError::invalid_input(
-                    "heston",
-                    "heston parameters are required when mc_model = heston",
-                ))?
-                .validate()?;
-        }
+        // the engine carries only its own configuration
+        let engine = match engine_kind {
+            Engine::MonteCarlo => {
+                PricingEngine::MonteCarlo(montecarlo::MonteCarloConfig::from_data(data))
+            }
+            Engine::FiniteDifference => {
+                PricingEngine::FiniteDifference(finite_difference::FdConfig::from_data(data))
+            }
+            Engine::Binomial => {
+                let defaults = crate::core::lattice::LatticeConfig::default();
+                PricingEngine::Binomial(crate::core::lattice::LatticeConfig {
+                    tree_type: match data.tree_type.as_deref() {
+                        Some(s) => s.parse()?,
+                        None => defaults.tree_type,
+                    },
+                    steps: data.tree_steps.unwrap_or(defaults.steps),
+                    term_structure: data.tree_term_structure.unwrap_or(false),
+                })
+            }
+            other => PricingEngine::from_kind(other),
+        };
+        let model = Model::from_contract(data.mc_model.as_deref(), data.heston)?;
+        let equityoption = EquityOption { base: base_option, payoff, engine, model };
         Ok(Box::new(equityoption))
     }
 }
@@ -906,7 +964,7 @@ impl EquityOption {
         let american =
             matches!(self.payoff.exercise_style(), ContractStyle::American) || bermudan;
         if self.base.is_futures_option() {
-            if !matches!(self.engine, Engine::BlackScholes) {
+            if !matches!(self.engine, PricingEngine::BlackScholes) {
                 return unsupported(
                     "Options on futures (Black-76) price on the Analytical engine only",
                 );
@@ -921,12 +979,12 @@ impl EquityOption {
                     "early-exercise (American/Bermudan) path-dependent options are not supported yet",
                 );
             }
-            if matches!(self.engine, Engine::Binomial) {
+            if matches!(self.engine, PricingEngine::Binomial(_)) {
                 return unsupported(
                     "Path-dependent payoffs are not supported on the Binomial engine",
                 );
             }
-            if matches!(self.engine, Engine::FiniteDifference)
+            if matches!(self.engine, PricingEngine::FiniteDifference(_))
                 && !matches!(self.payoff.payoff_kind(), PayoffType::Barrier)
             {
                 return unsupported(
@@ -934,27 +992,27 @@ impl EquityOption {
                      engine; use MonteCarlo",
                 );
             }
-            if matches!(self.engine, Engine::BlackScholes)
+            if matches!(self.engine, PricingEngine::BlackScholes)
                 && matches!(self.payoff.payoff_kind(), PayoffType::Autocallable)
             {
                 return unsupported("Autocallables price on the MonteCarlo engine only");
             }
         }
-        let heston = self.mc.model == montecarlo::McModel::Heston;
-        if heston && matches!(self.engine, Engine::Binomial | Engine::FiniteDifference) {
+        let heston = self.model.is_heston();
+        if heston && matches!(self.engine, PricingEngine::Binomial(_) | PricingEngine::FiniteDifference(_)) {
             return unsupported(
                 "The Heston model is supported on the Analytical and MonteCarlo \
                  engines only (a 2-D ADI FD solver is future work)",
             );
         }
         match self.engine {
-            Engine::BlackScholes if american => unsupported(
+            PricingEngine::BlackScholes if american => unsupported(
                 "Analytical engine cannot price early exercise; \
                  use Binomial, FiniteDifference or MonteCarlo",
             ),
-            Engine::BaroneAdesiWhaley | Engine::BjerksundStensland => {
+            PricingEngine::BaroneAdesiWhaley | PricingEngine::BjerksundStensland => {
                 let name = match self.engine {
-                    Engine::BaroneAdesiWhaley => "Barone-Adesi-Whaley",
+                    PricingEngine::BaroneAdesiWhaley => "Barone-Adesi-Whaley",
                     _ => "Bjerksund-Stensland",
                 };
                 if !matches!(self.payoff.payoff_kind(), PayoffType::Vanilla) {
@@ -983,15 +1041,15 @@ impl EquityOption {
 impl Instrument for EquityOption  {
     fn try_npv(&self) -> Result<f64, RustyQLibError> {
         self.check_engine_support()?;
-        let heston = self.mc.model == montecarlo::McModel::Heston;
+        let heston = self.model.is_heston();
         Ok(match self.engine {
-            Engine::BlackScholes if heston => heston::analytic_npv(&self),
-            Engine::BlackScholes => BlackScholesPricer::new().npv(&self),
-            Engine::MonteCarlo => montecarlo::npv(&self),
-            Engine::Binomial => binomial::npv(&self),
-            Engine::FiniteDifference => finite_difference::npv(&self),
-            Engine::BaroneAdesiWhaley => baw::npv(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::npv(&self),
+            PricingEngine::BlackScholes if heston => heston::analytic_npv(&self),
+            PricingEngine::BlackScholes => BlackScholesPricer::new().npv(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::npv(&self),
+            PricingEngine::Binomial(_) => binomial::npv(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::npv(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::npv(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::npv(&self),
         })
     }
 
@@ -1000,7 +1058,7 @@ impl Instrument for EquityOption  {
     fn price(&self) -> Result<PricingResult, RustyQLibError> {
         self.check_engine_support()?;
         let (pv, std_err) = match self.engine {
-            Engine::MonteCarlo => {
+            PricingEngine::MonteCarlo(_) => {
                 let stats = montecarlo::npv_with_stats(self);
                 (stats.pv, Some(stats.std_err))
             }
@@ -1031,55 +1089,55 @@ impl Instrument for EquityOption  {
 /// remaining engines use the analytic Black-Scholes closed forms.
 impl EquityOption {
     fn analytic_heston(&self) -> bool {
-        matches!(self.engine, Engine::BlackScholes | Engine::Binomial)
-            && self.mc.model == montecarlo::McModel::Heston
+        matches!(self.engine, PricingEngine::BlackScholes | PricingEngine::Binomial(_))
+            && self.model.is_heston()
     }
     pub fn delta(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::delta(&self),
-            Engine::FiniteDifference => finite_difference::delta(&self),
-            Engine::BaroneAdesiWhaley => baw::delta(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::delta(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::delta(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::delta(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::delta(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::delta(&self),
             _ if self.analytic_heston() => heston::analytic_delta(&self),
             _ => BlackScholesPricer::new().delta(&self),
         }
     }
     pub fn gamma(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::gamma(&self),
-            Engine::FiniteDifference => finite_difference::gamma(&self),
-            Engine::BaroneAdesiWhaley => baw::gamma(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::gamma(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::gamma(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::gamma(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::gamma(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::gamma(&self),
             _ if self.analytic_heston() => heston::analytic_gamma(&self),
             _ => BlackScholesPricer::new().gamma(&self),
         }
     }
     pub fn vega(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::vega(&self),
-            Engine::FiniteDifference => finite_difference::vega(&self),
-            Engine::BaroneAdesiWhaley => baw::vega(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::vega(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::vega(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::vega(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::vega(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::vega(&self),
             _ if self.analytic_heston() => heston::analytic_vega(&self),
             _ => BlackScholesPricer::new().vega(&self),
         }
     }
     pub fn theta(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::theta(&self),
-            Engine::FiniteDifference => finite_difference::theta(&self),
-            Engine::BaroneAdesiWhaley => baw::theta(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::theta(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::theta(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::theta(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::theta(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::theta(&self),
             _ if self.analytic_heston() => heston::analytic_theta(&self),
             _ => BlackScholesPricer::new().theta(&self),
         }
     }
     pub fn rho(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::rho(&self),
-            Engine::FiniteDifference => finite_difference::rho(&self),
-            Engine::BaroneAdesiWhaley => baw::rho(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::rho(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::rho(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::rho(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::rho(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::rho(&self),
             _ if self.analytic_heston() => heston::analytic_rho(&self),
             _ => BlackScholesPricer::new().rho(&self),
         }
@@ -1087,10 +1145,10 @@ impl EquityOption {
     /// Vanna: change in delta per unit change in implied volatility.
     pub fn vanna(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::vanna(&self),
-            Engine::FiniteDifference => finite_difference::vanna(&self),
-            Engine::BaroneAdesiWhaley => baw::vanna(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::vanna(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::vanna(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::vanna(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::vanna(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::vanna(&self),
             _ if self.analytic_heston() => heston::analytic_vanna(&self),
             _ => BlackScholesPricer::new().vanna(&self),
         }
@@ -1098,10 +1156,10 @@ impl EquityOption {
     /// Charm: change in delta per year of calendar time.
     pub fn charm(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::charm(&self),
-            Engine::FiniteDifference => finite_difference::charm(&self),
-            Engine::BaroneAdesiWhaley => baw::charm(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::charm(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::charm(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::charm(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::charm(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::charm(&self),
             _ if self.analytic_heston() => heston::analytic_charm(&self),
             _ => BlackScholesPricer::new().charm(&self),
         }
@@ -1118,10 +1176,10 @@ impl EquityOption {
     /// Zomma: change in gamma per unit change in implied volatility.
     pub fn zomma(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::zomma(&self),
-            Engine::FiniteDifference => finite_difference::zomma(&self),
-            Engine::BaroneAdesiWhaley => baw::zomma(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::zomma(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::zomma(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::zomma(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::zomma(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::zomma(&self),
             _ if self.analytic_heston() => heston::analytic_zomma(&self),
             _ => BlackScholesPricer::new().zomma(&self),
         }
@@ -1129,10 +1187,10 @@ impl EquityOption {
     /// Volga (vomma): change in vega per unit change in implied volatility.
     pub fn volga(&self) -> f64 {
         match self.engine {
-            Engine::MonteCarlo => montecarlo::volga(&self),
-            Engine::FiniteDifference => finite_difference::volga(&self),
-            Engine::BaroneAdesiWhaley => baw::volga(&self),
-            Engine::BjerksundStensland => bjerksund_stensland::volga(&self),
+            PricingEngine::MonteCarlo(_) => montecarlo::volga(&self),
+            PricingEngine::FiniteDifference(_) => finite_difference::volga(&self),
+            PricingEngine::BaroneAdesiWhaley => baw::volga(&self),
+            PricingEngine::BjerksundStensland => bjerksund_stensland::volga(&self),
             _ if self.analytic_heston() => heston::analytic_volga(&self),
             _ => BlackScholesPricer::new().volga(&self),
         }
@@ -1162,12 +1220,12 @@ impl EquityOption {
             );
         }
         match self.engine {
-            Engine::MonteCarlo => montecarlo::npv_with(&self, d_spot, d_vol, d_rate, d_time),
-            Engine::FiniteDifference => {
+            PricingEngine::MonteCarlo(_) => montecarlo::npv_with(&self, d_spot, d_vol, d_rate, d_time),
+            PricingEngine::FiniteDifference(_) => {
                 finite_difference::npv_with(&self, d_spot, d_vol, d_rate, d_time)
             }
-            Engine::BaroneAdesiWhaley => baw::price_with(&self, d_spot, d_vol, d_rate, d_time),
-            Engine::BjerksundStensland => {
+            PricingEngine::BaroneAdesiWhaley => baw::price_with(&self, d_spot, d_vol, d_rate, d_time),
+            PricingEngine::BjerksundStensland => {
                 bjerksund_stensland::price_with(&self, d_spot, d_vol, d_rate, d_time)
             }
             // price_with shifts the maturity, so elapsed calendar time enters

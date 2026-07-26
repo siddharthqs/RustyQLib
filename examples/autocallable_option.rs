@@ -12,7 +12,7 @@ use rustyqlib::core::traits::Instrument;
 use rustyqlib::core::vols::VolSurface;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::heston::HestonParams;
-use rustyqlib::equity::montecarlo::McModel;
+use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
 
 const SPOT: f64 = 100.0;
@@ -76,7 +76,7 @@ fn main() {
         "Local vol (skewed surface)",
         &note(AUTOCALL, PROTECTION, COUPON)
             .vol_surface(skewed_surface())
-            .model(McModel::LocalVol)
+            .model(Model::LocalVol)
             .build().expect("option must build"),
     );
     common::row(
@@ -91,9 +91,9 @@ fn main() {
             })
             .build().expect("option must build"),
     );
-    common::row(
+    common::row_or_refusal(
         "Analytical (unsupported)",
-        &note(AUTOCALL, PROTECTION, COUPON).engine(Engine::BlackScholes).build().expect("option must build"),
+        note(AUTOCALL, PROTECTION, COUPON).engine(Engine::BlackScholes).build(),
     );
     common::note("skew/stoch-vol raise the knock-in probability, lowering the note value");
 

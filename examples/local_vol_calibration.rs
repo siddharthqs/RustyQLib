@@ -15,7 +15,7 @@ use rustyqlib::core::vols::VolSurface;
 use rustyqlib::equity::blackscholes::bs_price;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::local_vol::LocalVol;
-use rustyqlib::equity::montecarlo::McModel;
+use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
 use rustyqlib::equity::vol_surface::build_implied_vol_surface;
 
@@ -112,7 +112,7 @@ fn main() {
                 .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
                 .vanilla(PutOrCall::Call)
                 .engine(Engine::MonteCarlo)
-                .model(McModel::LocalVol)
+                .model(Model::LocalVol)
                 .paths(50_000)
                 .build().expect("option must build"),
         );
@@ -133,7 +133,7 @@ fn main() {
                 .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
                 .vanilla(PutOrCall::Call)
                 .engine(Engine::FiniteDifference)
-                .model(McModel::LocalVol)
+                .model(Model::LocalVol)
                 .build().expect("option must build"),
         );
     }

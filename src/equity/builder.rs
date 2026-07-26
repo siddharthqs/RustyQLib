@@ -37,7 +37,9 @@ use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::finite_difference::FdConfig;
 use crate::equity::forward_start_option::ForwardStartPayoff;
 use crate::equity::heston::HestonParams;
-use crate::equity::montecarlo::{McModel, MonteCarloConfig};
+use crate::equity::montecarlo::MonteCarloConfig;
+use crate::equity::utils::PricingEngine;
+use crate::equity::utils::Model;
 use crate::equity::utils::{Engine, LongShort, Payoff};
 use crate::equity::vanilla_option::{
     AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityOption, EquityOptionBase,
@@ -114,7 +116,8 @@ pub struct EquityOptionBuilder {
     engine: Engine,
     mc: MonteCarloConfig,
     fd: FdConfig,
-    heston: Option<HestonParams>,
+    lattice: crate::core::lattice::LatticeConfig,
+    model: Model,
     /// Autocall schedule request: (months between observations, calendar),
     /// resolved into dates at `build()` from valuation and maturity.
     autocall_schedule: Option<(u32, crate::core::calendar::Calendar)>,
@@ -154,7 +157,8 @@ impl EquityOptionBuilder {
             engine: Engine::BlackScholes,
             mc: MonteCarloConfig::default(),
             fd: FdConfig::default(),
-            heston: None,
+            lattice: crate::core::lattice::LatticeConfig::default(),
+            model: Model::Gbm,
             autocall_schedule: None,
             bermudan_dates: None,
             bermudan_schedule: None,
@@ -452,13 +456,12 @@ impl EquityOptionBuilder {
         self.engine = engine;
         self
     }
-    pub fn model(mut self, model: McModel) -> Self {
-        self.mc.model = model;
+    pub fn model(mut self, model: Model) -> Self {
+        self.model = model;
         self
     }
     pub fn heston(mut self, params: HestonParams) -> Self {
-        self.heston = Some(params);
-        self.mc.model = McModel::Heston;
+        self.model = Model::Heston(params);
         self
     }
     pub fn mc_config(mut self, cfg: MonteCarloConfig) -> Self {
@@ -484,6 +487,22 @@ impl EquityOptionBuilder {
     pub fn fd_grid(mut self, spot_steps: usize, time_steps: usize) -> Self {
         self.fd.spot_steps = spot_steps;
         self.fd.time_steps = time_steps;
+        self
+    }
+    /// Binomial tree parameterization (default Leisen-Reimer).
+    pub fn tree_type(mut self, tree_type: crate::core::lattice::BinomialTreeType) -> Self {
+        self.lattice.tree_type = tree_type;
+        self
+    }
+    /// Binomial tree steps (default 1000).
+    pub fn tree_steps(mut self, steps: usize) -> Self {
+        self.lattice.steps = steps;
+        self
+    }
+    /// Price the binomial tree with term structures of rates and
+    /// volatility applied per step (`tree_type` is then ignored).
+    pub fn tree_term_structure(mut self) -> Self {
+        self.lattice.term_structure = true;
         self
     }
 
@@ -770,22 +789,20 @@ impl EquityOptionBuilder {
         }
 
         // ── model configuration ─────────────────────────────────────────
-        if self.mc.model == McModel::Heston {
-            match &self.heston {
-                Some(params) => params.validate()?,
-                None => {
-                    return invalid(
-                        "heston",
-                        "heston parameters are required when the model is Heston".to_string(),
-                    )
-                }
-            }
+        if let Model::Heston(params) = &self.model {
+            params.validate()?;
         }
         if self.mc.paths == 0 {
             return invalid("paths", "Monte Carlo needs at least one path".to_string());
         }
         if self.mc.time_steps == 0 {
             return invalid("mc_time_steps", "Monte Carlo needs at least one time step".to_string());
+        }
+        if self.lattice.steps < 2 {
+            return invalid(
+                "tree_steps",
+                format!("the binomial tree needs at least 2 steps, got {}", self.lattice.steps),
+            );
         }
         if self.fd.spot_steps < 3 || self.fd.time_steps < 1 {
             return invalid(
@@ -925,14 +942,15 @@ impl EquityOptionBuilder {
             long_short: LongShort::LONG,
             multiplier: 1.0,
         };
-        let option = EquityOption {
-            base,
-            payoff,
-            engine: self.engine,
-            mc: self.mc,
-            fd: self.fd,
-            heston: self.heston,
+        let engine = match self.engine {
+            Engine::BlackScholes => PricingEngine::BlackScholes,
+            Engine::MonteCarlo => PricingEngine::MonteCarlo(self.mc),
+            Engine::Binomial => PricingEngine::Binomial(self.lattice),
+            Engine::FiniteDifference => PricingEngine::FiniteDifference(self.fd),
+            Engine::BaroneAdesiWhaley => PricingEngine::BaroneAdesiWhaley,
+            Engine::BjerksundStensland => PricingEngine::BjerksundStensland,
         };
+        let option = EquityOption { base, payoff, engine, model: self.model };
         // "builds => prices": refuse engine/model/payoff combinations here
         // rather than at pricing time
         option.check_engine_support()?;
@@ -1015,9 +1033,14 @@ mod tests {
             "payoff"
         );
         assert_eq!(field(base().barrier_rebate(5.0, false).build()), "barrier_rebate");
+        // Heston params travel inside the model, so "params missing" is
+        // unrepresentable; invalid params are still rejected at build()
+        let bad_heston = crate::equity::heston::HestonParams {
+            v0: -0.1, kappa: 2.0, theta: 0.09, vol_of_vol: 0.4, rho: -0.7,
+        };
         assert_eq!(
-            field(base().model(McModel::Heston).engine(Engine::MonteCarlo).build()),
-            "heston"
+            field(base().heston(bad_heston).engine(Engine::MonteCarlo).build()),
+            "heston params"
         );
         assert_eq!(
             field(
@@ -1292,6 +1315,90 @@ mod tests {
             .vanilla(PutOrCall::Put)
             .engine(engine)
             .build()
+    }
+
+    #[test]
+    fn tree_type_selects_the_lattice_scheme() {
+        use crate::core::lattice::BinomialTreeType;
+        use crate::equity::blackscholes::bs_price;
+        let build = |tree: BinomialTreeType, steps: usize| {
+            EquityOptionBuilder::new()
+                .spot(100.0)
+                .strike(100.0)
+                .flat_vol(0.3)
+                .flat_rate(0.05)
+                .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+                .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 5).unwrap())
+                .vanilla(PutOrCall::Call)
+                .engine(Engine::Binomial)
+                .tree_type(tree)
+                .tree_steps(steps)
+                .build()
+                .expect("option must build")
+        };
+        let reference = bs_price(
+            100.0, 100.0, 0.05, 0.0, 0.3, 1.0, PutOrCall::Call,
+        );
+        // Leisen-Reimer at 101 steps beats CRR at 101 steps by an order
+        // of magnitude on the same contract
+        let lr_err = (build(BinomialTreeType::LeisenReimer, 101).npv() - reference).abs();
+        let crr_err = (build(BinomialTreeType::CoxRossRubinstein, 101).npv() - reference).abs();
+        assert!(lr_err * 10.0 < crr_err, "LR err {lr_err} vs CRR err {crr_err}");
+        // diagnostics agree with the fast engine
+        let option = build(BinomialTreeType::LeisenReimer, 101);
+        let diag = crate::equity::binomial::npv_with_diagnostics(&option);
+        assert_eq!(diag.price, option.npv());
+        assert_eq!(diag.steps, 101);
+    }
+
+    #[test]
+    fn term_structure_tree_prices_rate_timing_into_early_exercise() {
+        use crate::core::curves::{Compounding, CurveInput, InterpolationMethod, Tenor};
+        // steep upward curve: 1% short rate, 9% long rate
+        let curve_input = CurveInput::ZeroRates {
+            tenors: vec![Tenor::YearFraction(0.25), Tenor::YearFraction(1.0)],
+            rates: vec![0.01, 0.09],
+            compounding: Compounding::Continuous,
+            day_count: DayCountConvention::Act365,
+            interpolation: InterpolationMethod::LinearZero,
+        };
+        let build = |term: bool, american: bool| {
+            let curve = YieldCurve::from_input(
+                &curve_input,
+                NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+            )
+            .unwrap();
+            let mut b = EquityOptionBuilder::new()
+                .spot(100.0)
+                .strike(100.0)
+                .flat_vol(0.3)
+                .discount_curve(curve)
+                .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+                .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 5).unwrap());
+            if american {
+                b = b.american();
+            }
+            let mut b = b.vanilla(PutOrCall::Put).engine(Engine::Binomial).tree_steps(801);
+            if term {
+                b = b.tree_term_structure();
+            }
+            b.build().expect("option must build")
+        };
+        // European: only df(T) matters, so term and uniform trees agree
+        let (euro_term, euro_uniform) = (build(true, false).npv(), build(false, false).npv());
+        assert!(
+            (euro_term - euro_uniform).abs() < 0.05,
+            "European must agree: term {euro_term} uniform {euro_uniform}"
+        );
+        // American put: early rates are 1%, not the 8.8%-ish zero rate to
+        // maturity — cheap short-dated carry makes waiting cheaper, so
+        // rate timing must move the early-exercise value visibly
+        let (amer_term, amer_uniform) = (build(true, true).npv(), build(false, true).npv());
+        assert!(
+            (amer_term - amer_uniform).abs() > 0.02,
+            "rate timing must matter for early exercise: term {amer_term} uniform {amer_uniform}"
+        );
+        assert!(amer_term >= euro_term - 1e-9);
     }
 
     #[test]

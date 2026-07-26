@@ -107,7 +107,7 @@ mod tests {
             exercise_style: crate::core::utils::ContractStyle::European,
             lookback_type: crate::equity::vanilla_option::LookbackType::FloatingStrike,
         });
-        option.engine = Engine::Binomial;
+        option.engine = crate::equity::utils::PricingEngine::Binomial(Default::default());
         match option.price() {
             Err(RustyQLibError::UnsupportedEngine(msg)) => {
                 assert!(msg.contains("Binomial"), "should explain the refusal: {msg}")

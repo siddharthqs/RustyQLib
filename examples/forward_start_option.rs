@@ -12,7 +12,7 @@ use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::forward_start_option::forward_start_price;
 use rustyqlib::equity::heston::HestonParams;
-use rustyqlib::equity::montecarlo::McModel;
+use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
 
 const SPOT: f64 = 100.0;
@@ -56,12 +56,12 @@ fn main() {
             .paths(100_000)
             .build().expect("option must build"),
     );
-    common::row(
+    common::row_or_refusal(
         "Finite difference (unsupported)",
-        &base()
+        base()
             .forward_start(PutOrCall::Call, 1.0, START)
             .engine(Engine::FiniteDifference)
-            .build().expect("option must build"),
+            .build(),
     );
 
     common::section("Forward smile: Heston vs Black-Scholes");
