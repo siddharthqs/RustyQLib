@@ -56,29 +56,10 @@ fn price_equity_contract(data: &Contract) -> Result<ContractOutput, RustyQLibErr
         }
         ProductData::RainbowOption(rb) => {
             let option = crate::equity::rainbow::RainbowOption::try_from_json(rb)?;
-            let stats = option.npv_with_stats();
-            let pv = match stats {
-                Some(s) => s.pv,
-                None => option.npv(),
-            };
-            let contract_output = ContractOutput {
-                pv,
-                // scalar Greeks are per-asset for rainbows: see deltas/vegas
-                delta: 0.0,
-                gamma: 0.0,
-                vega: 0.0,
-                theta: option.theta(),
-                rho: option.rho(),
-                // Per-asset vanna/charm are not yet defined for rainbow payoffs.
-                vanna: 0.0,
-                charm: 0.0,
-                gamma_p: 0.0,
-                zomma: 0.0,
-                std_err: stats.map(|s| s.std_err),
-                deltas: Some(option.deltas()),
-                vegas: Some(option.vegas()),
-                error: None,
-            };
+            // scalar spot Greeks are per-asset for rainbows: see deltas/vegas
+            let mut contract_output = ContractOutput::from(option.price()?);
+            contract_output.deltas = Some(option.deltas());
+            contract_output.vegas = Some(option.vegas());
             println!("Rainbow Option Price: {}", contract_output.pv);
             Ok(contract_output)
         }

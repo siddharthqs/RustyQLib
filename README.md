@@ -109,6 +109,11 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   diagnostic engine that keeps the full spot/value trees, the
   early-exercise boundary per layer, tree Greeks and wall-clock timing,
   plus a `convergence_study` helper for step-ladder analysis. A
+  **trinomial lattice** rounds out `core::lattice` for fixed income:
+  per-node branching (Hull-White edge-switching included), per-node
+  discounting (the short rate lives on the node), and Arrow-Debreu state
+  prices by forward induction — validated by repricing the Vasicek
+  zero-coupon bond closed form on a mean-reverting clamped tree. A
   **term-structure lattice** (`tree_term_structure` in JSON,
   `.tree_term_structure()` on the builder) applies time-dependent
   parameters directly on the tree: a variance-equal time grid keeps the

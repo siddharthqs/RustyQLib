@@ -5,6 +5,7 @@
 
 mod common;
 
+use rustyqlib::Instrument;
 use chrono::{Duration, Local};
 use rustyqlib::equity::blackscholes::bs_price;
 use rustyqlib::core::trade::PutOrCall;

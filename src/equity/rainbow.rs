@@ -24,10 +24,12 @@ use crate::core::daycount::DayCountConvention;
 use crate::core::linalg::{cholesky, nearest_correlation};
 use crate::core::trade::PutOrCall;
 use crate::core::utils::norm_cdf;
-use crate::equity::montecarlo::{McStats, Sampler};
-use crate::equity::utils::Engine;
+use crate::equity::montecarlo::{McStats, MonteCarloConfig, Sampler};
+use crate::equity::utils::{Engine, PricingEngine};
 use crate::core::montecarlo::{path_normals, QmcSequence};
 use crate::core::errors::RustyQLibError;
+use crate::core::results::{Greeks, PricingResult};
+use crate::core::traits::Instrument;
 
 const PATH_CHUNK: usize = 4096;
 
@@ -89,12 +91,43 @@ pub struct RainbowOption {
     pub maturity_date: NaiveDate,
     pub valuation_date: NaiveDate,
     pub discount_curve: YieldCurve,
-    pub engine: Engine,
-    pub paths: usize,
-    pub sampler: Sampler,
-    pub seed: u64,
+    /// The numerical method with its settings. Rainbow payoffs price on
+    /// the analytic engine (Margrabe / Kirk / moment matching) or Monte
+    /// Carlo (terminal correlated GBM: `paths`, `sampler` and `seed` from
+    /// the config; `time_steps`/`scheme` do not apply).
+    pub engine: PricingEngine,
     /// Cholesky factor of the correlation matrix (lower triangular).
     chol: Vec<Vec<f64>>,
+}
+
+impl Instrument for RainbowOption {
+    fn try_npv(&self) -> Result<f64, RustyQLibError> {
+        self.check_engine_support()?;
+        Ok(match self.engine {
+            PricingEngine::BlackScholes => self.analytic_npv_with(&self.params()),
+            _ => self.mc_stats_with(&self.params()).pv,
+        })
+    }
+
+    /// Value, scalar theta/rho and (under Monte Carlo) the standard
+    /// error. Spot Greeks are per-asset for rainbows — see
+    /// [`RainbowOption::deltas`] and [`RainbowOption::vegas`] — so the
+    /// scalar delta/gamma/vega slots stay zero.
+    fn price(&self) -> Result<PricingResult, RustyQLibError> {
+        self.check_engine_support()?;
+        let (pv, std_err) = match self.engine {
+            PricingEngine::MonteCarlo(_) => {
+                let stats = self.mc_stats_with(&self.params());
+                (stats.pv, Some(stats.std_err))
+            }
+            _ => (self.try_npv()?, None),
+        };
+        Ok(PricingResult {
+            pv,
+            greeks: Greeks { theta: self.theta(), rho: self.rho(), ..Default::default() },
+            std_err,
+        })
+    }
 }
 
 /// Market snapshot bumped by the Greeks (common random numbers).
@@ -107,6 +140,15 @@ struct Params {
 }
 
 impl RainbowOption {
+    /// Monte Carlo settings. Invariant: only called on the Monte Carlo
+    /// code paths (the engine dispatch guarantees it).
+    fn mc_cfg(&self) -> &MonteCarloConfig {
+        match &self.engine {
+            PricingEngine::MonteCarlo(cfg) => cfg,
+            _ => unreachable!("Monte Carlo code path reached on a non-MC engine"),
+        }
+    }
+
     /// Build from contract data, panicking on any invalid field. Fallible
     /// callers should use [`RainbowOption::try_from_json`].
     pub fn from_json(data: &RainbowOptionData) -> Box<RainbowOption> {
@@ -212,24 +254,32 @@ impl RainbowOption {
             valuation_date,
             discount_curve,
             engine: match data.pricer.as_deref().map_or("MC", |v| v).trim() {
-                "Analytical" | "analytical" => Engine::BlackScholes,
-                "MonteCarlo" | "montecarlo" | "MC" | "mc" => Engine::MonteCarlo,
+                "Analytical" | "analytical" => PricingEngine::BlackScholes,
+                "MonteCarlo" | "montecarlo" | "MC" | "mc" => {
+                    PricingEngine::MonteCarlo(MonteCarloConfig {
+                        paths: data.simulation.unwrap_or(100_000) as usize,
+                        sampler: data
+                            .mc_sampler
+                            .as_deref()
+                            .map(|s| {
+                                s.parse::<Sampler>().map_err(|_| {
+                                    RustyQLibError::invalid_input(
+                                        "mc_sampler",
+                                        format!("invalid mc_sampler '{s}'"),
+                                    )
+                                })
+                            })
+                            .transpose()?
+                            .unwrap_or(Sampler::Sobol),
+                        seed: data.mc_seed.unwrap_or(42),
+                        ..Default::default()
+                    })
+                }
                 other => return Err(RustyQLibError::invalid_input(
                     "pricer",
                     format!("invalid pricer '{other}' for rainbow (Analytical or MC)"),
                 )),
             },
-            paths: data.simulation.unwrap_or(100_000) as usize,
-            sampler: data
-                .mc_sampler
-                .as_deref()
-                .map(|s| s.parse::<Sampler>().map_err(|_| RustyQLibError::invalid_input(
-                    "mc_sampler",
-                    format!("invalid mc_sampler '{s}'"),
-                )))
-                .transpose()?
-                .unwrap_or(Sampler::Sobol),
-            seed: data.mc_seed.unwrap_or(42),
             chol,
         }))
     }
@@ -279,24 +329,38 @@ impl RainbowOption {
 
     // ── Pricing ─────────────────────────────────────────────────────────
 
-    pub fn npv(&self) -> f64 {
-        match self.engine {
-            Engine::BlackScholes => self.analytic_npv_with(&self.params()),
-            Engine::MonteCarlo => self.mc_stats_with(&self.params()).pv,
-            _ => panic!("Rainbow options price on the Analytical or MonteCarlo engines"),
+    /// Reject engine/payoff combinations the library cannot price,
+    /// with an error naming the engine that can.
+    pub(crate) fn check_engine_support(&self) -> Result<(), RustyQLibError> {
+        match &self.engine {
+            PricingEngine::BlackScholes => {
+                if matches!(self.rainbow_type, RainbowType::BestOf | RainbowType::WorstOf) {
+                    return Err(RustyQLibError::UnsupportedEngine(
+                        "best-of / worst-of rainbows have no analytic pricer yet \
+                         (Stulz for two assets is future work); use MonteCarlo"
+                            .to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            PricingEngine::MonteCarlo(_) => Ok(()),
+            other => Err(RustyQLibError::UnsupportedEngine(format!(
+                "rainbow options price on the Analytical or MonteCarlo engines, not {:?}",
+                other.kind()
+            ))),
         }
     }
 
     pub fn npv_with_stats(&self) -> Option<McStats> {
         match self.engine {
-            Engine::MonteCarlo => Some(self.mc_stats_with(&self.params())),
+            PricingEngine::MonteCarlo(_) => Some(self.mc_stats_with(&self.params())),
             _ => None,
         }
     }
 
     fn price_with(&self, p: &Params) -> f64 {
         match self.engine {
-            Engine::BlackScholes => self.analytic_npv_with(p),
+            PricingEngine::BlackScholes => self.analytic_npv_with(p),
             _ => self.mc_stats_with(p).pv,
         }
     }
@@ -358,8 +422,9 @@ impl RainbowOption {
             RainbowType::Exchange => self.margrabe(p),
             RainbowType::Spread => self.kirk(p),
             RainbowType::Basket => self.basket_moment_match(p),
-            RainbowType::BestOf | RainbowType::WorstOf => panic!(
-                "best_of / worst_of have no analytic pricer yet; use the MonteCarlo engine"
+            // invariant: check_engine_support refuses these before pricing
+            RainbowType::BestOf | RainbowType::WorstOf => unreachable!(
+                "best-of/worst-of on the analytic engine is rejected before pricing"
             ),
         }
     }
@@ -445,23 +510,24 @@ impl RainbowOption {
         let drifts: Vec<f64> = (0..n)
             .map(|i| (p.r - self.dividends[i] - 0.5 * p.vols[i] * p.vols[i]) * t)
             .collect();
-        let qmc = match self.sampler {
-            Sampler::Sobol => Some(QmcSequence::new(n, self.seed)),
+        let cfg = self.mc_cfg();
+        let qmc = match cfg.sampler {
+            Sampler::Sobol => Some(QmcSequence::new(n, cfg.seed)),
             Sampler::PseudoRandom => None,
         };
-        let chunks = self.paths.div_ceil(PATH_CHUNK);
+        let chunks = cfg.paths.div_ceil(PATH_CHUNK);
         let partials: Vec<(f64, f64)> = (0..chunks)
             .into_par_iter()
             .map(|chunk| {
                 let mut eps = vec![0.0; n];
                 let mut terminal = vec![0.0; n];
                 let (mut sum, mut sum_sq) = (0.0, 0.0);
-                for path in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(self.paths) {
+                for path in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
                     match &qmc {
                         Some(seq) => seq.normals(path as u64 + 1, &mut eps),
                         None => {
                             // antithetic pairs from per-pair streams
-                            path_normals(self.seed, (path / 2) as u64, &mut eps);
+                            path_normals(cfg.seed, (path / 2) as u64, &mut eps);
                             if path % 2 == 1 {
                                 for e in eps.iter_mut() {
                                     *e = -*e;
@@ -484,10 +550,10 @@ impl RainbowOption {
             .collect();
         let (sum, sum_sq) =
             partials.into_iter().fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
-        let nf = self.paths as f64;
+        let nf = cfg.paths as f64;
         let mean = sum / nf;
         let var = (sum_sq / nf - mean * mean).max(0.0);
-        McStats { pv: mean, std_err: (var / nf).sqrt(), paths: self.paths, steps: 1 }
+        McStats { pv: mean, std_err: (var / nf).sqrt(), paths: cfg.paths, steps: 1 }
     }
 }
 
@@ -535,11 +601,44 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_engines_error_instead_of_panicking() {
+        // best-of has no analytic pricer: typed refusal, not a panic
+        let mut option = two_asset("best_of", "C", Some(100.0), 0.6);
+        option.engine = PricingEngine::BlackScholes;
+        match option.try_npv() {
+            Err(RustyQLibError::UnsupportedEngine(msg)) => {
+                assert!(msg.contains("MonteCarlo"), "should name the right engine: {msg}")
+            }
+            other => panic!("expected UnsupportedEngine, got {other:?}"),
+        }
+        // engines that never apply to rainbows are refused too
+        option.engine = PricingEngine::from_kind(Engine::Binomial);
+        assert!(matches!(
+            option.try_npv(),
+            Err(RustyQLibError::UnsupportedEngine(_))
+        ));
+        // and price() carries the same guarantee
+        assert!(option.price().is_err());
+    }
+
+    #[test]
+    fn price_reports_theta_rho_and_mc_std_err() {
+        let option = two_asset("exchange", "C", None, 0.6);
+        let result = option.price().unwrap();
+        let se = result.std_err.expect("MC rainbow must report a standard error");
+        assert!(se > 0.0 && se.is_finite());
+        assert!((result.pv - option.npv()).abs() < 1e-12);
+        assert_eq!(result.greeks.theta, option.theta());
+        assert_eq!(result.greeks.rho, option.rho());
+        assert_eq!(result.greeks.delta, 0.0, "spot Greeks are per-asset");
+    }
+
+    #[test]
     fn margrabe_matches_monte_carlo() {
         let mut option = two_asset("exchange", "C", None, 0.6);
-        option.engine = Engine::BlackScholes;
+        option.engine = PricingEngine::BlackScholes;
         let analytic = option.npv();
-        option.engine = Engine::MonteCarlo;
+        option.engine = PricingEngine::from_kind(Engine::MonteCarlo);
         let mc = option.npv();
         assert!((mc - analytic).abs() < 0.05, "mc={mc} margrabe={analytic}");
         assert!(analytic > 0.0);
@@ -551,16 +650,16 @@ mod tests {
         option.spots = vec![100.0, 100.0];
         option.vols = vec![0.3, 0.3];
         option.dividends = vec![0.02, 0.02];
-        option.engine = Engine::BlackScholes;
+        option.engine = PricingEngine::BlackScholes;
         assert!(option.npv().abs() < 1e-10);
     }
 
     #[test]
     fn kirk_close_to_monte_carlo() {
         let mut option = two_asset("spread", "C", Some(5.0), 0.6);
-        option.engine = Engine::BlackScholes;
+        option.engine = PricingEngine::BlackScholes;
         let kirk = option.npv();
-        option.engine = Engine::MonteCarlo;
+        option.engine = PricingEngine::from_kind(Engine::MonteCarlo);
         let mc = option.npv();
         // Kirk is an approximation: agreement at the few-cents level
         assert!((mc - kirk).abs() < 0.10, "mc={mc} kirk={kirk}");
@@ -569,9 +668,9 @@ mod tests {
     #[test]
     fn spread_with_zero_strike_equals_margrabe() {
         let mut spread = two_asset("spread", "C", Some(0.0), 0.6);
-        spread.engine = Engine::BlackScholes;
+        spread.engine = PricingEngine::BlackScholes;
         let mut exchange = two_asset("exchange", "C", None, 0.6);
-        exchange.engine = Engine::BlackScholes;
+        exchange.engine = PricingEngine::BlackScholes;
         assert!((spread.npv() - exchange.npv()).abs() < 1e-10);
     }
 
@@ -604,7 +703,7 @@ mod tests {
         };
         let mut option = RainbowOption::from_json(&data);
         let analytic = option.npv();
-        option.engine = Engine::MonteCarlo;
+        option.engine = PricingEngine::from_kind(Engine::MonteCarlo);
         let mc = option.npv();
         assert!((mc - analytic).abs() < 0.15, "mc={mc} moment-match={analytic}");
     }
@@ -631,7 +730,7 @@ mod tests {
         let t = worst.time_to_maturity();
         let worst_pv = worst.npv();
         let mut exchange_21 = two_asset("exchange", "P", None, 0.6); // pays (S2 - S1)^+
-        exchange_21.engine = Engine::BlackScholes;
+        exchange_21.engine = PricingEngine::BlackScholes;
         let expected = 95.0 * (-0.01 * t as f64).exp() - exchange_21.npv();
         assert!((worst_pv - expected).abs() < 0.05, "{worst_pv} vs {expected}");
     }

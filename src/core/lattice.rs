@@ -566,6 +566,225 @@ impl TermLattice {
     }
 }
 
+
+// ── Trinomial lattice ───────────────────────────────────────────────────
+
+/// One node's branching: the **middle child's absolute index** on the
+/// next layer and the probabilities onto `(target+1, target, target-1)`.
+///
+/// A plain diffusion always targets its own index; a mean-reverting
+/// short-rate tree (Hull-White) shifts the target at the edge nodes so
+/// probabilities stay positive — the reason rates trees are trinomial.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrinomialBranch {
+    pub target: i32,
+    pub p_up: f64,
+    pub p_mid: f64,
+    pub p_down: f64,
+}
+
+/// A recombining trinomial lattice over the integer state grid
+/// `x_j = j * dx` (the caller maps `j` to its own state, e.g.
+/// `r(i, j) = alpha_i + j * dx` for a fitted short-rate tree).
+///
+/// Built from a per-node branching closure, so edge-switching trees
+/// (Hull-White clamping) and plain diffusions use the same engine. The
+/// per-layer index ranges follow from reachability. Discounting is
+/// **per node** — `df(layer, j)` — because for fixed income the short
+/// rate lives on the node; equity-style trees pass a constant.
+#[derive(Debug, Clone)]
+pub struct TrinomialLattice {
+    pub dt: f64,
+    pub dx: f64,
+    j_min: Vec<i32>,
+    j_max: Vec<i32>,
+    /// `branches[i][j - j_min[i]]` for layers `0..n`.
+    branches: Vec<Vec<TrinomialBranch>>,
+}
+
+impl TrinomialLattice {
+    /// Build `n` steps of the lattice from the branching rule.
+    /// Probabilities are validated per node; targets may shift by at most
+    /// one index per step (`|target - j| <= 1`), which keeps the tree
+    /// recombining.
+    pub fn build(
+        n: usize,
+        dt: f64,
+        dx: f64,
+        branching: &dyn Fn(usize, i32) -> TrinomialBranch,
+    ) -> Result<TrinomialLattice, RustyQLibError> {
+        if n < 1 || !(dt > 0.0) || !(dx > 0.0) {
+            return Err(RustyQLibError::invalid_input(
+                "trinomial",
+                "the lattice needs at least one step and positive dt / dx",
+            ));
+        }
+        let mut j_min = vec![0i32];
+        let mut j_max = vec![0i32];
+        let mut branches: Vec<Vec<TrinomialBranch>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let (lo, hi) = (j_min[i], j_max[i]);
+            let mut layer = Vec::with_capacity((hi - lo + 1) as usize);
+            let (mut next_lo, mut next_hi) = (i32::MAX, i32::MIN);
+            for j in lo..=hi {
+                let b = branching(i, j);
+                if (b.target - j).abs() > 1 {
+                    return Err(RustyQLibError::NumericalError(format!(
+                        "node ({i}, {j}) branches to target {} — more than one \
+                         index away, which breaks recombination",
+                        b.target
+                    )));
+                }
+                for (name, prob) in
+                    [("p_up", b.p_up), ("p_mid", b.p_mid), ("p_down", b.p_down)]
+                {
+                    if !(prob >= 0.0 && prob <= 1.0) {
+                        return Err(RustyQLibError::NumericalError(format!(
+                            "node ({i}, {j}): {name} = {prob:.6} outside [0, 1] \
+                             (adjust the spacing or the branching rule)"
+                        )));
+                    }
+                }
+                if (b.p_up + b.p_mid + b.p_down - 1.0).abs() > 1e-9 {
+                    return Err(RustyQLibError::NumericalError(format!(
+                        "node ({i}, {j}): probabilities sum to {:.9}, not 1",
+                        b.p_up + b.p_mid + b.p_down
+                    )));
+                }
+                next_lo = next_lo.min(b.target - 1);
+                next_hi = next_hi.max(b.target + 1);
+                layer.push(b);
+            }
+            branches.push(layer);
+            j_min.push(next_lo);
+            j_max.push(next_hi);
+        }
+        Ok(TrinomialLattice { dt, dx, j_min, j_max, branches })
+    }
+
+    pub fn steps(&self) -> usize {
+        self.branches.len()
+    }
+
+    /// Node index range `(j_min, j_max)` of a layer.
+    pub fn layer_range(&self, i: usize) -> (i32, i32) {
+        (self.j_min[i], self.j_max[i])
+    }
+
+    /// Backward induction. `node_df(i, j)` is the one-step discount at
+    /// the node (state-dependent: `e^{-r(i,j) dt}` on a short-rate
+    /// tree); `terminal(j)` values the final layer; `exercise` (when
+    /// given) maps `(layer, j, continuation)` to the node value.
+    pub fn price(
+        &self,
+        node_df: &dyn Fn(usize, i32) -> f64,
+        terminal: &dyn Fn(i32) -> f64,
+        exercise: Option<&dyn Fn(usize, i32, f64) -> f64>,
+    ) -> f64 {
+        let n = self.steps();
+        let (lo_n, hi_n) = (self.j_min[n], self.j_max[n]);
+        let mut values: Vec<f64> = (lo_n..=hi_n).map(terminal).collect();
+        for i in (0..n).rev() {
+            let (lo, hi) = (self.j_min[i], self.j_max[i]);
+            let next_lo = self.j_min[i + 1];
+            let mut layer = Vec::with_capacity((hi - lo + 1) as usize);
+            for j in lo..=hi {
+                let b = self.branches[i][(j - lo) as usize];
+                let k = (b.target - next_lo) as usize;
+                let expected = b.p_up * values[k + 1] + b.p_mid * values[k]
+                    + b.p_down * values[k - 1];
+                let cont = node_df(i, j) * expected;
+                layer.push(match exercise {
+                    Some(ex) => ex(i, j, cont),
+                    None => cont,
+                });
+            }
+            values = layer;
+        }
+        values[0]
+    }
+
+    /// Arrow-Debreu state prices by forward induction: `Q[i][j - j_min[i]]`
+    /// is the value today of receiving 1 at node `(i, j)`. The workhorse of
+    /// short-rate curve fitting — Hull-White's `alpha_i` shifts solve
+    /// `sum_j Q[i][j] e^{-(alpha_i + j dx) dt} = P(0, t_{i+1})` layer by
+    /// layer. `sum_j Q[n][j]` is the tree's discount factor to `t_n`.
+    pub fn arrow_debreu(&self, node_df: &dyn Fn(usize, i32) -> f64) -> Vec<Vec<f64>> {
+        let n = self.steps();
+        let mut q: Vec<Vec<f64>> = Vec::with_capacity(n + 1);
+        q.push(vec![1.0]);
+        for i in 0..n {
+            let (lo, hi) = (self.j_min[i], self.j_max[i]);
+            let (next_lo, next_hi) = (self.j_min[i + 1], self.j_max[i + 1]);
+            let mut next = vec![0.0; (next_hi - next_lo + 1) as usize];
+            for j in lo..=hi {
+                let b = self.branches[i][(j - lo) as usize];
+                let flow = q[i][(j - lo) as usize] * node_df(i, j);
+                let k = (b.target - next_lo) as usize;
+                next[k + 1] += b.p_up * flow;
+                next[k] += b.p_mid * flow;
+                next[k - 1] += b.p_down * flow;
+            }
+            q.push(next);
+        }
+        q
+    }
+}
+
+/// Moment-matched branching for a constant-coefficient diffusion
+/// `dx_t = nu dt + sigma dW` on spacing `dx` (Boyle / Kamrad-Ritchken:
+/// `dx = sigma sqrt(3 dt)` gives the classic 1/6, 2/3, 1/6 weights at
+/// zero drift). Same rule at every node — the equity-style tree.
+pub fn diffusion_branching(nu: f64, sigma: f64, dt: f64, dx: f64) -> TrinomialBranch {
+    let v = (sigma * sigma * dt + nu * nu * dt * dt) / (dx * dx);
+    let m = nu * dt / dx;
+    TrinomialBranch {
+        target: 0, // filled per node by the caller closure (target = j)
+        p_up: 0.5 * (v + m),
+        p_mid: 1.0 - v,
+        p_down: 0.5 * (v - m),
+    }
+}
+
+/// Hull-White branching for the mean-reverting state
+/// `dx_t = -a x_t dt + sigma dW` with `dx = sigma sqrt(3 dt)`:
+/// standard branching in the interior, switching to downward branching at
+/// `+j_cap` and upward at `-j_cap` so probabilities stay positive
+/// (Hull's `j_max = ceil(0.184 / (a dt))` is the usual cap).
+pub fn hull_white_branching(a: f64, dt: f64, j: i32, j_cap: i32) -> TrinomialBranch {
+    let ajdt = a * j as f64 * dt;
+    let ajdt2 = ajdt * ajdt;
+    if j >= j_cap {
+        // downward branching: children (j, j-1, j-2)
+        TrinomialBranch {
+            target: j - 1,
+            p_up: 7.0 / 6.0 + 0.5 * (ajdt2 - 3.0 * ajdt),
+            p_mid: -1.0 / 3.0 - ajdt2 + 2.0 * ajdt,
+            p_down: 1.0 / 6.0 + 0.5 * (ajdt2 - ajdt),
+        }
+    } else if j <= -j_cap {
+        // upward branching: children (j+2, j+1, j)
+        TrinomialBranch {
+            target: j + 1,
+            p_up: 1.0 / 6.0 + 0.5 * (ajdt2 + ajdt),
+            p_mid: -1.0 / 3.0 - ajdt2 - 2.0 * ajdt,
+            p_down: 7.0 / 6.0 + 0.5 * (ajdt2 + 3.0 * ajdt),
+        }
+    } else {
+        TrinomialBranch {
+            target: j,
+            p_up: 1.0 / 6.0 + 0.5 * (ajdt2 - ajdt),
+            p_mid: 2.0 / 3.0 - ajdt2,
+            p_down: 1.0 / 6.0 + 0.5 * (ajdt2 + ajdt),
+        }
+    }
+}
+
+/// Hull's recommended clamp for [`hull_white_branching`].
+pub fn hull_white_j_cap(a: f64, dt: f64) -> i32 {
+    (0.184 / (a * dt)).ceil() as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +932,120 @@ mod tests {
         // invalid vol
         let r = BinomialTreeType::Tian.params(100.0, 100.0, 0.03, -0.1, 1.0, 100);
         assert!(matches!(r, Err(RustyQLibError::InvalidInput { .. })));
+    }
+
+    #[test]
+    fn trinomial_diffusion_converges_to_black_scholes() {
+        // GBM in log space: nu = b - sigma^2/2, terminal S = S0 e^{j dx}
+        let nu = (R - Q) - 0.5 * SIGMA * SIGMA;
+        let price_at = |n: usize| {
+            let dt = T / n as f64;
+            let dx = SIGMA * (3.0 * dt).sqrt();
+            let proto = diffusion_branching(nu, SIGMA, dt, dx);
+            let branching = |_: usize, j: i32| TrinomialBranch { target: j, ..proto };
+            let lattice = TrinomialLattice::build(n, dt, dx, &branching).unwrap();
+            let df = (-R * dt).exp();
+            (
+                lattice.price(&|_, _| df, &|j| (S * (j as f64 * dx).exp() - K).max(0.0), None),
+                dx,
+                lattice,
+                df,
+            )
+        };
+        let reference = bs_call();
+        let coarse_err = (price_at(250).0 - reference).abs();
+        let (call, dx, lattice, df) = price_at(1000);
+        let fine_err = (call - reference).abs();
+        assert!(fine_err < 5e-3, "trinomial {call} vs BS {reference}");
+        // first-order convergence: quadrupling the steps shrinks the error
+        assert!(
+            fine_err < coarse_err,
+            "error must shrink with steps: {fine_err} vs {coarse_err}"
+        );
+        let n = 1000usize;
+        let _ = n;
+
+        // American put dominates European on the same tree
+        let terminal_put = |j: i32| (K - S * (j as f64 * dx).exp()).max(0.0);
+        let euro = lattice.price(&|_, _| df, &terminal_put, None);
+        let ex = |_: usize, j: i32, cont: f64| {
+            (K - S * (j as f64 * dx).exp()).max(0.0).max(cont)
+        };
+        let amer = lattice.price(&|_, _| df, &terminal_put, Some(&ex));
+        assert!(amer >= euro - 1e-12, "american {amer} vs european {euro}");
+    }
+
+    #[test]
+    fn arrow_debreu_prices_sum_to_the_discount_factor() {
+        let n = 100;
+        let dt = 0.01;
+        let dx = 0.2 * (3.0_f64 * dt).sqrt(); // Kamrad-Ritchken spacing
+        let proto = diffusion_branching(0.0, 0.2, dt, dx);
+        let branching = |_: usize, j: i32| TrinomialBranch { target: j, ..proto };
+        let lattice = TrinomialLattice::build(n, dt, dx, &branching).unwrap();
+        let df = (-0.05_f64 * dt).exp();
+        let q = lattice.arrow_debreu(&|_, _| df);
+        // sum of state prices at layer i = P(0, t_i) under a flat rate
+        for i in [1usize, 50, 100] {
+            let total: f64 = q[i].iter().sum();
+            let expected = (-0.05 * i as f64 * dt).exp();
+            assert!(
+                (total - expected).abs() < 1e-12,
+                "layer {i}: sum {total} vs df {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn hull_white_tree_reprices_the_vasicek_bond() {
+        // Vasicek with b = 0, r0 = 0: dr = -a r dt + sigma dW. The tree
+        // state IS the short rate; per-node discounting e^{-r(i,j) dt}.
+        // Closed form: P(0,T) = exp(sigma^2 (T - B)/(2 a^2) - sigma^2 B^2/(4a)),
+        // B = (1 - e^{-aT})/a.
+        let (a, sigma, t_mat) = (0.10, 0.015, 5.0);
+        let n = 500;
+        let dt = t_mat / n as f64;
+        let dx = sigma * (3.0 * dt).sqrt();
+        let cap = hull_white_j_cap(a, dt);
+        let branching = |_: usize, j: i32| hull_white_branching(a, dt, j, cap);
+        let lattice = TrinomialLattice::build(n, dt, dx, &branching).unwrap();
+        // the clamp must actually bite for the edge formulas to be used
+        assert!(lattice.layer_range(n).1 == cap, "edge branching untested");
+        let node_df = |_: usize, j: i32| (-(j as f64 * dx) * dt).exp();
+        let tree_price = lattice.price(&node_df, &|_| 1.0, None);
+
+        let b_t = (1.0 - (-a * t_mat).exp()) / a;
+        let closed_form = (sigma * sigma * (t_mat - b_t) / (2.0 * a * a)
+            - sigma * sigma * b_t * b_t / (4.0 * a))
+            .exp();
+        let rel_err = (tree_price - closed_form).abs() / closed_form;
+        assert!(
+            rel_err < 1e-3,
+            "tree {tree_price} vs Vasicek {closed_form} (rel err {rel_err:.2e})"
+        );
+
+        // Arrow-Debreu consistency: state prices reprice the same bond
+        let q = lattice.arrow_debreu(&node_df);
+        let via_q: f64 = q[n].iter().sum();
+        assert!((via_q - tree_price).abs() < 1e-12);
+    }
+
+    #[test]
+    fn trinomial_rejects_invalid_branching() {
+        // fat drift on a coarse grid: probabilities leave [0, 1]
+        let proto = diffusion_branching(5.0, 0.05, 0.5, 0.02);
+        let branching = |_: usize, j: i32| TrinomialBranch { target: j, ..proto };
+        let r = TrinomialLattice::build(4, 0.5, 0.02, &branching);
+        assert!(matches!(r, Err(RustyQLibError::NumericalError(_))), "{r:?}");
+        // non-recombining target shift
+        let jumpy = |_: usize, j: i32| TrinomialBranch {
+            target: j + 2,
+            p_up: 1.0 / 6.0,
+            p_mid: 2.0 / 3.0,
+            p_down: 1.0 / 6.0,
+        };
+        let r = TrinomialLattice::build(4, 0.01, 0.02, &jumpy);
+        assert!(matches!(r, Err(RustyQLibError::NumericalError(_))), "{r:?}");
     }
 
     #[test]
