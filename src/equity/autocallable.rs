@@ -29,8 +29,14 @@ pub struct AutocallablePayoff {
     pub protection_barrier: f64,
     /// Coupon (rebate) accrued per observation period, paid at call.
     pub coupon: f64,
-    /// Number of equally spaced observations over the life (last = expiry).
+    /// Number of observations over the life (last = expiry). Equally
+    /// spaced unless `observation_times` is set.
     pub observations: usize,
+    /// Explicit observation times as year fractions from valuation,
+    /// strictly increasing, last at expiry — e.g. from a
+    /// [`Schedule`](crate::core::calendar::Schedule) of business-day
+    /// adjusted call dates. `None` keeps equal spacing.
+    pub observation_times: Option<Vec<f64>>,
     pub notional: f64,
     /// Contractual initial fixing for the downside participation ratio.
     pub initial_fixing: f64,
@@ -138,6 +144,7 @@ mod tests {
             protection_barrier: 70.0,
             coupon: 5.0,
             observations: 4,
+            observation_times: None,
             notional: 100.0,
             initial_fixing: 100.0,
             coupon_barrier: None,

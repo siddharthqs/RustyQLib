@@ -180,6 +180,10 @@ fn reprice(option: &EquityOption, d_spot: f64, d_vol: f64, d_rate: f64, d_maturi
         ContractStyle::American => price(s, k, r, q, sigma, t, pc),
         // BAW on a European contract is just the European price
         ContractStyle::European => bs_price(s, k, r, q, sigma, t, pc),
+        // invariant: check_engine_support refuses Bermudan on this engine
+        ContractStyle::Bermudan(_) => {
+            unreachable!("Bermudan exercise is rejected on the BAW engine before pricing")
+        }
     }
 }
 

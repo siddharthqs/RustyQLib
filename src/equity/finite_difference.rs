@@ -236,6 +236,21 @@ fn solve(
     let sigma_ref = option.base.volatility() + sigma_bump;
     assert!(sigma_ref > 0.0, "volatility must be positive");
     let american = matches!(payoff.exercise_style(), ContractStyle::American);
+    // Bermudan: backward step s covers calendar time t-(s+1)dt, so an
+    // exercise time tm (forward, 1-based grid index g) maps to s = steps-g-1
+    let bermudan_backward: Option<Vec<bool>> = match payoff.exercise_style() {
+        ContractStyle::Bermudan(times) => {
+            let steps_total = cfg.time_steps;
+            let mut mask = vec![false; steps_total];
+            for g in crate::core::utils::times_to_grid_steps(times, t, steps_total) {
+                if g < steps_total {
+                    mask[steps_total - g - 1] = true;
+                }
+            }
+            Some(mask)
+        }
+        _ => None,
+    };
     let put = matches!(payoff.put_or_call(), PutOrCall::Put);
 
     let vol_field = match option.mc.model {
@@ -335,6 +350,8 @@ fn solve(
     let mut theta_layer_value = 0.0; // value at spot one step before the end
 
     for step in 0..steps {
+        let exercise_now = american
+            || bermudan_backward.as_ref().map_or(false, |m| m.get(step).copied().unwrap_or(false));
         let theta_w = if step < RANNACHER_STEPS { 1.0 } else { 0.5 };
         let r_step = step_rates[step];
         let calendar_mid = (t - (step as f64 + 0.5) * dt).max(0.0);
@@ -357,7 +374,7 @@ fn solve(
                 return 0.0;
             }
             let mut val = cum_df * payoff.payoff(s_grid[i] * cum_growth, strike);
-            if american {
+            if exercise_now {
                 val = val.max(exercise[i]);
             }
             val
@@ -379,7 +396,7 @@ fn solve(
             sup[i - 1] = -theta_w * dt * upper[i];
         }
 
-        let interior = if american {
+        let interior = if exercise_now {
             // Brennan-Schwartz: apply the exercise constraint inside the
             // back-substitution, sweeping from the out-of-the-money side
             // toward the exercise region (low spot for puts, high for calls)
@@ -417,7 +434,7 @@ fn solve(
                     })
                     .collect();
                 v = shifted;
-                if american {
+                if exercise_now {
                     for i in 0..=n {
                         if v[i] < exercise[i] {
                             v[i] = exercise[i];

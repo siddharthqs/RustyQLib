@@ -60,6 +60,8 @@ pub struct RainbowOptionData {
     pub simulation: Option<u64>,
     pub mc_sampler: Option<String>,
     pub mc_seed: Option<u64>,
+    /// Pricing as-of date (`YYYY-MM-DD`); defaults to today.
+    pub valuation_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +114,8 @@ impl RainbowOption {
     }
 
     pub fn try_from_json(data: &RainbowOptionData) -> Result<Box<RainbowOption>, RustyQLibError> {
-        let valuation_date = Local::now().date_naive();
+        let valuation_date =
+            crate::core::data_models::parse_valuation_date(data.valuation_date.as_deref())?;
         let n = data.assets.len();
         if n < 2 {
             return Err(RustyQLibError::invalid_input("assets", "rainbow options need at least two assets"));
@@ -522,6 +525,7 @@ mod tests {
             simulation: Some(100_000),
             mc_sampler: None,
             mc_seed: None,
+            valuation_date: None,
         })
     }
 
@@ -596,6 +600,7 @@ mod tests {
             simulation: Some(100_000),
             mc_sampler: None,
             mc_seed: None,
+            valuation_date: None,
         };
         let mut option = RainbowOption::from_json(&data);
         let analytic = option.npv();

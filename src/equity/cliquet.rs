@@ -89,6 +89,8 @@ pub struct CliquetOptionData {
     pub style: Option<String>,
     /// Headline coupon for reverse / napoleon styles.
     pub coupon: Option<f64>,
+    /// Pricing as-of date (`YYYY-MM-DD`); defaults to today.
+    pub valuation_date: Option<String>,
 }
 
 /// A cliquet/ratchet option on equally-spaced resets.
@@ -247,7 +249,8 @@ impl Cliquet {
     }
 
     pub fn try_from_json(data: &CliquetOptionData) -> Result<Box<Cliquet>, RustyQLibError> {
-        let today = Local::now().date_naive();
+        let today =
+            crate::core::data_models::parse_valuation_date(data.valuation_date.as_deref())?;
         let maturity = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
             .map_err(|_| RustyQLibError::invalid_input(
                 "maturity",

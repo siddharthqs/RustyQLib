@@ -6,6 +6,8 @@ pub mod blackscholes;
 pub mod builder;
 pub mod heston;
 pub mod local_vol;
+pub mod market;
+pub mod cos;
 pub mod rainbow;
 pub mod vanilla_option;
 pub mod montecarlo;

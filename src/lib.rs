@@ -34,6 +34,8 @@ pub use crate::core::errors::RustyQLibError;
 pub use crate::core::results::{Greeks, PricingResult};
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;
+pub use crate::equity::market::MarketData;
+pub use crate::core::calendar::{BusinessDayConvention, Calendar, DateGeneration, Period, Schedule};
 pub use crate::core::daycount::DayCountConvention;
 pub use crate::core::traits::Instrument;
 pub use crate::core::vols::{VolInput, VolSurface};

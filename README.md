@@ -38,7 +38,14 @@ put-call parity, replication identities and cross-engine agreement in the test s
   source of truth (flat / zero rates / discount factors / forward rates in, any
   compounding), volatility surfaces (flat, strike x expiry, moneyness, FX-style
   delta quotes), robust implied vol, day counts, term-structure-consistent PDE
-  discounting.
+  discounting, and **holiday calendars with business-day conventions**
+  (weekends-only, TARGET, NYSE, UK bank holidays, custom lists — rule-based,
+  any year): date adjustment (following / modified following / preceding),
+  settlement lags (`add_business_days`), and periodic **schedule generation**
+  (forward/backward with stubs). Autocallable observation dates can be
+  calendar-generated (`.autocall_schedule(3, Calendar::UsNyse)`) or supplied
+  explicitly (`autocall_observation_dates` in JSON), so observations never
+  land on weekends or holidays.
 - **Options on futures**: European vanillas priced with Black-76, both
   standard (discounted premium) and futures-style (margined, undiscounted).
 - **Payoffs**: European & American vanillas, cash- and asset-or-nothing binaries,
@@ -69,6 +76,7 @@ put-call parity, replication identities and cross-engine agreement in the test s
 | Vanilla European | Black-Scholes / Heston CF | yes | yes (grid Greeks) | yes (+ stderr) |
 | Vanilla on a future | Black-76 (discounted / margined) | — | — | — |
 | Vanilla American | Barone-Adesi-Whaley / Bjerksund-Stensland 2002 (approx.) | yes | Brennan-Schwartz | two-pass Longstaff-Schwartz |
+| Vanilla Bermudan (discrete exercise dates) | — | yes | Brennan-Schwartz on exercise dates | LSMC restricted to exercise dates |
 | Perpetual American | Merton closed form (exact) | — | — | — |
 | Binary (cash / asset) | closed form / Heston CF | yes | yes (Rannacher + cell averaging) | yes |
 | Barrier (8 types, + rebates at hit / at expiry) | Reiner-Rubinstein + E/F rebate terms | — | absorbing boundary / parity | Brownian-bridge corrected (rebate at expiry) |
@@ -121,6 +129,15 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   vol -> reprice anything, including barriers under smile dynamics. **Heston
   calibration** fits all five parameters to vanilla quotes by
   Levenberg-Marquardt in an unconstrained transform space (log/atanh).
+  The Heston/Bates calibration objectives price through the **COS method**
+  (Fang-Oosterlee Fourier-cosine expansion): one characteristic-function
+  sweep per expiry prices the whole strike strip, making a 20-strike smile
+  ~90x faster than per-strike integration (`heston::cos_smile`). The
+  truncation range comes from numerically estimated cumulants (including
+  the kurtosis term, so Feller-violated fat tails stay covered), deep
+  ITM prices recover via put-call parity from the CF-implied forward, and
+  the legacy P1/P2 integration is kept as the independent cross-check
+  oracle — the two methods agree to ~1e-6 across the test grid.
 - **Risk analytics** (`risk`): Value-at-Risk and Expected Shortfall in the
   standard flavors — historical, parametric normal, Cornish-Fisher
   higher-moment corrected, and delta-normal multi-asset VaR with the exact
@@ -158,10 +175,38 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   nearest-correlation projection, auto-applied to non-PSD rainbow
   correlation inputs).
 
+## Feature flags
+
+The default build is the lean pricing library — no CLI, no XML, ~40% fewer
+transitive dependencies. Opt in to what you need:
+
+| Feature | Adds | Extra deps |
+|---|---|---|
+| *(default)* | pricing, calibration, risk, JSON contracts | — |
+| `xml` | XML contract input/output | `quick-xml` |
+| `stress-config` | TOML stress-scenario files | `toml` |
+| `cli` | the `rustyqlib` binary (implies `xml`, `stress-config`) | `clap`, `csv` |
+
+```bash
+cargo add rustyqlib                    # library only
+cargo install rustyqlib --features cli # the command-line tool
+```
+
+## Benchmarks
+
+`cargo bench` runs a criterion suite over the public API (one benchmark per
+engine, implied vol, and a 1,000-option batch), with fixed seeds and grids
+so runs are comparable; criterion flags statistically significant
+regressions against the previous run. Indicative single-threaded numbers:
+a fully-loaded Black-Scholes `npv()` (discount curve and vol surface
+lookups included) runs in ~0.7 µs — about 1.5M prices/sec; a 20-strike
+Heston smile prices in ~1.6 ms via the COS method vs ~137 ms by
+per-strike integration (~90x, the ratio the calibration loop inherits).
+
 ## Running the CLI
 
 ```bash
-cargo build --release
+cargo build --release --features cli
 # price a single JSON file of contracts
 rustyqlib file --input contracts.json --output results.json
 # price every JSON file in a directory (parallel)
@@ -210,9 +255,11 @@ Selected fields (all optional unless noted):
 
 | Field | Meaning |
 |---|---|
+| `valuation_date` | pricing as-of date `YYYY-MM-DD`; defaults to today — set it for reproducible pricing and historical re-marking |
 | `pricer` | `Analytical`, `Binomial`, `FD`, `MC`, `BAW`, `BS2002` (analytic American) |
 | `payoff_type` | `vanilla`, `binary`, `barrier`, `asian`, `forward_start`, `autocallable` |
-| `exercise_style` | `European` (default), `American` |
+| `exercise_style` | `European` (default), `American`, `Bermudan` (needs `exercise_dates`) |
+| `exercise_dates` | Bermudan exercise dates `["YYYY-MM-DD", ...]`, strictly increasing; expiry is always exercisable |
 | `binary_type`, `cash_amount` | `cash` / `asset`, cash paid when ITM |
 | `barrier_type`, `barrier_level` | `up_in`, `up_out`, `down_in`, `down_out` |
 | `averaging_type`, `asian_strike_type` | `arithmetic`/`geometric`, `fixed`/`floating` |
@@ -265,7 +312,7 @@ enum tags such as `type="flat"`); `<item>` children make an array, including
 single-element ones; scalars are inferred, so numbers become numbers while
 `2027-07-17` and `C` stay strings. See
 [`src/examples/EQ/equity_option.xml`](src/examples/EQ/equity_option.xml), and convert
-between formats with `cargo run --example convert_format -- in.json out.xml`.
+between formats with `cargo run --features xml --example convert_format -- in.json out.xml`.
 
 XML is a *syntax* over the same data model — documents are transcoded to
 `serde_json::Value` and deserialized with the same derives, so both formats share one
@@ -336,6 +383,14 @@ the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo
 
 ## Design principles
 
+- **Contracts and market state are separable** — instruments embed the
+  market they were built with (the stateless-service shape), and a
+  `MarketData` snapshot provides the desk shape: capture a book's market
+  once, `bump()` it with named shocks (relative/absolute spot, vol, rate
+  and time, per-underlying filters), and reprice the whole book under the
+  bumped snapshot (`book.npv_under(&market)`), each position revaluing
+  fully on its own engine. The TOML stress runner is a consumer of these
+  primitives.
 - **Discount factors are state, rates are views** — curves store pillar dfs;
   zero/forward rates in any compounding are derived on demand. Vol surfaces
   canonicalize every quoting style into per-expiry smiles with total-variance

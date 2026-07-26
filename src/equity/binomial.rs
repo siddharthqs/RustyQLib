@@ -5,7 +5,7 @@ use crate::core::trade::{ PutOrCall, Transection};
 use crate::core::utils::{ContractStyle};
 use ndarray::Array2;
 
-/// Binomial tree model for European and American options
+/// Binomial tree model for European, American and Bermudan options
 pub fn npv(option: &EquityOption) -> f64 {
     assert!(option.base.volatility() >= 0.0);
     assert!(option.time_to_maturity() >= 0.0);
@@ -52,8 +52,23 @@ pub fn npv(option: &EquityOption) -> f64 {
             }
 
         }
-        _ => {
-            panic!("Invalid option style");
+        ContractStyle::Bermudan(times) => {
+            // early exercise only on tree layers nearest the exercise dates
+            let mut exercisable = vec![false; num_steps + 1];
+            for idx in crate::core::utils::times_to_grid_steps(times, option.time_to_maturity(), num_steps) {
+                exercisable[idx] = true;
+            }
+            for i in (0..num_steps).rev() {
+                for j in 0..=i {
+                    let discounted = discount_factor * (p * tree[[j, i + 1]] + (1.0 - p) * tree[[j + 1, i + 1]]);
+                    tree[[j, i]] = if exercisable[i] {
+                        let spot_price_i = option.base.effective_spot() * u.powi(i as i32 - j as i32) * d.powi(j as i32);
+                        option.payoff.payoff(spot_price_i, strike).max(discounted)
+                    } else {
+                        discounted
+                    };
+                }
+            }
         }
     }
 

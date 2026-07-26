@@ -348,7 +348,8 @@ impl EquityOption {
     /// Build an option from contract data, reporting the offending field in
     /// the error instead of panicking.
     pub fn try_from_json(data: &EquityOptionData) -> Result<Box<EquityOption>, RustyQLibError> {
-        let valuation_date = Local::now().date_naive();
+        let valuation_date =
+            crate::core::data_models::parse_valuation_date(data.base.valuation_date.as_deref())?;
         let discount_curve = match &data.discount_curve {
             Some(input) => YieldCurve::from_input(input, valuation_date)?,
             None => YieldCurve::flat(
@@ -375,6 +376,12 @@ impl EquityOption {
                 "maturity",
                 format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
             ))?;
+        if maturity_date <= valuation_date {
+            return Err(RustyQLibError::invalid_input(
+                "maturity",
+                format!("maturity {maturity_date} must be after the valuation date {valuation_date}"),
+            ));
+        }
         let payoff_type = data.payoff_type.parse::<PayoffType>()
             .map_err(|_| RustyQLibError::invalid_input(
                 "payoff_type",
@@ -461,6 +468,20 @@ impl EquityOption {
             }
             "American" | "american" => {
                 ContractStyle::American
+            }
+            "Bermudan" | "bermudan" => {
+                let dates = data.exercise_dates.as_deref().ok_or_else(|| {
+                    RustyQLibError::invalid_input(
+                        "exercise_dates",
+                        "exercise_dates is required when exercise_style is Bermudan",
+                    )
+                })?;
+                ContractStyle::Bermudan(date_list_to_times(
+                    "exercise_dates",
+                    dates,
+                    valuation_date,
+                    maturity_date,
+                )?)
             }
             _ => {
                 ContractStyle::European
@@ -614,6 +635,15 @@ impl EquityOption {
                 })
             }
             PayoffType::Autocallable => {
+                let observation_times = autocall_times_from_dates(
+                    data.autocall_observation_dates.as_deref(),
+                    valuation_date,
+                    maturity_date,
+                )?;
+                let observations = match &observation_times {
+                    Some(times) => times.len(),
+                    None => data.autocall_observations.unwrap_or(4).max(1),
+                };
                 Box::new(crate::equity::autocallable::AutocallablePayoff {
                     exercise_style: style,
                     autocall_barrier: data
@@ -631,7 +661,8 @@ impl EquityOption {
                     coupon: data.autocall_coupon.unwrap_or(0.0),
                     coupon_barrier: data.coupon_barrier,
                     memory: data.coupon_memory.unwrap_or(false),
-                    observations: data.autocall_observations.unwrap_or(4).max(1),
+                    observations,
+                    observation_times,
                     notional: data.notional.unwrap_or(100.0),
                     initial_fixing: data.base.underlying_price,
                 })
@@ -674,6 +705,63 @@ impl EquityOption {
                 .validate()?;
         }
         Ok(Box::new(equityoption))
+    }
+}
+
+/// Parse a strictly increasing date list into Act/365 year fractions
+/// from the valuation date, validating every date lies in
+/// `(valuation, maturity]`. Errors name `field`.
+fn date_list_to_times(
+    field: &str,
+    dates: &[String],
+    valuation_date: NaiveDate,
+    maturity_date: NaiveDate,
+) -> Result<Vec<f64>, RustyQLibError> {
+    if dates.is_empty() {
+        return Err(RustyQLibError::invalid_input(field, "the date list must not be empty"));
+    }
+    let mut times = Vec::with_capacity(dates.len());
+    let mut prev = valuation_date;
+    for s in dates {
+        let date = NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+            RustyQLibError::invalid_input(
+                field,
+                format!("invalid date '{s}' (expected YYYY-MM-DD)"),
+            )
+        })?;
+        if date <= prev {
+            return Err(RustyQLibError::invalid_input(
+                field,
+                format!("dates must be strictly increasing and after valuation; '{s}' is not"),
+            ));
+        }
+        if date > maturity_date {
+            return Err(RustyQLibError::invalid_input(
+                field,
+                format!("date '{s}' lies after the maturity {maturity_date}"),
+            ));
+        }
+        prev = date;
+        times.push((date - valuation_date).num_days() as f64 / 365.0);
+    }
+    Ok(times)
+}
+
+/// Optional-list wrapper of [`date_list_to_times`] for autocall
+/// observation dates.
+fn autocall_times_from_dates(
+    dates: Option<&[String]>,
+    valuation_date: NaiveDate,
+    maturity_date: NaiveDate,
+) -> Result<Option<Vec<f64>>, RustyQLibError> {
+    match dates {
+        Some(d) => Ok(Some(date_list_to_times(
+            "autocall_observation_dates",
+            d,
+            valuation_date,
+            maturity_date,
+        )?)),
+        None => Ok(None),
     }
 }
 
@@ -813,7 +901,10 @@ impl EquityOption {
     /// with an error naming the engine that can.
     pub(crate) fn check_engine_support(&self) -> Result<(), RustyQLibError> {
         let unsupported = |msg: &str| Err(RustyQLibError::UnsupportedEngine(msg.to_string()));
-        let american = matches!(self.payoff.exercise_style(), ContractStyle::American);
+        let bermudan = matches!(self.payoff.exercise_style(), ContractStyle::Bermudan(_));
+        // American and Bermudan share the early-exercise engine rules
+        let american =
+            matches!(self.payoff.exercise_style(), ContractStyle::American) || bermudan;
         if self.base.is_futures_option() {
             if !matches!(self.engine, Engine::BlackScholes) {
                 return unsupported(
@@ -826,7 +917,9 @@ impl EquityOption {
         }
         if self.payoff.is_path_dependent() {
             if american {
-                return unsupported("American path-dependent options are not supported yet");
+                return unsupported(
+                    "early-exercise (American/Bermudan) path-dependent options are not supported yet",
+                );
             }
             if matches!(self.engine, Engine::Binomial) {
                 return unsupported(
@@ -856,7 +949,7 @@ impl EquityOption {
         }
         match self.engine {
             Engine::BlackScholes if american => unsupported(
-                "Analytical engine cannot price American exercise; \
+                "Analytical engine cannot price early exercise; \
                  use Binomial, FiniteDifference or MonteCarlo",
             ),
             Engine::BaroneAdesiWhaley | Engine::BjerksundStensland => {
@@ -872,6 +965,12 @@ impl EquityOption {
                 if heston {
                     return Err(RustyQLibError::UnsupportedEngine(format!(
                         "{name} assumes constant-vol Black-Scholes dynamics, not Heston"
+                    )));
+                }
+                if bermudan {
+                    return Err(RustyQLibError::UnsupportedEngine(format!(
+                        "{name} approximates American exercise only; Bermudan prices on \
+                         Binomial, FiniteDifference or MonteCarlo"
                     )));
                 }
                 Ok(())

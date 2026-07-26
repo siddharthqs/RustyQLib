@@ -19,10 +19,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
-      - name: Build
+      - name: Build (no default features)
+        # the lean library build a `cargo add rustyqlib` user gets
         run: cargo build --verbose
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Build (all features)
+        run: cargo build --all-features --verbose
+      - name: Run tests (all features)
+        run: cargo test --all-features --verbose
+      - name: Check benchmarks compile
+        run: cargo bench --no-run
 
   coverage:
     name: Code coverage
@@ -45,6 +50,7 @@ jobs:
           cargo tarpaulin
           --verbose
           --workspace
+          --all-features
           --timeout 300
           --out Xml
           --exclude-files 'src/main.rs'

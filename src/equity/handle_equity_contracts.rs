@@ -168,6 +168,110 @@ mod tests {
     }
 
     #[test]
+    fn explicit_valuation_date_prices_reproducibly() {
+        // fixed valuation and maturity: exactly one year, so the pv must
+        // hit the Black-Scholes golden value on any run date
+        let contract_json = contract(serde_json::json!({
+            "product_type": "option",
+            "symbol": "ABC",
+            "underlying_price": 100.0,
+            "put_or_call": "C",
+            "payoff_type": "vanilla",
+            "strike_price": 100.0,
+            "volatility": 0.3,
+            "valuation_date": "2026-01-01",
+            "maturity": "2027-01-01",
+            "risk_free_rate": 0.05,
+            "pricer": "Analytical",
+        }));
+        let out = handle_equity_contract(&contract_json);
+        assert!(out["output"]["error"].is_null());
+        let pv = out["output"]["pv"].as_f64().unwrap();
+        assert!((pv - 14.2312547860).abs() < 1e-8, "pv {pv} must be date-independent");
+    }
+
+    #[test]
+    fn bad_or_expired_valuation_dates_are_rejected() {
+        let bad_date = contract(serde_json::json!({
+            "product_type": "option",
+            "symbol": "ABC",
+            "underlying_price": 100.0,
+            "put_or_call": "C",
+            "payoff_type": "vanilla",
+            "strike_price": 100.0,
+            "volatility": 0.3,
+            "valuation_date": "01/01/2026",
+            "maturity": "2027-01-01",
+            "risk_free_rate": 0.05,
+            "pricer": "Analytical",
+        }));
+        let out = handle_equity_contract(&bad_date);
+        let err = out["output"]["error"].as_str().expect("error must be set");
+        assert!(err.contains("valuation_date"), "error should name the field: {err}");
+
+        // valuation after maturity: expired, refused
+        let expired = contract(serde_json::json!({
+            "product_type": "option",
+            "symbol": "ABC",
+            "underlying_price": 100.0,
+            "put_or_call": "C",
+            "payoff_type": "vanilla",
+            "strike_price": 100.0,
+            "volatility": 0.3,
+            "valuation_date": "2028-01-01",
+            "maturity": "2027-01-01",
+            "risk_free_rate": 0.05,
+            "pricer": "Analytical",
+        }));
+        let out = handle_equity_contract(&expired);
+        let err = out["output"]["error"].as_str().expect("error must be set");
+        assert!(err.contains("maturity"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn bermudan_contract_prices_and_requires_dates() {
+        let berm = contract(serde_json::json!({
+            "product_type": "option",
+            "symbol": "ABC",
+            "underlying_price": 100.0,
+            "put_or_call": "P",
+            "payoff_type": "vanilla",
+            "exercise_style": "Bermudan",
+            "exercise_dates": ["2026-04-06", "2026-07-06", "2026-10-05"],
+            "strike_price": 100.0,
+            "volatility": 0.3,
+            "valuation_date": "2026-01-05",
+            "maturity": "2027-01-04",
+            "risk_free_rate": 0.05,
+            "pricer": "Binomial",
+        }));
+        let out = handle_equity_contract(&berm);
+        assert!(out["output"]["error"].is_null(), "error: {:?}", out["output"]["error"]);
+        let pv = out["output"]["pv"].as_f64().unwrap();
+        // between the European and American puts for these parameters
+        assert!(pv > 9.0 && pv < 11.5, "Bermudan put pv {pv} out of range");
+
+        // Bermudan without dates is rejected naming the field
+        let missing = contract(serde_json::json!({
+            "product_type": "option",
+            "symbol": "ABC",
+            "underlying_price": 100.0,
+            "put_or_call": "P",
+            "payoff_type": "vanilla",
+            "exercise_style": "Bermudan",
+            "strike_price": 100.0,
+            "volatility": 0.3,
+            "valuation_date": "2026-01-05",
+            "maturity": "2027-01-04",
+            "risk_free_rate": 0.05,
+            "pricer": "Binomial",
+        }));
+        let out = handle_equity_contract(&missing);
+        let err = out["output"]["error"].as_str().expect("error must be set");
+        assert!(err.contains("exercise_dates"), "error should name the field: {err}");
+    }
+
+    #[test]
     fn valid_contract_still_prices_with_no_error() {
         let good = contract(serde_json::json!({
             "product_type": "option",

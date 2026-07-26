@@ -160,6 +160,35 @@ fn jump_factor(u: Cpx, t: f64, intensity: f64, kbar: f64, jump_cf: Cpx) -> Cpx {
         .exp()
 }
 
+/// Log-price characteristic function of the Bates (Heston + Merton
+/// jumps) model — the diffusion CF times the compensated jump factor.
+pub(crate) fn ln_price_cf(
+    u: Cpx,
+    s: f64,
+    r: f64,
+    q: f64,
+    t: f64,
+    params: &BatesParams,
+) -> Cpx {
+    let j = params.jumps;
+    characteristic_fn(u, s, r, q, t, &params.heston)
+        .mul(jump_factor(u, t, j.intensity, j.kbar(), j.cf(u)))
+}
+
+/// Log-price characteristic function of the Heston + Kou model.
+pub(crate) fn ln_price_cf_double_exp(
+    u: Cpx,
+    s: f64,
+    r: f64,
+    q: f64,
+    t: f64,
+    params: &BatesDoubleExpParams,
+) -> Cpx {
+    let j = params.jumps;
+    characteristic_fn(u, s, r, q, t, &params.heston)
+        .mul(jump_factor(u, t, j.intensity, j.kbar(), j.cf(u)))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn price_with_jumps(
     s: f64,
@@ -307,17 +336,27 @@ impl BatesDoubleExpParams {
 fn calibrate_generic<P>(
     quotes: &[HestonQuote],
     x0: Vec<f64>,
+    r: f64,
     unpack: impl Fn(&[f64]) -> P,
-    price: impl Fn(&P, f64, f64, crate::core::trade::PutOrCall) -> f64,
+    cf: impl Fn(&P, Cpx, f64) -> Cpx,
 ) -> (P, f64, usize, bool) {
     use crate::core::optimization::{levenberg_marquardt, OptimConfig};
+    use crate::equity::cos::{group_by_maturity, CosPricer, CALIBRATION_TERMS};
     assert!(!quotes.is_empty(), "calibration needs at least one quote");
+    // one COS pricer (one CF sweep) per expiry per residual evaluation:
+    // the whole smile prices for the cost of one option
+    let groups = group_by_maturity(quotes.iter().map(|q| q.maturity));
     let residuals = |u: &[f64]| -> Vec<f64> {
         let p = unpack(u);
-        quotes
-            .iter()
-            .map(|q| price(&p, q.strike, q.maturity, q.put_or_call) - q.price)
-            .collect()
+        let mut out = vec![0.0; quotes.len()];
+        for (t, idxs) in &groups {
+            let pricer =
+                CosPricer::new(&|uu| cf(&p, uu, *t), r, *t, CALIBRATION_TERMS);
+            for &i in idxs {
+                out[i] = pricer.price(quotes[i].strike, quotes[i].put_or_call) - quotes[i].price;
+            }
+        }
+        out
     };
     let fit = levenberg_marquardt(&OptimConfig::new(1e-10, 100), &residuals, None, &x0);
     let params = unpack(&fit.x);
@@ -340,8 +379,9 @@ pub fn calibrate(
     let (params, rmse, iterations, converged) = calibrate_generic(
         quotes,
         start.to_unconstrained(),
+        r,
         BatesParams::from_unconstrained,
-        |p, k, t, pc| bates_price(s, k, r, q, t, p, pc),
+        |p, u, t| ln_price_cf(u, s, r, q, t, p),
     );
     BatesFit { params, rmse, iterations, converged }
 }
@@ -359,8 +399,9 @@ pub fn calibrate_double_exp(
     let (params, rmse, iterations, converged) = calibrate_generic(
         quotes,
         start.to_unconstrained(),
+        r,
         BatesDoubleExpParams::from_unconstrained,
-        |p, k, t, pc| bates_double_exp_price(s, k, r, q, t, p, pc),
+        |p, u, t| ln_price_cf_double_exp(u, s, r, q, t, p),
     );
     BatesDoubleExpFit { params, rmse, iterations, converged }
 }

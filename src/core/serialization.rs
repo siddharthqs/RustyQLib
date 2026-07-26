@@ -28,7 +28,9 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+#[cfg(feature = "xml")]
 use quick_xml::events::Event;
+#[cfg(feature = "xml")]
 use quick_xml::Reader;
 use serde_json::{Map, Value};
 use crate::core::errors::RustyQLibError;
@@ -39,6 +41,8 @@ pub const ARRAY_ITEM: &str = "item";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     Json,
+    /// Requires the `xml` feature.
+    #[cfg(feature = "xml")]
     Xml,
 }
 
@@ -52,6 +56,7 @@ impl Format {
             .map(|e| e.to_lowercase())
             .as_deref()
         {
+            #[cfg(feature = "xml")]
             Some("xml") => Some(Format::Xml),
             Some("json") => Some(Format::Json),
             _ => None,
@@ -59,8 +64,11 @@ impl Format {
     }
 
     /// Format sniffed from document content: a leading `<` means XML.
+    /// Without the `xml` feature everything is treated as JSON (and XML
+    /// input then fails JSON parsing with a clear error).
     pub fn detect(content: &str) -> Format {
         match content.trim_start().chars().next() {
+            #[cfg(feature = "xml")]
             Some('<') => Format::Xml,
             _ => Format::Json,
         }
@@ -69,6 +77,7 @@ impl Format {
     pub fn extension(&self) -> &'static str {
         match self {
             Format::Json => "json",
+            #[cfg(feature = "xml")]
             Format::Xml => "xml",
         }
     }
@@ -80,6 +89,7 @@ impl Format {
 pub fn parse_value(content: &str, format: Format) -> Result<Value, RustyQLibError> {
     match format {
         Format::Json => serde_json::from_str(content).map_err(|e| RustyQLibError::ParseError(format!("invalid JSON: {e}"))),
+        #[cfg(feature = "xml")]
         Format::Xml => xml_to_value(content),
     }
 }
@@ -91,6 +101,7 @@ pub fn parse<T: serde::de::DeserializeOwned>(content: &str, format: Format) -> R
 }
 
 /// Transcode an XML document into the equivalent [`Value`].
+#[cfg(feature = "xml")]
 pub fn xml_to_value(xml: &str) -> Result<Value, RustyQLibError> {
     let mut reader = Reader::from_str(xml);
     // text is accumulated raw and trimmed when the element closes, so
@@ -150,6 +161,7 @@ pub fn xml_to_value(xml: &str) -> Result<Value, RustyQLibError> {
     }
 }
 
+#[cfg(feature = "xml")]
 struct Node {
     name: String,
     /// attributes, in document order
@@ -159,6 +171,7 @@ struct Node {
     text: String,
 }
 
+#[cfg(feature = "xml")]
 impl Node {
     fn start(e: &quick_xml::events::BytesStart) -> Result<Node, RustyQLibError> {
         let name = String::from_utf8(e.name().as_ref().to_vec())
@@ -213,6 +226,7 @@ impl Node {
 
 /// Resolve an entity reference: the five predefined XML entities plus
 /// numeric character references (`&#38;`, `&#x26;`).
+#[cfg(feature = "xml")]
 fn resolve_entity(e: &quick_xml::events::BytesRef) -> Result<String, RustyQLibError> {
     if e.is_char_ref() {
         return match e.resolve_char_ref() {
@@ -234,6 +248,7 @@ fn resolve_entity(e: &quick_xml::events::BytesRef) -> Result<String, RustyQLibEr
     }
 }
 
+#[cfg(feature = "xml")]
 fn attach(
     stack: &mut [Node],
     root: &mut Option<(String, Value)>,
@@ -256,6 +271,7 @@ fn attach(
 }
 
 /// Infer a JSON scalar from XML text content.
+#[cfg(feature = "xml")]
 fn infer_scalar(text: &str) -> Value {
     let t = text.trim();
     if t.is_empty() {
@@ -293,6 +309,7 @@ pub fn render_results(results: &[Value], format: Format) -> String {
     strip_nulls(&mut array);
     match format {
         Format::Json => serde_json::to_string_pretty(&array).unwrap_or_else(|_| "[]".to_string()),
+        #[cfg(feature = "xml")]
         Format::Xml => value_to_xml(&array, "results"),
     }
 }
@@ -303,6 +320,7 @@ pub fn render_value(value: &Value, format: Format, root: &str) -> String {
     strip_nulls(&mut value);
     match format {
         Format::Json => serde_json::to_string_pretty(&value).unwrap_or_default(),
+        #[cfg(feature = "xml")]
         Format::Xml => value_to_xml(&value, root),
     }
 }
@@ -332,12 +350,14 @@ pub fn strip_nulls(value: &mut Value) {
 /// Serialize a [`Value`] as an XML document with `root` as the document
 /// element. Arrays are written as `<item>` children, mirroring the input
 /// convention, so output can be fed back in as input.
+#[cfg(feature = "xml")]
 pub fn value_to_xml(value: &Value, root: &str) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     write_element(&mut out, root, value, 0);
     out
 }
 
+#[cfg(feature = "xml")]
 fn write_element(out: &mut String, name: &str, value: &Value, depth: usize) {
     let pad = "  ".repeat(depth);
     match value {
@@ -376,6 +396,7 @@ fn write_element(out: &mut String, name: &str, value: &Value, depth: usize) {
     }
 }
 
+#[cfg(feature = "xml")]
 fn escape_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -399,14 +420,18 @@ mod tests {
     #[test]
     fn detects_format_from_content_and_path() {
         assert_eq!(Format::detect("  { \"a\": 1 }"), Format::Json);
-        assert_eq!(Format::detect("\n<?xml version=\"1.0\"?><a/>"), Format::Xml);
-        assert_eq!(Format::detect("<contracts/>"), Format::Xml);
-        assert_eq!(Format::from_path("in.xml"), Some(Format::Xml));
+        #[cfg(feature = "xml")]
+        {
+            assert_eq!(Format::detect("\n<?xml version=\"1.0\"?><a/>"), Format::Xml);
+            assert_eq!(Format::detect("<contracts/>"), Format::Xml);
+            assert_eq!(Format::from_path("in.xml"), Some(Format::Xml));
+        }
         assert_eq!(Format::from_path("in.JSON"), Some(Format::Json));
         assert_eq!(Format::from_path("in.txt"), None);
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn scalars_are_inferred_without_eating_dates_or_codes() {
         assert_eq!(infer_scalar("100"), json!(100));
         assert_eq!(infer_scalar(" 0.30 "), json!(0.30));
@@ -421,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn elements_and_attributes_both_become_fields() {
         let value = xml_to_value(
             r#"<curve type="flat"><rate>0.05</rate><day_count>Act365</day_count></curve>"#,
@@ -430,6 +456,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn item_children_make_arrays_including_single_element() {
         let value = xml_to_value("<tenors><item>0.5</item><item>1.0</item></tenors>").unwrap();
         assert_eq!(value, json!([0.5, 1.0]));
@@ -438,6 +465,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn nested_arrays_round_trip() {
         let xml = "<vols><item><item>0.32</item><item>0.30</item></item>\
                    <item><item>0.33</item><item>0.31</item></item></vols>";
@@ -445,24 +473,28 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn repeated_siblings_collapse_into_an_array() {
         let value = xml_to_value("<root><tag>a</tag><tag>b</tag><other>c</other></root>").unwrap();
         assert_eq!(value, json!({"tag": ["a", "b"], "other": "c"}));
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn empty_and_self_closing_elements_are_null() {
         let value = xml_to_value("<root><a/><b></b><c>1</c></root>").unwrap();
         assert_eq!(value, json!({"a": null, "b": null, "c": 1}));
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn entities_and_cdata_are_decoded() {
         let value = xml_to_value("<root><a>A &amp; B</a><b><![CDATA[x < y]]></b></root>").unwrap();
         assert_eq!(value, json!({"a": "A & B", "b": "x < y"}));
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn declaration_and_comments_are_ignored() {
         let value =
             xml_to_value("<?xml version=\"1.0\"?><!-- note --><root><a>1</a></root>").unwrap();
@@ -470,6 +502,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn malformed_documents_are_reported() {
         assert!(xml_to_value("<root><a></root>").is_err());
         assert!(xml_to_value("").is_err());
@@ -477,6 +510,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn value_to_xml_round_trips_through_the_reader() {
         let original = json!({
             "asset": "EQ",
@@ -491,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn xml_special_characters_survive_a_round_trip() {
         let original = json!({"name": "Smith & Co <\"AAA\">"});
         let back = xml_to_value(&value_to_xml(&original, "root")).unwrap();
@@ -505,6 +540,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn rendered_output_is_valid_in_both_formats() {
         let results = vec![json!({"contract": {"action": "PV", "skip": null}, "output": {"pv": 1.5}})];
         let as_json: Value = serde_json::from_str(&render_results(&results, Format::Json)).unwrap();
@@ -515,6 +551,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "xml")]
     fn parse_dispatches_on_format() {
         #[derive(serde::Deserialize, PartialEq, Debug)]
         struct Doc {

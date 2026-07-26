@@ -185,15 +185,25 @@ pub fn calibrate(
 
     assert!(!quotes.is_empty(), "calibration needs at least one quote");
     start.validate().expect("invalid starting parameters");
+    // COS pricing amortizes the CF sweep across every strike of an
+    // expiry, which is where the LM objective spends its life
+    let groups = crate::equity::cos::group_by_maturity(quotes.iter().map(|q| q.maturity));
     let residuals = |u: &[f64]| -> Vec<f64> {
         let p = HestonParams::from_unconstrained(u);
-        quotes
-            .iter()
-            .map(|quote| {
-                heston_price(s, quote.strike, r, q, quote.maturity, &p, quote.put_or_call)
-                    - quote.price
-            })
-            .collect()
+        let mut out = vec![0.0; quotes.len()];
+        for (t, idxs) in &groups {
+            let pricer = crate::equity::cos::CosPricer::new(
+                &|uu| characteristic_fn(uu, s, r, q, *t, &p),
+                r,
+                *t,
+                crate::equity::cos::CALIBRATION_TERMS,
+            );
+            for &i in idxs {
+                out[i] =
+                    pricer.price(quotes[i].strike, quotes[i].put_or_call) - quotes[i].price;
+            }
+        }
+        out
     };
     let fit = levenberg_marquardt(
         &OptimConfig::new(1e-12, 100),
@@ -275,7 +285,23 @@ pub(crate) fn probabilities_with_cf(
         let num = I.scale(-u * ln_k).exp().mul(phi);
         num.div(I.scale(u)).re
     };
-    let p = |shifted: bool| 0.5 + simpson(|u| integrand(u, shifted), 1e-9, 250.0, 4000) / std::f64::consts::PI;
+    // integrate [0, 250] and extend block-wise while the tail still
+    // contributes: short-dated / high vol-of-vol CFs decay slowly and a
+    // fixed truncation silently loses ~1e-4 of probability mass
+    let p = |shifted: bool| {
+        let mut total = simpson(|u| integrand(u, shifted), 1e-9, 250.0, 4000);
+        let mut lo = 250.0;
+        while lo < 16_000.0 {
+            let hi = lo * 2.0;
+            let block = simpson(|u| integrand(u, shifted), lo, hi, (64.0 * (hi - lo)) as usize);
+            total += block;
+            if block.abs() < 1e-12 {
+                break;
+            }
+            lo = hi;
+        }
+        0.5 + total / std::f64::consts::PI
+    };
     (p(true), p(false))
 }
 
@@ -288,6 +314,28 @@ pub(crate) fn simpson<F: Fn(f64) -> f64>(f: F, a: f64, b: f64, n: usize) -> f64 
         sum += w * f(a + i as f64 * h);
     }
     sum * h / 3.0
+}
+
+/// Price a whole strike strip in one COS pass: the characteristic
+/// function is swept once for the expiry and every strike reuses it, so
+/// a 20-strike smile costs about the same as one option. Agrees with
+/// [`heston_price`] (the independent P1/P2 integration oracle) to ~1e-6.
+pub fn cos_smile(
+    s: f64,
+    r: f64,
+    q: f64,
+    t: f64,
+    hp: &HestonParams,
+    strikes: &[f64],
+    put_or_call: crate::core::trade::PutOrCall,
+) -> Vec<f64> {
+    let pricer = crate::equity::cos::CosPricer::new(
+        &|u| characteristic_fn(u, s, r, q, t, hp),
+        r,
+        t,
+        crate::equity::cos::DEFAULT_TERMS,
+    );
+    strikes.iter().map(|&k| pricer.price(k, put_or_call)).collect()
 }
 
 /// Semi-analytic Heston price of a European vanilla option.

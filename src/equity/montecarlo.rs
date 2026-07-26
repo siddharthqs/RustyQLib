@@ -279,7 +279,7 @@ pub fn npv_with_stats(option: &EquityOption) -> McStats {
 
 fn price(option: &EquityOption, p: &MarketParams) -> McStats {
     match option.payoff.exercise_style() {
-        ContractStyle::American => american_npv(option, p),
+        ContractStyle::American | ContractStyle::Bermudan(_) => american_npv(option, p),
         _ => european_npv(option, p),
     }
 }
@@ -728,6 +728,48 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
     stats(sum, sum_sq, cfg.paths, steps, 0.0)
 }
 
+/// Observation grid for an autocallable on a path of `steps` steps over
+/// life `t`: per-observation path indices and discount factors. Explicit
+/// `observation_times` (business-day adjusted call dates as year
+/// fractions) map to the nearest grid step and discount at their exact
+/// times; without them observations are equally spaced.
+fn autocall_grid(
+    option: &EquityOption,
+    auto: &AutocallablePayoff,
+    t: f64,
+    r: f64,
+    steps: usize,
+) -> (Vec<usize>, Vec<f64>) {
+    let dr = r - option.base.risk_free_rate();
+    let n_obs = auto.observations.max(1);
+    let (obs_idx, obs_times): (Vec<usize>, Vec<f64>) = match &auto.observation_times {
+        Some(times) => {
+            let mut idx = Vec::with_capacity(times.len());
+            let mut prev: i64 = 0;
+            for &tm in times {
+                // nearest grid step, strictly increasing so no two
+                // observations collapse onto one step
+                let i = ((tm / t) * steps as f64).round().max(1.0) as i64;
+                let i = i.max(prev + 1).min(steps as i64);
+                idx.push(i as usize - 1);
+                prev = i;
+            }
+            (idx, times.clone())
+        }
+        None => {
+            let dt = t / steps as f64;
+            let idx: Vec<usize> = (1..=n_obs).map(|m| m * steps / n_obs - 1).collect();
+            let times = idx.iter().map(|&i| (i + 1) as f64 * dt).collect();
+            (idx, times)
+        }
+    };
+    let dfs = obs_times
+        .iter()
+        .map(|&tm| option.base.discount_curve.df(tm) * exp(-dr * tm))
+        .collect();
+    (obs_idx, dfs)
+}
+
 /// Autocallable valuation: cash flows land on their own call dates, so
 /// each path value is the redemption amount times the discount factor of
 /// its payment date (curve discount factors, shifted consistently under
@@ -738,15 +780,7 @@ fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketPara
     let n_obs = auto.observations.max(1);
     let steps = effective_steps(cfg).max(PATH_DEPENDENT_MIN_STEPS).div_ceil(n_obs) * n_obs;
     let dt = p.t / steps as f64;
-    let obs_idx: Vec<usize> = (1..=n_obs).map(|m| m * steps / n_obs - 1).collect();
-    let dr = p.r - option.base.risk_free_rate();
-    let dfs: Vec<f64> = obs_idx
-        .iter()
-        .map(|&i| {
-            let tm = (i + 1) as f64 * dt;
-            option.base.discount_curve.df(tm) * exp(-dr * tm)
-        })
-        .collect();
+    let (obs_idx, dfs) = autocall_grid(option, auto, p.t, p.r, steps);
     let divs = dividends_per_step(option, p.t, steps);
     let vol_model = path_vol(option, p);
     let draws = PathDraws::new(cfg, steps, dt);
@@ -821,15 +855,7 @@ fn heston_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         let n_obs = auto.observations.max(1);
         let steps = steps.div_ceil(n_obs) * n_obs;
         let dt = p.t / steps as f64;
-        let obs_idx: Vec<usize> = (1..=n_obs).map(|m| m * steps / n_obs - 1).collect();
-        let dr = p.r - option.base.risk_free_rate();
-        let dfs: Vec<f64> = obs_idx
-            .iter()
-            .map(|&i| {
-                let tm = (i + 1) as f64 * dt;
-                option.base.discount_curve.df(tm) * exp(-dr * tm)
-            })
-            .collect();
+        let (obs_idx, dfs) = autocall_grid(option, auto, p.t, p.r, steps);
         let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, _| {
             auto.path_value(spots, &obs_idx, &dfs)
         });
@@ -926,11 +952,25 @@ fn lsmc_basis(x: f64) -> [f64; LSMC_BASIS] {
 fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let cfg = &option.mc;
     if cfg.model == McModel::Heston {
-        panic!("American exercise under the Heston model is not supported yet");
+        panic!("Early exercise under the Heston model is not supported yet");
     }
     let steps = if cfg.time_steps > 1 { cfg.time_steps } else { LSMC_DEFAULT_STEPS }
         .max(if cfg.model == McModel::LocalVol { LOCAL_VOL_MIN_STEPS } else { 1 });
     let dt = p.t / steps as f64;
+    // exercise rights per path index k (spot at time (k+1)dt): every step
+    // for American, only mapped steps for Bermudan
+    let allowed: Vec<bool> = match option.payoff.exercise_style() {
+        ContractStyle::Bermudan(times) => {
+            let mut mask = vec![false; steps.saturating_sub(1)];
+            for g in crate::core::utils::times_to_grid_steps(times, p.t, steps) {
+                if g < steps {
+                    mask[g - 1] = true;
+                }
+            }
+            mask
+        }
+        _ => vec![true; steps.saturating_sub(1)],
+    };
     let disc = exp(-p.r * dt);
     let vol_model = path_vol(option, p);
     let drift = p.r - p.q;
@@ -969,6 +1009,11 @@ fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     for step_idx in (0..steps - 1).rev() {
         for cf in cashflow.iter_mut() {
             *cf *= disc;
+        }
+        if !allowed[step_idx] {
+            // no exercise right at this date: continuation only, no
+            // regression fitted, so pass 2 cannot exercise here either
+            continue;
         }
         let itm: Vec<usize> = (0..spots.len())
             .filter(|&i| option.payoff.payoff(spots[i][step_idx], p.strike) > 0.0)

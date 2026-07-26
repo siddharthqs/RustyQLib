@@ -2766,6 +2766,7 @@ mod tests {
                 protection_barrier,
                 coupon,
                 observations: 4,
+                observation_times: None,
                 notional: 100.0,
                 initial_fixing: 100.0,
                 coupon_barrier: None,
@@ -2854,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Analytical engine cannot price American")]
+    #[should_panic(expected = "Analytical engine cannot price early exercise")]
     fn analytic_engine_rejects_american_exercise() {
         let option = test_option_with(
             Box::new(VanillaPayoff {

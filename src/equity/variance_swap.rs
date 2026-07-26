@@ -245,6 +245,8 @@ pub struct VarianceSwapData {
     /// a one-sided corridor).
     pub corridor_low: Option<f64>,
     pub corridor_high: Option<f64>,
+    /// Pricing as-of date (`YYYY-MM-DD`); defaults to today.
+    pub valuation_date: Option<String>,
 }
 
 /// A (possibly seasoned) variance swap.
@@ -290,7 +292,8 @@ impl VarianceSwap {
     }
 
     pub fn try_from_json(data: &VarianceSwapData) -> Result<Box<VarianceSwap>, RustyQLibError> {
-        let today = Local::now().date_naive();
+        let today =
+            crate::core::data_models::parse_valuation_date(data.valuation_date.as_deref())?;
         let maturity = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
             .map_err(|_| RustyQLibError::invalid_input(
                 "maturity",

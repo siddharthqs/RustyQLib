@@ -56,6 +56,7 @@ fn build(
         simulation: Some(100_000),
         mc_sampler: None,
         mc_seed: None,
+        valuation_date: None,
     })
 }
 

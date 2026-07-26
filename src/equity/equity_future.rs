@@ -39,7 +39,8 @@ impl EquityFuture {
     }
 
     pub fn try_from_json(data: &EquityFutureData) -> Result<Box<Self>, RustyQLibError> {
-        let today = Local::now().date_naive();
+        let today =
+            crate::core::data_models::parse_valuation_date(data.base.valuation_date.as_deref())?;
         let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
             .map_err(|_| RustyQLibError::invalid_input(
                 "maturity",

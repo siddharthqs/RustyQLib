@@ -8,6 +8,29 @@ use crate::core::data_models::ProductData;
 pub enum ContractStyle {
     European,
     American,
+    /// Exercisable only at the given times (year fractions from
+    /// valuation, strictly increasing). Expiry is always an exercise
+    /// opportunity through the terminal payoff; the listed times are the
+    /// intermediate rights, e.g. from a business-day adjusted
+    /// [`Schedule`](crate::core::calendar::Schedule).
+    Bermudan(Vec<f64>),
+}
+
+/// Map exercise/observation times to 1-based indices on an equally
+/// spaced grid of `steps` steps over `[0, t]`: nearest step, clamped to
+/// `[1, steps]`, strictly increasing so no two times collapse.
+pub fn times_to_grid_steps(times: &[f64], t: f64, steps: usize) -> Vec<usize> {
+    let mut out = Vec::with_capacity(times.len());
+    let mut prev: i64 = 0;
+    for &tm in times {
+        let i = ((tm / t) * steps as f64).round().max(1.0) as i64;
+        let i = i.max(prev + 1).min(steps as i64);
+        if i > prev {
+            out.push(i as usize);
+            prev = i;
+        }
+    }
+    out
 }
 
 #[derive(strum_macros::Display)]

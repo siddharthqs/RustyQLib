@@ -29,6 +29,26 @@ pub struct EquityInstrumentBase {
     /// additional dividend yield (hard-to-borrow lowers the forward).
     pub borrow_cost: Option<f64>,
     pub settlement_type: Option<String>,
+    /// Pricing as-of date (`YYYY-MM-DD`). Defaults to today, but setting
+    /// it makes the contract price reproducibly and allows re-marking a
+    /// book as of any date.
+    pub valuation_date: Option<String>,
+}
+
+/// Resolve an optional contract `valuation_date`: parse it when present,
+/// default to today's date otherwise.
+pub fn parse_valuation_date(
+    field: Option<&str>,
+) -> Result<chrono::NaiveDate, crate::core::errors::RustyQLibError> {
+    match field {
+        Some(s) => chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map_err(|_| {
+            crate::core::errors::RustyQLibError::invalid_input(
+                "valuation_date",
+                format!("invalid date '{s}' (expected YYYY-MM-DD)"),
+            )
+        }),
+        None => Ok(chrono::Local::now().date_naive()),
+    }
 }
 
 /// A discrete cash dividend: ex-date and amount per share.
@@ -97,6 +117,16 @@ pub struct EquityOptionData {
     pub protection_barrier: Option<f64>,
     pub autocall_coupon: Option<f64>,
     pub autocall_observations: Option<usize>,
+    /// Bermudan exercise dates (`YYYY-MM-DD`, strictly increasing,
+    /// after valuation and at or before maturity). Required when
+    /// `exercise_style` is `Bermudan`. Expiry is always exercisable
+    /// through the terminal payoff.
+    pub exercise_dates: Option<Vec<String>>,
+    /// Explicit autocall observation dates (`YYYY-MM-DD`, strictly
+    /// increasing, after valuation and at or before maturity). Overrides
+    /// `autocall_observations`; use business-day adjusted dates from a
+    /// holiday calendar so observations do not land on weekends.
+    pub autocall_observation_dates: Option<Vec<String>>,
     /// Phoenix: conditional-coupon barrier (absolute level).
     pub coupon_barrier: Option<f64>,
     /// Phoenix: memory coupons (missed coupons recovered later).

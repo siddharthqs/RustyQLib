@@ -37,52 +37,15 @@
 
 use serde::Deserialize;
 
+use crate::equity::market::MarketData;
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::utils::PayoffType;
 use crate::equity::vanilla_option::EquityOption;
 use crate::core::errors::RustyQLibError;
 
-/// How a shock size is applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BumpMode {
-    /// `size` is a fraction of the current market level.
-    Relative,
-    /// `size` is added to the current market level (for `time`: days).
-    Absolute,
-}
-
-/// The risk factor a shock applies to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RiskFactor {
-    Spot,
-    #[serde(alias = "volatility")]
-    Vol,
-    #[serde(alias = "rates")]
-    Rate,
-    /// Calendar decay, in days (absolute only).
-    Time,
-}
-
-/// One shock on one factor.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Shock {
-    pub factor: RiskFactor,
-    pub mode: BumpMode,
-    pub size: f64,
-    /// Restrict to one underlying symbol (`None` / `"*"` = every one).
-    pub underlying: Option<String>,
-}
-
-impl Shock {
-    fn applies_to(&self, symbol: &str) -> bool {
-        match self.underlying.as_deref() {
-            None | Some("*") => true,
-            Some(name) => name.eq_ignore_ascii_case(symbol),
-        }
-    }
-}
+// the shock vocabulary is the market layer's; re-exported here so stress
+// configs keep their import paths
+pub use crate::equity::market::{BumpMode, RiskFactor, Shock};
 
 /// A named collection of shocks applied together.
 #[derive(Debug, Clone, Deserialize)]
@@ -98,7 +61,8 @@ pub struct StressConfig {
 }
 
 impl StressConfig {
-    /// Parse from TOML text.
+    /// Parse from TOML text. Requires the `stress-config` feature.
+    #[cfg(feature = "stress-config")]
     pub fn from_toml_str(text: &str) -> Result<StressConfig, RustyQLibError> {
         let config: StressConfig =
             toml::from_str(text).map_err(|e| RustyQLibError::ParseError(format!("invalid stress config: {e}")))?;
@@ -106,13 +70,15 @@ impl StressConfig {
         Ok(config)
     }
 
-    /// Load and parse a TOML file.
+    /// Load and parse a TOML file. Requires the `stress-config` feature.
+    #[cfg(feature = "stress-config")]
     pub fn from_toml_file(path: &str) -> Result<StressConfig, RustyQLibError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| RustyQLibError::ParseError(format!("cannot read stress config '{path}': {e}")))?;
         Self::from_toml_str(&text)
     }
 
+    #[cfg(feature = "stress-config")]
     fn validate(&self) -> Result<(), RustyQLibError> {
         if self.scenarios.is_empty() {
             return Err(RustyQLibError::ParseError("stress config has no scenarios".to_string()));
@@ -214,21 +180,33 @@ fn trade_label(option: &EquityOption, quantity: f64) -> String {
     )
 }
 
-/// Run every scenario in `config` over the book: full revaluation of
-/// each position on its own engine, reported per trade and aggregated.
+/// Run every scenario in `config` over the book, through the pricing
+/// context: the book's market is captured once, each scenario bumps it
+/// ([`MarketData::bump`]), and every position revalues fully on its own
+/// engine under the bumped snapshot. Reported per trade and aggregated;
+/// `portfolio = sum(trades)` is exact by construction.
 pub fn stress_mtm(book: &EquityPortfolio, config: &StressConfig) -> Vec<ScenarioResult> {
+    let base_market = MarketData::capture(book);
     config
         .scenarios
         .iter()
         .map(|scenario| {
+            let stressed_market = base_market
+                .bump(&scenario.shocks)
+                .expect("stress configs are validated at parse time");
             let mut trades = Vec::with_capacity(book.positions.len());
             let mut base_total = 0.0;
             let mut stressed_total = 0.0;
             for position in &book.positions {
-                let bump = prepare_bump(&position.option, &scenario.shocks);
-                let base = position.quantity * position.option.price_with(0.0, 0.0, 0.0, 0.0);
-                let stressed = position.quantity
-                    * position.option.price_with(bump.d_spot, bump.d_vol, bump.d_rate, bump.d_time);
+                let value_under = |market: &MarketData| {
+                    position.quantity
+                        * position
+                            .option
+                            .npv_under(market)
+                            .expect("captured market covers every position")
+                };
+                let base = value_under(&base_market);
+                let stressed = value_under(&stressed_market);
                 base_total += base;
                 stressed_total += stressed;
                 trades.push(TradeStress {
@@ -311,6 +289,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "stress-config")]
     fn toml_config_parses_scenarios_shocks_and_filters() {
         let config = StressConfig::from_toml_str(CONFIG).unwrap();
         assert_eq!(config.scenarios.len(), 3);
@@ -360,6 +339,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "stress-config")]
     fn stress_mtm_matches_direct_repricing_and_aggregates_exactly() {
         let b = book();
         let config = StressConfig::from_toml_str(CONFIG).unwrap();
@@ -385,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "stress-config")]
     fn scenario_economics_move_the_right_trades() {
         let b = book();
         let config = StressConfig::from_toml_str(CONFIG).unwrap();
@@ -401,6 +382,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "stress-config")]
     fn config_file_round_trip() {
         let path = std::env::temp_dir().join("rustyqlib_stress_test.toml");
         std::fs::write(&path, CONFIG).unwrap();

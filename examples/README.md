@@ -22,11 +22,11 @@ Release mode matters: the Monte Carlo examples run 50k–100k paths.
 | `rainbow_option` | Multi-asset rainbows | best-of, worst-of, spread (Kirk), basket (moment matching), exchange (Margrabe); correlation sweep; per-asset Greeks |
 | `local_vol_calibration` | Local vol workflow | quotes -> implied vols -> surface -> Dupire -> reprice, end to end with checks at each step |
 | `futures_option` | Options on futures (Black-76) | discounted vs margined settlement; zero rho when margined; Black-76 on the forward = spot Black-Scholes; strike skew |
-| `convert_format` | JSON <-> XML conversion | transcoding contract documents between the two supported formats |
+|  `convert_format` (needs `--features xml`) | JSON <-> XML conversion | transcoding contract documents between the two supported formats |
 | `dividends_and_borrow` | Carry inputs | borrow cost as carry; escrowed vs jump dividend models per engine; where the difference matters |
 | `portfolio_pnl` | Book of options on one underlying | quantity-weighted Greek aggregation; second-order PnL attribution (delta/gamma/vega/volga/vanna/theta/rho) vs full reprice; the unexplained residual growing with the move |
 | `cliquet_option` | Cliquet / ratchet / reverse / Napoleon | closed form vs MC; local cap sweep; global floor/cap coupling; **the Heston forward-smile discount on capped strips**; the floored Napoleon's vol-of-vol convexity |
-| `stress_mtm` | Stress MtM from TOML scenarios | shock config (relative/absolute, per-underlying) -> bumped market -> full revaluation; trade-level table and portfolio aggregation per scenario |
+|  `stress_mtm` (needs `--features stress-config`) | Stress MtM from TOML scenarios | shock config (relative/absolute, per-underlying) -> bumped market -> full revaluation; trade-level table and portfolio aggregation per scenario |
 | `american_baw` | American vanillas, analytic approximations | Barone-Adesi-Whaley and Bjerksund-Stensland 2002 vs binomial / FD / LSMC; early-exercise premium and critical boundary; the BS2002 lower-bound property; the exact Merton perpetual as the T -> infinity limit; true American Greeks; ~cents of error for a huge speed-up |
 
 ## Reading the output

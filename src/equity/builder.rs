@@ -88,6 +88,7 @@ enum PayoffSpec {
         notional: f64,
         coupon_barrier: Option<f64>,
         memory: bool,
+        observation_dates: Option<Vec<NaiveDate>>,
     },
     /// Escape hatch: a caller-supplied payoff is used as given (its own
     /// exercise style included).
@@ -114,6 +115,13 @@ pub struct EquityOptionBuilder {
     mc: MonteCarloConfig,
     fd: FdConfig,
     heston: Option<HestonParams>,
+    /// Autocall schedule request: (months between observations, calendar),
+    /// resolved into dates at `build()` from valuation and maturity.
+    autocall_schedule: Option<(u32, crate::core::calendar::Calendar)>,
+    /// Bermudan exercise dates; converted to year fractions at `build()`.
+    bermudan_dates: Option<Vec<NaiveDate>>,
+    /// Bermudan schedule request, resolved like `autocall_schedule`.
+    bermudan_schedule: Option<(u32, crate::core::calendar::Calendar)>,
     /// Misuse detected in a setter (e.g. `barrier_rebate` without a
     /// barrier); reported by `build()` so setters stay chainable.
     setter_error: Option<RustyQLibError>,
@@ -147,6 +155,9 @@ impl EquityOptionBuilder {
             mc: MonteCarloConfig::default(),
             fd: FdConfig::default(),
             heston: None,
+            autocall_schedule: None,
+            bermudan_dates: None,
+            bermudan_schedule: None,
             setter_error: None,
         }
     }
@@ -227,6 +238,20 @@ impl EquityOptionBuilder {
 
     pub fn american(mut self) -> Self {
         self.exercise_style = ContractStyle::American;
+        self
+    }
+    /// Bermudan exercise on the given dates (expiry is always exercisable
+    /// through the terminal payoff). Overrides `american()` /
+    /// `exercise_style()`; applies to built-in payoffs, not `payoff()`.
+    pub fn bermudan(mut self, dates: Vec<NaiveDate>) -> Self {
+        self.bermudan_dates = Some(dates);
+        self
+    }
+    /// Bermudan exercise every `months` months on business-day adjusted
+    /// dates (modified following) from valuation to maturity, generated at
+    /// `build()` time.
+    pub fn bermudan_schedule(mut self, months: u32, calendar: crate::core::calendar::Calendar) -> Self {
+        self.bermudan_schedule = Some((months, calendar));
         self
     }
     pub fn exercise_style(mut self, style: ContractStyle) -> Self {
@@ -353,7 +378,44 @@ impl EquityOptionBuilder {
             notional,
             coupon_barrier: None,
             memory: false,
+            observation_dates: None,
         });
+        self
+    }
+
+    /// Explicit autocall observation dates (e.g. from a
+    /// [`Schedule`](crate::core::calendar::Schedule)); must follow
+    /// `.autocallable(...)` or `.phoenix(...)`. Overrides the equally
+    /// spaced observation count.
+    pub fn autocall_observation_dates(mut self, dates: Vec<NaiveDate>) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::Autocallable { observation_dates, .. }) => {
+                *observation_dates = Some(dates);
+            }
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "autocall_observation_dates",
+                    "autocall_observation_dates must follow .autocallable(...) or .phoenix(...)",
+                ));
+            }
+        }
+        self
+    }
+
+    /// Generate business-day adjusted autocall observation dates every
+    /// `months` months from valuation to maturity on the given calendar
+    /// (modified following); must follow `.autocallable(...)` or
+    /// `.phoenix(...)`. The schedule is built at `build()` time from the
+    /// final valuation and maturity dates.
+    pub fn autocall_schedule(mut self, months: u32, calendar: crate::core::calendar::Calendar) -> Self {
+        if !matches!(self.payoff, Some(PayoffSpec::Autocallable { .. })) {
+            self.setter_error = Some(RustyQLibError::invalid_input(
+                "autocall_schedule",
+                "autocall_schedule must follow .autocallable(...) or .phoenix(...)",
+            ));
+            return self;
+        }
+        self.autocall_schedule = Some((months, calendar));
         self
     }
 
@@ -379,6 +441,7 @@ impl EquityOptionBuilder {
             notional,
             coupon_barrier: Some(coupon_barrier),
             memory,
+            observation_dates: None,
         });
         self
     }
@@ -498,6 +561,75 @@ impl EquityOptionBuilder {
                 )
             }
         };
+        let mut spec = spec;
+        if let Some((months, calendar)) = &self.autocall_schedule {
+            match &mut spec {
+                PayoffSpec::Autocallable { observation_dates, .. } => {
+                    let schedule = crate::core::calendar::Schedule::generate(
+                        self.valuation_date,
+                        maturity_date,
+                        *months,
+                        calendar,
+                        crate::core::calendar::BusinessDayConvention::ModifiedFollowing,
+                        crate::core::calendar::DateGeneration::Backward,
+                    )?;
+                    *observation_dates = Some(schedule.dates);
+                }
+                _ => {
+                    return invalid(
+                        "autocall_schedule",
+                        "autocall_schedule set but the payoff is not an autocallable".to_string(),
+                    )
+                }
+            }
+        }
+        let mut bermudan_dates = self.bermudan_dates.clone();
+        if let Some((months, calendar)) = &self.bermudan_schedule {
+            let schedule = crate::core::calendar::Schedule::generate(
+                self.valuation_date,
+                maturity_date,
+                *months,
+                calendar,
+                crate::core::calendar::BusinessDayConvention::ModifiedFollowing,
+                crate::core::calendar::DateGeneration::Backward,
+            )?;
+            bermudan_dates = Some(schedule.dates);
+        }
+        let bermudan_times: Option<Vec<f64>> = match &bermudan_dates {
+            Some(dates) => {
+                if matches!(spec, PayoffSpec::Custom(_)) {
+                    return invalid(
+                        "bermudan",
+                        "bermudan dates apply to built-in payoffs; embed the exercise style \
+                         in the custom payoff instead"
+                            .to_string(),
+                    );
+                }
+                if dates.is_empty() {
+                    return invalid("bermudan", "the exercise date list must not be empty".to_string());
+                }
+                let mut prev = self.valuation_date;
+                let mut times = Vec::with_capacity(dates.len());
+                for date in dates {
+                    if *date <= prev {
+                        return invalid(
+                            "bermudan",
+                            format!("exercise dates must be strictly increasing after valuation; {date} is not"),
+                        );
+                    }
+                    if *date > maturity_date {
+                        return invalid(
+                            "bermudan",
+                            format!("exercise date {date} lies after the maturity {maturity_date}"),
+                        );
+                    }
+                    prev = *date;
+                    times.push((*date - self.valuation_date).num_days() as f64 / 365.0);
+                }
+                Some(times)
+            }
+            None => None,
+        };
         let strike_based = matches!(
             spec,
             PayoffSpec::Vanilla { .. }
@@ -566,6 +698,7 @@ impl EquityOptionBuilder {
                 observations,
                 notional,
                 coupon_barrier,
+                observation_dates,
                 ..
             } => {
                 for (name, x) in [
@@ -593,6 +726,30 @@ impl EquityOptionBuilder {
                 }
                 if *observations < 1 {
                     return invalid("observations", "need at least one observation".to_string());
+                }
+                if let Some(dates) = observation_dates {
+                    if dates.is_empty() {
+                        return invalid(
+                            "autocall_observation_dates",
+                            "the observation date list must not be empty".to_string(),
+                        );
+                    }
+                    let mut prev = self.valuation_date;
+                    for date in dates {
+                        if *date <= prev {
+                            return invalid(
+                                "autocall_observation_dates",
+                                format!("dates must be strictly increasing after valuation; {date} is not"),
+                            );
+                        }
+                        if *date > maturity_date {
+                            return invalid(
+                                "autocall_observation_dates",
+                                format!("observation {date} lies after the maturity {maturity_date}"),
+                            );
+                        }
+                        prev = *date;
+                    }
                 }
             }
             _ => {}
@@ -658,7 +815,10 @@ impl EquityOptionBuilder {
         };
 
         // ── materialize the payoff with the final exercise style ────────
-        let style = self.exercise_style.clone();
+        let style = match bermudan_times {
+            Some(times) => ContractStyle::Bermudan(times),
+            None => self.exercise_style.clone(),
+        };
         let payoff: Box<dyn Payoff> = match spec {
             PayoffSpec::Vanilla { put_or_call } => {
                 Box::new(VanillaPayoff { put_or_call, exercise_style: style })
@@ -716,17 +876,30 @@ impl EquityOptionBuilder {
                 notional,
                 coupon_barrier,
                 memory,
-            } => Box::new(AutocallablePayoff {
-                exercise_style: style,
-                autocall_barrier,
-                protection_barrier,
-                coupon,
-                observations,
-                notional,
-                initial_fixing: self.spot,
-                coupon_barrier,
-                memory,
-            }),
+                observation_dates,
+            } => {
+                let observation_times = observation_dates.as_ref().map(|dates| {
+                    dates
+                        .iter()
+                        .map(|d| (*d - self.valuation_date).num_days() as f64 / 365.0)
+                        .collect::<Vec<f64>>()
+                });
+                let observations = observation_dates
+                    .as_ref()
+                    .map_or(observations, |dates| dates.len());
+                Box::new(AutocallablePayoff {
+                    exercise_style: style,
+                    autocall_barrier,
+                    protection_barrier,
+                    coupon,
+                    observations,
+                    notional,
+                    initial_fixing: self.spot,
+                    coupon_barrier,
+                    memory,
+                    observation_times,
+                })
+            }
             PayoffSpec::Custom(p) => p,
         };
         let base = EquityOptionBase {
@@ -881,6 +1054,244 @@ mod tests {
             matches!(result, Err(RustyQLibError::UnsupportedEngine(_))),
             "American exercise on the analytic engine must be refused at build()"
         );
+    }
+
+    #[test]
+    fn autocall_schedule_generates_business_day_observations() {
+        use crate::core::calendar::Calendar;
+        let option = EquityOptionBuilder::new()
+            .spot(100.0)
+            .flat_vol(0.25)
+            .flat_rate(0.03)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap())
+            .autocallable(105.0, 70.0, 0.02, 4, 100.0)
+            .autocall_schedule(3, Calendar::UsNyse)
+            .engine(Engine::MonteCarlo)
+            .paths(20_000)
+            .build()
+            .expect("option must build");
+        let auto = option
+            .payoff
+            .as_any()
+            .downcast_ref::<AutocallablePayoff>()
+            .expect("autocallable payoff");
+        let times = auto.observation_times.as_ref().expect("schedule must set times");
+        assert_eq!(auto.observations, times.len());
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "times must increase");
+        // the same schedule regenerated must be all NYSE business days
+        let schedule = crate::core::calendar::Schedule::generate(
+            NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2027, 1, 4).unwrap(),
+            3,
+            &Calendar::UsNyse,
+            crate::core::calendar::BusinessDayConvention::ModifiedFollowing,
+            crate::core::calendar::DateGeneration::Backward,
+        )
+        .unwrap();
+        for d in &schedule.dates {
+            assert!(Calendar::UsNyse.is_business_day(*d), "{d} not a business day");
+        }
+        // calendar-adjusted observations price close to the equally
+        // spaced approximation (same seed, same paths)
+        let baseline = EquityOptionBuilder::new()
+            .spot(100.0)
+            .flat_vol(0.25)
+            .flat_rate(0.03)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap())
+            .autocallable(105.0, 70.0, 0.02, 4, 100.0)
+            .engine(Engine::MonteCarlo)
+            .paths(20_000)
+            .build()
+            .expect("option must build");
+        let a = option.npv();
+        let b = baseline.npv();
+        assert!(a.is_finite() && a > 0.0);
+        assert!((a - b).abs() < 1.0, "dates ~quarterly: {a} vs equally spaced {b}");
+    }
+
+    #[test]
+    fn autocall_observation_dates_are_validated() {
+        use crate::core::errors::RustyQLibError;
+        let field = |r: Result<EquityOption, RustyQLibError>| match r {
+            Err(RustyQLibError::InvalidInput { field, .. }) => field,
+            other => panic!("expected InvalidInput, got {:?}", other.map(|_| "an option")),
+        };
+        let base = || {
+            EquityOptionBuilder::new()
+                .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+                .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap())
+                .autocallable(105.0, 70.0, 0.02, 4, 100.0)
+                .engine(Engine::MonteCarlo)
+        };
+        // unsorted dates
+        let unsorted = vec![
+            NaiveDate::from_ymd_opt(2026, 7, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 4, 6).unwrap(),
+        ];
+        assert_eq!(
+            field(base().autocall_observation_dates(unsorted).build()),
+            "autocall_observation_dates"
+        );
+        // date past maturity
+        let late = vec![NaiveDate::from_ymd_opt(2027, 6, 1).unwrap()];
+        assert_eq!(
+            field(base().autocall_observation_dates(late).build()),
+            "autocall_observation_dates"
+        );
+        // schedule on a non-autocallable payoff
+        assert_eq!(
+            field(
+                EquityOptionBuilder::new()
+                    .years_to_maturity(1.0)
+                    .vanilla(PutOrCall::Call)
+                    .autocall_observation_dates(vec![NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()])
+                    .build()
+            ),
+            "autocall_observation_dates"
+        );
+    }
+
+    fn bermudan_put(dates: Vec<NaiveDate>, engine: Engine) -> EquityOption {
+        EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.3)
+            .flat_rate(0.05)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap())
+            .bermudan(dates)
+            .vanilla(PutOrCall::Put)
+            .engine(engine)
+            .build()
+            .expect("option must build")
+    }
+
+    fn put_with_style(style: fn(EquityOptionBuilder) -> EquityOptionBuilder, engine: Engine) -> EquityOption {
+        let b = EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.3)
+            .flat_rate(0.05)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap());
+        style(b).vanilla(PutOrCall::Put).engine(engine).build().expect("option must build")
+    }
+
+    fn quarterly_dates() -> Vec<NaiveDate> {
+        vec![
+            NaiveDate::from_ymd_opt(2026, 4, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 7, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn bermudan_with_no_interior_dates_is_european() {
+        // a single exercise date at expiry adds nothing beyond the
+        // terminal payoff: the tree must reproduce the European value
+        let euro = put_with_style(|b| b, Engine::Binomial).npv();
+        let berm = bermudan_put(
+            vec![NaiveDate::from_ymd_opt(2027, 1, 4).unwrap()],
+            Engine::Binomial,
+        )
+        .npv();
+        assert!((berm - euro).abs() < 1e-10, "berm {berm} vs euro {euro}");
+    }
+
+    #[test]
+    fn bermudan_value_sits_between_european_and_american() {
+        let euro = put_with_style(|b| b, Engine::Binomial).npv();
+        let amer = put_with_style(|b| b.american(), Engine::Binomial).npv();
+        let quarterly = bermudan_put(quarterly_dates(), Engine::Binomial).npv();
+        // monthly rights dominate quarterly rights
+        let monthly: Vec<NaiveDate> = (1..12)
+            .map(|m| NaiveDate::from_ymd_opt(2026, 1, 5).unwrap() + chrono::Months::new(m))
+            .collect();
+        let monthly_pv = bermudan_put(monthly, Engine::Binomial).npv();
+        let eps = 1e-9;
+        assert!(euro <= quarterly + eps, "euro {euro} quarterly {quarterly}");
+        assert!(quarterly <= monthly_pv + eps, "quarterly {quarterly} monthly {monthly_pv}");
+        assert!(monthly_pv <= amer + eps, "monthly {monthly_pv} american {amer}");
+        // quarterly rights must be worth something on an ITM-prone put
+        assert!(quarterly > euro + 1e-4, "quarterly rights must add value");
+    }
+
+    #[test]
+    fn dense_bermudan_converges_to_american() {
+        let amer = put_with_style(|b| b.american(), Engine::Binomial).npv();
+        // weekly exercise rights
+        let weekly: Vec<NaiveDate> = (1..52)
+            .map(|w| NaiveDate::from_ymd_opt(2026, 1, 5).unwrap() + chrono::Duration::weeks(w))
+            .collect();
+        let dense = bermudan_put(weekly, Engine::Binomial).npv();
+        assert!(
+            (amer - dense).abs() < 0.05,
+            "weekly Bermudan {dense} must approach American {amer}"
+        );
+    }
+
+    #[test]
+    fn bermudan_prices_agree_across_engines() {
+        let tree = bermudan_put(quarterly_dates(), Engine::Binomial).npv();
+        let fd = bermudan_put(quarterly_dates(), Engine::FiniteDifference).npv();
+        assert!((tree - fd).abs() < 0.05, "binomial {tree} vs FD {fd}");
+        let mc = bermudan_put(quarterly_dates(), Engine::MonteCarlo).price().unwrap();
+        let se = mc.std_err.expect("MC std err");
+        assert!(
+            (mc.pv - tree).abs() < (3.0 * se).max(0.15),
+            "MC {} +- {se} vs tree {tree}",
+            mc.pv
+        );
+    }
+
+    #[test]
+    fn bermudan_schedule_and_validation() {
+        use crate::core::calendar::Calendar;
+        use crate::core::errors::RustyQLibError;
+        // schedule-generated quarterly rights price like explicit ones
+        let scheduled = EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.3)
+            .flat_rate(0.05)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap())
+            .bermudan_schedule(3, Calendar::UsNyse)
+            .vanilla(PutOrCall::Put)
+            .engine(Engine::Binomial)
+            .build()
+            .expect("option must build");
+        let explicit = bermudan_put(quarterly_dates(), Engine::Binomial);
+        assert!((scheduled.npv() - explicit.npv()).abs() < 0.05);
+
+        // analytic American approximations refuse Bermudan at build()
+        let r = bermudan_put_result(quarterly_dates(), Engine::BaroneAdesiWhaley);
+        assert!(matches!(r, Err(RustyQLibError::UnsupportedEngine(_))));
+        // a date after maturity is rejected with the offending field
+        let r = bermudan_put_result(
+            vec![NaiveDate::from_ymd_opt(2028, 1, 1).unwrap()],
+            Engine::Binomial,
+        );
+        assert!(matches!(r, Err(RustyQLibError::InvalidInput { field, .. }) if field == "bermudan"));
+    }
+
+    fn bermudan_put_result(
+        dates: Vec<NaiveDate>,
+        engine: Engine,
+    ) -> Result<EquityOption, crate::core::errors::RustyQLibError> {
+        EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.3)
+            .flat_rate(0.05)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap())
+            .bermudan(dates)
+            .vanilla(PutOrCall::Put)
+            .engine(engine)
+            .build()
     }
 
     #[test]

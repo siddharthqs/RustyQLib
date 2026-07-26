@@ -154,6 +154,10 @@ fn reprice(option: &EquityOption, d_spot: f64, d_vol: f64, d_rate: f64, d_maturi
     match option.payoff.exercise_style() {
         ContractStyle::American => price(s, k, r, q, sigma, t, pc),
         ContractStyle::European => bs_price(s, k, r, q, sigma, t, pc),
+        // invariant: check_engine_support refuses Bermudan on this engine
+        ContractStyle::Bermudan(_) => {
+            unreachable!("Bermudan exercise is rejected on the BS2002 engine before pricing")
+        }
     }
 }
 
