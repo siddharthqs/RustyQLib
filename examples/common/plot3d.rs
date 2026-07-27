@@ -109,3 +109,69 @@ pub fn save_surface_html(surface: &GreekSurface, path: &str, labels: &Labels) {
     fs::write(path, html).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
     println!("  saved {path}");
 }
+
+// ── 2-D line charts (convergence diagrams etc.) ─────────────────────────
+
+pub struct LineSeries {
+    pub name: String,
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+}
+
+/// Multi-series 2-D chart; set `log_x` / `log_y` for log axes (the shape
+/// convergence plots want: error vs steps on log-log axes shows the
+/// convergence order as the slope).
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn save_lines_html(
+    series: &[LineSeries],
+    path: &str,
+    title: &str,
+    x_label: &str,
+    y_label: &str,
+    log_x: bool,
+    log_y: bool,
+) {
+    let data: Vec<serde_json::Value> = series
+        .iter()
+        .map(|s| {
+            json!({
+                "type": "scatter",
+                "mode": "lines+markers",
+                "name": s.name,
+                "x": s.xs,
+                "y": s.ys,
+            })
+        })
+        .collect();
+    let layout = json!({
+        "title": { "text": title },
+        "xaxis": { "title": { "text": x_label }, "type": if log_x { "log" } else { "linear" } },
+        "yaxis": { "title": { "text": y_label }, "type": if log_y { "log" } else { "linear" } },
+        "legend": { "orientation": "h", "y": -0.2 },
+        "margin": { "t": 60 },
+    });
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let html = format!(
+        "<!DOCTYPE html>
+<html>
+<head>
+<meta charset=\"utf-8\"/>
+         <script src=\"{cdn}\" charset=\"utf-8\"></script>
+         <title>{title}</title>
+</head>
+<body>
+<div id=\"plot\"          style=\"width:100%;height:92vh\"></div>
+<script>
+         Plotly.newPlot('plot', {data}, {layout});
+</script>
+</body>
+</html>
+",
+        cdn = PLOTLY_CDN,
+        data = serde_json::Value::Array(data),
+        layout = layout,
+    );
+    std::fs::write(path, html).expect("write plot html");
+}

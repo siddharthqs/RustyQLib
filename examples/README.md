@@ -14,6 +14,7 @@ Release mode matters: the Monte Carlo examples run 50k–100k paths.
 |---|---|---|
 | `vanilla_option` | European / American vanilla | all four engines side by side; American early-exercise premium; put-call parity; implied vol round trip; analytic vs bumped Greeks |
 | `binary_option` | Cash- and asset-or-nothing digitals | both settlement types; cash scaling; the replication identity across all Greeks; digital risk blowing up near expiry |
+| `binomial_tree` | All six tree schemes compared | pricing table across products, log-log convergence diagrams (HTML), per-scheme order/performance stats, diagnostic engine with exercise boundary |
 | `barrier_option` | All eight barrier types | analytic vs FD vs bridge-corrected MC; in-out parity; barrier sweep; skew effect under local vol |
 | `asian_option` | Asian options | geometric (exact) vs arithmetic (Turnbull-Wakeman); the geometric control variate cutting MC variance ~15x; floating strike; AM-GM ordering |
 | `forward_start_option` | Forward-start options | Rubinstein closed form vs MC; **the forward smile** (Heston vs Black-Scholes); strike-fraction and fixing-date sweeps |
