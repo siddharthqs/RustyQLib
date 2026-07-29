@@ -23,7 +23,7 @@ pub fn build_implied_vol_surface(contracts: &[Box<EquityOption>]) -> Result<VolS
     if contracts.is_empty() {
         return Err(RustyQLibError::invalid_input("vol surface", "no contracts provided".to_string()));
     }
-    let reference_date = contracts[0].base.valuation_date;
+    let reference_date = contracts[0].market.valuation_date;
     let mut smiles: BTreeMap<NaiveDate, Vec<(f64, f64)>> = BTreeMap::new();
     let mut skipped = 0usize;
 

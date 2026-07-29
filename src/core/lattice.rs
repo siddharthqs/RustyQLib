@@ -9,10 +9,13 @@
 //! second-order smooth convergence) and the equal-probability additive
 //! tree (Clewlow-Strickland / QuantLib's `AdditiveEQPBinomialTree`).
 //!
-//! Two engines share the parameterization:
+//! Three engines share the parameterization:
 //! - [`price_backward`] — the production engine: a rolling one-dimensional
 //!   value array (O(n) memory, no tree materialized) with the layer spot
 //!   levels rebuilt from two precomputed power tables.
+//! - [`price_backward_with_greeks`] — the same rolling pass, additionally
+//!   keeping the first two layers so the value and the tree
+//!   delta/gamma/theta come from a single induction.
 //! - [`price_with_diagnostics`] — the debug engine: keeps the full spot
 //!   and value trees, records the early-exercise boundary per layer, tree
 //!   Greeks read off the first layers, and wall-clock time.
@@ -280,6 +283,74 @@ pub fn price_backward(
         }
     }
     v[0]
+}
+
+/// Value and the tree Greeks read off a single backward pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LatticeSolution {
+    pub price: f64,
+    /// Tree delta from the first layer.
+    pub delta: f64,
+    /// Tree gamma from the second layer.
+    pub gamma: f64,
+    /// Calendar theta (per year) from the second-layer center vs the root,
+    /// drift-corrected with the tree's own delta and gamma so asymmetric
+    /// trees (Leisen-Reimer, Jarrow-Rudd, Tian) are handled too.
+    pub theta: f64,
+}
+
+/// The same rolling-array induction as [`price_backward`] (identical price,
+/// bit for bit) that additionally keeps the first two layers, so the value
+/// and the tree delta/gamma/theta come out of **one** pass — no re-pricing
+/// per Greek.
+pub fn price_backward_with_greeks(
+    s0: f64,
+    params: &LatticeParams,
+    n: usize,
+    dt: f64,
+    df_step: f64,
+    terminal: &dyn Fn(f64) -> f64,
+    exercise: Option<&dyn Fn(usize, f64, f64) -> f64>,
+) -> LatticeSolution {
+    let up_pow: Vec<f64> = (0..=n).map(|j| (j as f64 * params.log_up).exp()).collect();
+    let down_pow: Vec<f64> = (0..=n).map(|j| (j as f64 * params.log_down).exp()).collect();
+    let spot = |i: usize, j: usize| s0 * up_pow[j] * down_pow[i - j];
+
+    let mut v: Vec<f64> = (0..=n).map(|j| terminal(spot(n, j))).collect();
+    let mut layer2 = [0.0; 3];
+    let mut layer1 = [0.0; 2];
+    if n == 2 {
+        layer2.copy_from_slice(&v[0..3]);
+    }
+    let (p, q) = (params.p_up, 1.0 - params.p_up);
+    for i in (0..n).rev() {
+        for j in 0..=i {
+            let cont = df_step * (p * v[j + 1] + q * v[j]);
+            v[j] = match exercise {
+                Some(ex) => ex(i, spot(i, j), cont),
+                None => cont,
+            };
+        }
+        match i {
+            2 => layer2.copy_from_slice(&v[0..3]),
+            1 => layer1.copy_from_slice(&v[0..2]),
+            _ => {}
+        }
+    }
+
+    let price = v[0];
+    let delta = (layer1[1] - layer1[0]) / (spot(1, 1) - spot(1, 0));
+    let (s_uu, s_ud, s_dd) = (spot(2, 2), spot(2, 1), spot(2, 0));
+    let d_up = (layer2[2] - layer2[1]) / (s_uu - s_ud);
+    let d_down = (layer2[1] - layer2[0]) / (s_ud - s_dd);
+    let gamma = (d_up - d_down) / (0.5 * (s_uu - s_dd));
+    // the second-layer center sits at s0 only on symmetric trees; remove
+    // the spot displacement with the tree's delta and gamma before reading
+    // the calendar decay over the 2*dt elapsed
+    let ds = s_ud - s0;
+    let theta = (layer2[1] - price - delta * ds - 0.5 * gamma * ds * ds) / (2.0 * dt);
+
+    LatticeSolution { price, delta, gamma, theta }
 }
 
 // ── Diagnostic engine ───────────────────────────────────────────────────
@@ -563,6 +634,54 @@ impl TermLattice {
             }
         }
         v[0]
+    }
+
+    /// The same induction as [`price`](Self::price) (identical price, bit
+    /// for bit) keeping the first two layers, so the value and the tree
+    /// delta/gamma/theta come out of one pass. The log-grid is symmetric,
+    /// so the second-layer center returns exactly to `s0` and theta needs
+    /// no drift correction; the elapsed time is the grid's own `times[2]`
+    /// (the layer times are unequal).
+    pub fn price_with_greeks(
+        &self,
+        s0: f64,
+        terminal: &dyn Fn(f64) -> f64,
+        exercise: Option<&dyn Fn(usize, f64, f64, f64) -> f64>,
+    ) -> LatticeSolution {
+        let n = self.steps();
+        let pow: Vec<f64> = (0..=2 * n).map(|k| ((k as f64 - n as f64) * self.dx).exp()).collect();
+        let spot = |i: usize, j: usize| s0 * pow[2 * j + n - i];
+
+        let mut v: Vec<f64> = (0..=n).map(|j| terminal(spot(n, j))).collect();
+        let mut layer2 = [0.0; 3];
+        let mut layer1 = [0.0; 2];
+        if n == 2 {
+            layer2.copy_from_slice(&v[0..3]);
+        }
+        for i in (0..n).rev() {
+            let (p, q, df) = (self.p_up[i], 1.0 - self.p_up[i], self.df[i]);
+            for j in 0..=i {
+                let cont = df * (p * v[j + 1] + q * v[j]);
+                v[j] = match exercise {
+                    Some(ex) => ex(i, self.times[i], spot(i, j), cont),
+                    None => cont,
+                };
+            }
+            match i {
+                2 => layer2.copy_from_slice(&v[0..3]),
+                1 => layer1.copy_from_slice(&v[0..2]),
+                _ => {}
+            }
+        }
+
+        let price = v[0];
+        let delta = (layer1[1] - layer1[0]) / (spot(1, 1) - spot(1, 0));
+        let (s_uu, s_ud, s_dd) = (spot(2, 2), spot(2, 1), spot(2, 0));
+        let d_up = (layer2[2] - layer2[1]) / (s_uu - s_ud);
+        let d_down = (layer2[1] - layer2[0]) / (s_ud - s_dd);
+        let gamma = (d_up - d_down) / (0.5 * (s_uu - s_dd));
+        let theta = (layer2[1] - price) / self.times[2];
+        LatticeSolution { price, delta, gamma, theta }
     }
 }
 
@@ -870,6 +989,71 @@ mod tests {
             assert_eq!(diag.spot_tree.len(), n + 1);
             assert_eq!(diag.spot_tree[n].len(), n + 1);
         }
+    }
+
+    #[test]
+    fn one_pass_greeks_match_black_scholes() {
+        let norm_pdf = |x: f64| (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+        let b = R - Q;
+        let sq_t = SIGMA * T.sqrt();
+        let d1 = ((S / K).ln() + (b + 0.5 * SIGMA * SIGMA) * T) / sq_t;
+        let d2 = d1 - sq_t;
+        let carry_df = ((b - R) * T).exp(); // e^{-qT}
+        let bs_delta = carry_df * norm_cdf(d1);
+        let bs_gamma = carry_df * norm_pdf(d1) / (S * sq_t);
+        let bs_theta = -S * carry_df * norm_pdf(d1) * SIGMA / (2.0 * T.sqrt())
+            - (b - R) * S * carry_df * norm_cdf(d1)
+            - R * K * (-R * T).exp() * norm_cdf(d2);
+
+        // the asymmetric schemes exercise the drift-corrected theta read
+        for tree_type in [BinomialTreeType::LeisenReimer, BinomialTreeType::JarrowRudd] {
+            let n = tree_type.effective_steps(1001);
+            let params = tree_type.params(S, K, b, SIGMA, T, n).unwrap();
+            let dt = T / n as f64;
+            let df = (-R * dt).exp();
+            let terminal = |s: f64| (s - K).max(0.0);
+            let sol = price_backward_with_greeks(S, &params, n, dt, df, &terminal, None);
+            let plain = price_backward(S, &params, n, df, &terminal, None);
+            assert_eq!(sol.price, plain, "{tree_type:?}: one-pass price must match exactly");
+            assert!(
+                (sol.delta - bs_delta).abs() < 2e-3,
+                "{tree_type:?} delta {} vs BS {bs_delta}",
+                sol.delta
+            );
+            assert!(
+                (sol.gamma - bs_gamma).abs() < 2e-4,
+                "{tree_type:?} gamma {} vs BS {bs_gamma}",
+                sol.gamma
+            );
+            assert!(
+                (sol.theta - bs_theta).abs() < 2e-2,
+                "{tree_type:?} theta {} vs BS {bs_theta}",
+                sol.theta
+            );
+        }
+    }
+
+    #[test]
+    fn one_pass_greeks_agree_with_the_diagnostic_engine() {
+        // American put: same induction, so delta and gamma must be identical
+        let tree_type = BinomialTreeType::CoxRossRubinstein;
+        let n = 200;
+        let params = tree_type.params(S, K, R - Q, SIGMA, T, n).unwrap();
+        let dt = T / n as f64;
+        let df = (-R * dt).exp();
+        let terminal = |s: f64| (K - s).max(0.0);
+        let exercise = |_: usize, s: f64, cont: f64| (K - s).max(0.0).max(cont);
+        let sol =
+            price_backward_with_greeks(S, &params, n, dt, df, &terminal, Some(&exercise));
+        let diag = price_with_diagnostics(
+            tree_type, S, &params, n, dt, df, &terminal, Some(&exercise),
+        );
+        assert_eq!(sol.price, diag.price);
+        assert_eq!(sol.delta, diag.delta);
+        assert_eq!(sol.gamma, diag.gamma);
+        // CRR is symmetric (the layer-2 center returns to s0), so the
+        // drift correction vanishes and the thetas coincide
+        assert!((sol.theta - diag.theta).abs() < 1e-10, "{} vs {}", sol.theta, diag.theta);
     }
 
     #[test]

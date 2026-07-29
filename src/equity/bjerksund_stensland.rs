@@ -144,11 +144,11 @@ fn psi(
 // ── EquityOption integration (mirrors the BAW engine) ───────────────────
 
 fn reprice(option: &EquityOption, d_spot: f64, d_vol: f64, d_rate: f64, d_maturity: f64) -> f64 {
-    let s = option.base.effective_spot() + d_spot;
+    let s = option.effective_spot() + d_spot;
     let k = option.base.strike_price;
-    let r = option.base.risk_free_rate() + d_rate;
-    let q = option.base.carry_yield();
-    let sigma = option.base.volatility() + d_vol;
+    let r = option.risk_free_rate() + d_rate;
+    let q = option.carry_yield();
+    let sigma = option.volatility() + d_vol;
     let t = (option.time_to_maturity() + d_maturity).max(1e-8);
     let pc = *option.payoff.put_or_call();
     match option.payoff.exercise_style() {
@@ -170,74 +170,9 @@ pub fn price_with(option: &EquityOption, d_spot: f64, d_vol: f64, d_rate: f64, d
     reprice(option, d_spot, d_vol, d_rate, -d_time)
 }
 
-// Greeks by bump-and-reprice on the fast closed form.
-
-fn spot_bump(option: &EquityOption) -> f64 {
-    option.base.effective_spot() * 1e-4
-}
-
-pub fn delta(option: &EquityOption) -> f64 {
-    let h = spot_bump(option);
-    (reprice(option, h, 0.0, 0.0, 0.0) - reprice(option, -h, 0.0, 0.0, 0.0)) / (2.0 * h)
-}
-
-pub fn gamma(option: &EquityOption) -> f64 {
-    let h = spot_bump(option);
-    (reprice(option, h, 0.0, 0.0, 0.0) - 2.0 * reprice(option, 0.0, 0.0, 0.0, 0.0)
-        + reprice(option, -h, 0.0, 0.0, 0.0))
-        / (h * h)
-}
-
-pub fn vega(option: &EquityOption) -> f64 {
-    let h = 1e-4;
-    (reprice(option, 0.0, h, 0.0, 0.0) - reprice(option, 0.0, -h, 0.0, 0.0)) / (2.0 * h)
-}
-
-pub fn rho(option: &EquityOption) -> f64 {
-    let h = 1e-4;
-    (reprice(option, 0.0, 0.0, h, 0.0) - reprice(option, 0.0, 0.0, -h, 0.0)) / (2.0 * h)
-}
-
-pub fn theta(option: &EquityOption) -> f64 {
-    let h = (1.0 / 365.0_f64).min(0.5 * option.time_to_maturity());
-    -(reprice(option, 0.0, 0.0, 0.0, h) - reprice(option, 0.0, 0.0, 0.0, -h)) / (2.0 * h)
-}
-
-pub fn vanna(option: &EquityOption) -> f64 {
-    let hs = spot_bump(option);
-    let hv = 1e-4;
-    (reprice(option, hs, hv, 0.0, 0.0) - reprice(option, -hs, hv, 0.0, 0.0)
-        - reprice(option, hs, -hv, 0.0, 0.0)
-        + reprice(option, -hs, -hv, 0.0, 0.0))
-        / (4.0 * hs * hv)
-}
-
-pub fn charm(option: &EquityOption) -> f64 {
-    let hs = spot_bump(option);
-    let ht = (1.0 / 365.0_f64).min(0.5 * option.time_to_maturity());
-    -(reprice(option, hs, 0.0, 0.0, ht) - reprice(option, -hs, 0.0, 0.0, ht)
-        - reprice(option, hs, 0.0, 0.0, -ht)
-        + reprice(option, -hs, 0.0, 0.0, -ht))
-        / (4.0 * hs * ht)
-}
-
-pub fn zomma(option: &EquityOption) -> f64 {
-    let hs = spot_bump(option);
-    let hv = 1e-4;
-    let gamma_at = |dv: f64| {
-        (reprice(option, hs, dv, 0.0, 0.0) - 2.0 * reprice(option, 0.0, dv, 0.0, 0.0)
-            + reprice(option, -hs, dv, 0.0, 0.0))
-            / (hs * hs)
-    };
-    (gamma_at(hv) - gamma_at(-hv)) / (2.0 * hv)
-}
-
-pub fn volga(option: &EquityOption) -> f64 {
-    let hv = 1e-3;
-    (reprice(option, 0.0, hv, 0.0, 0.0) - 2.0 * reprice(option, 0.0, 0.0, 0.0, 0.0)
-        + reprice(option, 0.0, -hv, 0.0, 0.0))
-        / (hv * hv)
-}
+// Greeks: central-difference bumps on the fast closed form, produced by
+// the central sensitivity engine (`crate::equity::greeks`) through
+// [`price_with`].
 
 #[cfg(test)]
 mod tests {

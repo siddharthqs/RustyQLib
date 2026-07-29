@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Quote{
     pub value: f64,
     pub bid: f64,

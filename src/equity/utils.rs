@@ -80,6 +80,20 @@ impl Model {
         matches!(self, Model::Heston(_))
     }
 
+    /// The model under a parallel implied-vol shift — the model is a risk
+    /// factor owner like a surface or a curve. GBM and local vol read the
+    /// (already bumped) surface at pricing time, so they pass through
+    /// unchanged; Heston applies the library's vega convention: shift
+    /// `sqrt(v0)` and `sqrt(theta)` in parallel
+    /// ([`HestonParams::with_vol_shift`](crate::equity::heston::HestonParams::with_vol_shift)),
+    /// rather than recalibrating to the bumped surface.
+    pub fn with_vol_shift(&self, shift: f64) -> Model {
+        match self {
+            Model::Heston(params) => Model::Heston(params.with_vol_shift(shift)),
+            other => *other,
+        }
+    }
+
     /// Parse from contract fields: the `mc_model` string plus the
     /// `heston` parameter block (required when the model is Heston).
     pub fn from_contract(
@@ -107,7 +121,7 @@ impl Model {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LongShort{
     LONG,
     SHORT
@@ -165,9 +179,26 @@ pub trait Payoff: Debug + Send + Sync {
         false
     }
 
-    /// Intrinsic value at the option's current underlying price.
-    fn payoff_amount(&self, base: &EquityOptionBase) -> f64 {
-        self.payoff(base.underlying_price.value(), base.strike_price)
+    /// Intrinsic value at the given spot (the option's current market
+    /// spot at its contract strike).
+    fn payoff_amount(&self, spot: f64, strike: f64) -> f64 {
+        self.payoff(spot, strike)
+    }
+
+    /// Path payoff in AAD arithmetic — the mirror of
+    /// [`path_payoff`](Payoff::path_payoff) over tape variables, used by
+    /// the adjoint Monte Carlo Greeks
+    /// ([`montecarlo::aad_greeks`](crate::equity::montecarlo)). `None`
+    /// (the default) opts a payoff out: **discontinuous payoffs (barrier,
+    /// binary, autocallable) must stay out**, because the
+    /// almost-everywhere derivative of an indicator is zero — their
+    /// Greeks come from the bump stencils instead.
+    fn path_payoff_var<'t>(
+        &self,
+        _path: &[crate::core::aad::Var<'t>],
+        _strike: f64,
+    ) -> Option<crate::core::aad::Var<'t>> {
+        None
     }
 
     fn payoff_kind(&self) -> PayoffType;
@@ -178,4 +209,16 @@ pub trait Payoff: Debug + Send + Sync {
     /// analytic pricer distinguishing cash- from asset-or-nothing binaries)
     /// can recover the concrete payoff type.
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Clone through the trait object, so instruments holding a
+    /// `Box<dyn Payoff>` are cloneable (repricing a contract under another
+    /// market clones the instrument). Implementors write
+    /// `Box::new(self.clone())`.
+    fn clone_box(&self) -> Box<dyn Payoff>;
+}
+
+impl Clone for Box<dyn Payoff> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }

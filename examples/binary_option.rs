@@ -16,7 +16,7 @@ const STRIKE: f64 = 100.0;
 const VOL: f64 = 0.30;
 const RATE: f64 = 0.05;
 const DIV: f64 = 0.02;
-const CASH: f64 = 1.0;
+const CASH: f64 = 100.0;
 
 fn base() -> EquityOptionBuilder {
     EquityOptionBuilder::new()

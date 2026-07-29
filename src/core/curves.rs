@@ -157,6 +157,18 @@ pub struct CurvePillar {
     pub zero_rate: f64,
 }
 
+/// A shift applied to a whole curve by [`YieldCurve::bumped`]. Shifts act
+/// on the **continuously compounded zero rates** (the curve's discount
+/// factors are re-derived exactly), independent of the curve's quoting
+/// convention.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RateShift {
+    /// Add `d` to every continuous zero rate (e.g. `0.0001` = +1bp).
+    ParallelAbsolute(f64),
+    /// Scale every continuous zero rate by `1 + r`.
+    ParallelRelative(f64),
+}
+
 /// A canonical discount curve anchored at `reference_date`.
 ///
 /// State is the pillar `(times, dfs)` vectors only — `dfs[0] = 1.0` at
@@ -299,6 +311,22 @@ impl YieldCurve {
                 Self::from_forward_rates(tenors, forwards, reference_date, *day_count, *compounding, *interpolation)
             }
         }
+    }
+
+    /// This curve with `shift` applied to its continuous zero rates.
+    /// The discount factors are re-derived exactly at every pillar:
+    /// `z -> z + d` gives `df -> df * exp(-d*t)`, `z -> z*(1+r)` gives
+    /// `df -> df^(1+r)`. Pillars, day count, quoting convention and
+    /// interpolation are unchanged; `df(0) = 1` is preserved.
+    pub fn bumped(&self, shift: RateShift) -> YieldCurve {
+        let mut bumped = self.clone();
+        for (df, &t) in bumped.dfs.iter_mut().zip(self.times.iter()) {
+            *df = match shift {
+                RateShift::ParallelAbsolute(d) => *df * (-d * t).exp(),
+                RateShift::ParallelRelative(r) => df.powf(1.0 + r),
+            };
+        }
+        bumped
     }
 
     // ── Queries ─────────────────────────────────────────────────────────
@@ -490,6 +518,27 @@ mod tests {
 
     fn flat_5pct() -> YieldCurve {
         YieldCurve::flat(0.05, asof(), DayCountConvention::Act365, Compounding::Continuous).unwrap()
+    }
+
+    #[test]
+    fn bumped_shifts_continuous_zeros_exactly() {
+        let curve = flat_5pct();
+        let up = curve.bumped(RateShift::ParallelAbsolute(0.01));
+        for t in [0.1, 1.0, 4.2, 10.0, 30.0, 60.0] {
+            // +100bp on a 5% flat curve = a 6% flat curve, including extrapolation
+            assert!(
+                (up.df(t) - (-0.06_f64 * t).exp()).abs() < 1e-12,
+                "df({t}) = {}",
+                up.df(t)
+            );
+            assert!((up.zero_rate_with(t, Compounding::Continuous) - 0.06).abs() < 1e-12);
+        }
+        // relative: zeros scale, 5% * 1.2 = 6%
+        let scaled = curve.bumped(RateShift::ParallelRelative(0.20));
+        assert!((scaled.zero_rate_with(1.0, Compounding::Continuous) - 0.06).abs() < 1e-12);
+        // df(0) = 1 preserved, original untouched
+        assert_eq!(up.df(0.0), 1.0);
+        assert!((curve.zero_rate_with(1.0, Compounding::Continuous) - 0.05).abs() < 1e-12);
     }
 
     #[test]

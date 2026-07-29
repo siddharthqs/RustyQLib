@@ -63,7 +63,7 @@ fn main() {
     let hard = base().borrow_cost(0.15).vanilla(PutOrCall::Call).build().expect("option must build");
     println!(
         "  forward with 15% borrow: {:.4} (vs spot {SPOT})",
-        hard.base.forward_price()
+        hard.forward_price()
     );
 
     common::section("Discrete cash dividends: 2 x 1.50 over the year");
@@ -74,8 +74,8 @@ fn main() {
     let analytic = with_divs(base()).vanilla(PutOrCall::Call).build().expect("option must build");
     println!(
         "  spot {SPOT} - PV(dividends) {:.6} = escrowed spot {:.6}",
-        analytic.base.pv_cash_dividends(),
-        analytic.base.effective_spot()
+        analytic.pv_cash_dividends(),
+        analytic.effective_spot()
     );
     common::table_header();
     common::row("Analytical (escrowed model)", &analytic);
@@ -106,7 +106,7 @@ fn main() {
     common::check(
         "escrowed analytic == BS on the escrowed spot",
         analytic.npv(),
-        bs_price(analytic.base.effective_spot(), STRIKE, RATE, 0.0, VOL, 1.0, PutOrCall::Call),
+        bs_price(analytic.effective_spot(), STRIKE, RATE, 0.0, VOL, 1.0, PutOrCall::Call),
         1e-10,
     );
 
@@ -145,7 +145,7 @@ fn main() {
     common::section("Put-call parity with full carry");
     let call = with_divs(base()).borrow_cost(0.02).vanilla(PutOrCall::Call).build().expect("option must build");
     let put = with_divs(base()).borrow_cost(0.02).vanilla(PutOrCall::Put).build().expect("option must build");
-    let parity = call.base.effective_spot() * (-call.base.carry_yield() * 1.0_f64).exp()
+    let parity = call.effective_spot() * (-call.carry_yield() * 1.0_f64).exp()
         - STRIKE * (-RATE * 1.0_f64).exp();
     common::check("C - P = S_eff e^{-(q+b)T} - K e^{-rT}", call.npv() - put.npv(), parity, 1e-10);
     println!();

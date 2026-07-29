@@ -4,6 +4,7 @@ pub mod barrier;
 pub mod black76;
 pub mod blackscholes;
 pub mod builder;
+pub mod greeks;
 pub mod heston;
 pub mod local_vol;
 pub mod market;

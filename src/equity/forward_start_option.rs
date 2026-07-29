@@ -14,7 +14,7 @@ use crate::core::utils::ContractStyle;
 use crate::equity::blackscholes::bs_price;
 use crate::equity::utils::{Payoff, PayoffType};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ForwardStartPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
@@ -40,6 +40,20 @@ impl Payoff for ForwardStartPayoff {
             PutOrCall::Put => (strike - terminal).max(0.0),
         }
     }
+    fn path_payoff_var<'t>(
+        &self,
+        path: &[crate::core::aad::Var<'t>],
+        _strike: f64,
+    ) -> Option<crate::core::aad::Var<'t>> {
+        let n = path.len();
+        let idx = ((self.start_fraction * n as f64).round() as usize).clamp(1, n - 1) - 1;
+        let strike = path[idx] * self.strike_fraction;
+        let terminal = path[n - 1];
+        Some(match self.put_or_call {
+            PutOrCall::Call => (terminal - strike).maxf(0.0),
+            PutOrCall::Put => (strike - terminal).maxf(0.0),
+        })
+    }
     fn is_path_dependent(&self) -> bool {
         true
     }
@@ -54,6 +68,9 @@ impl Payoff for ForwardStartPayoff {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+    fn clone_box(&self) -> Box<dyn Payoff> {
+        Box::new(self.clone())
     }
 }
 

@@ -60,7 +60,9 @@ pub fn row(label: &str, option: &EquityOption) {
         } else {
             (option.npv(), None)
         };
-        (pv, option.delta(), option.gamma(), option.vega(), option.theta(), option.rho(), std_err)
+        let result = option.price().unwrap();
+        (result.pv, result.greeks.delta, result.greeks.gamma, result.greeks.vega, result.greeks.theta,
+         option.rho(), std_err)
     }));
     std::panic::set_hook(hook);
     match result {

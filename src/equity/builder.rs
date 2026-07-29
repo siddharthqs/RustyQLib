@@ -927,20 +927,22 @@ impl EquityOptionBuilder {
             cusip: None,
             isin: None,
             settlement_type: None,
-            underlying_price: Quote::new(self.spot),
-            current_price: Quote::new(0.0),
             strike_price: self.strike,
+            maturity_date,
+            futures_settlement: self.futures_settlement,
+            multiplier: 1.0,
+            current_price: Quote::new(0.0),
+            entry_price: 0.0,
+            long_short: LongShort::LONG,
+        };
+        let market = crate::equity::vanilla_option::EquityMarketData {
+            valuation_date: self.valuation_date,
+            spot: Quote::new(self.spot),
             dividend_yield: self.dividend_yield,
             borrow_cost: self.borrow_cost,
             cash_dividends: self.cash_dividends,
-            futures_settlement: self.futures_settlement,
             vol_surface,
-            maturity_date,
-            valuation_date: self.valuation_date,
             discount_curve,
-            entry_price: 0.0,
-            long_short: LongShort::LONG,
-            multiplier: 1.0,
         };
         let engine = match self.engine {
             Engine::BlackScholes => PricingEngine::BlackScholes,
@@ -950,7 +952,7 @@ impl EquityOptionBuilder {
             Engine::BaroneAdesiWhaley => PricingEngine::BaroneAdesiWhaley,
             Engine::BjerksundStensland => PricingEngine::BjerksundStensland,
         };
-        let option = EquityOption { base, payoff, engine, model: self.model };
+        let option = EquityOption { base, market, payoff, engine, model: self.model };
         // "builds => prices": refuse engine/model/payoff combinations here
         // rather than at pricing time
         option.check_engine_support()?;
@@ -988,7 +990,7 @@ mod tests {
             .years_to_maturity(1.0)
             .vanilla(PutOrCall::Call)
             .build().expect("option must build");
-        assert!((option.base.carry_yield() - 0.03).abs() < 1e-12);
+        assert!((option.carry_yield() - 0.03).abs() < 1e-12);
     }
 
     #[test]

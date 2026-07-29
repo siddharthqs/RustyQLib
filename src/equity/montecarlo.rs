@@ -186,11 +186,11 @@ struct MarketParams {
 
 fn market_params(option: &EquityOption) -> MarketParams {
     MarketParams {
-        s0: option.base.underlying_price.value(),
+        s0: option.market.spot.value(),
         strike: option.base.strike_price,
-        r: option.base.risk_free_rate(),
-        q: option.base.carry_yield(),
-        sigma: option.base.volatility(),
+        r: option.risk_free_rate(),
+        q: option.carry_yield(),
+        sigma: option.volatility(),
         t: option.time_to_maturity(),
     }
 }
@@ -198,13 +198,13 @@ fn market_params(option: &EquityOption) -> MarketParams {
 /// Cash dividend amounts bucketed per simulation step (None if there are
 /// none): path simulation subtracts them at the ex-date step.
 fn dividends_per_step(option: &EquityOption, t: f64, steps: usize) -> Option<Vec<f64>> {
-    if option.base.cash_dividends.is_empty() {
+    if option.market.cash_dividends.is_empty() {
         return None;
     }
     let dt = t / steps as f64;
     let mut buckets = vec![0.0; steps];
-    for (date, amount) in &option.base.cash_dividends {
-        let td = (*date - option.base.valuation_date).num_days() as f64 / 365.0;
+    for (date, amount) in &option.market.cash_dividends {
+        let td = (*date - option.market.valuation_date).num_days() as f64 / 365.0;
         if td > 0.0 && td <= t {
             let idx = (((td / dt).ceil() as usize).max(1) - 1).min(steps - 1);
             buckets[idx] += amount;
@@ -221,14 +221,14 @@ fn dividends_per_step(option: &EquityOption, t: f64, steps: usize) -> Option<Vec
 /// and the jump-model forward; see
 /// [`EquityOptionBase::pv_cash_dividends`](super::vanilla_option::EquityOptionBase::pv_cash_dividends).
 fn escrowed_spot(option: &EquityOption, p: &MarketParams) -> f64 {
-    let dr = p.r - option.base.risk_free_rate();
+    let dr = p.r - option.risk_free_rate();
     let mut pv = 0.0;
-    for (date, amount) in &option.base.cash_dividends {
-        let td = (*date - option.base.valuation_date).num_days() as f64 / 365.0;
+    for (date, amount) in &option.market.cash_dividends {
+        let td = (*date - option.market.valuation_date).num_days() as f64 / 365.0;
         if td > 0.0 && td <= p.t {
             // df(td) e^{-dr td} discounts at the bumped rate p.r;
             // e^{p.q td} moves it to the net carry (p.r - p.q).
-            pv += amount * option.base.discount_curve.df(td) * ((p.q - dr) * td).exp();
+            pv += amount * option.market.discount_curve.df(td) * ((p.q - dr) * td).exp();
         }
     }
     p.s0 - pv
@@ -240,9 +240,9 @@ pub fn npv(option: &EquityOption) -> f64 {
 
 /// Price with standard error and simulation diagnostics.
 pub fn npv_with_stats(option: &EquityOption) -> McStats {
-    assert!(option.base.volatility() >= 0.0);
-    assert!(option.base.time_to_maturity() >= 0.0);
-    assert!(option.base.underlying_price.value >= 0.0);
+    assert!(option.volatility() >= 0.0);
+    assert!(option.time_to_maturity() >= 0.0);
+    assert!(option.market.spot.value >= 0.0);
     if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
         assert!(
             !(barrier.rebate != 0.0 && barrier.rebate_at_hit),
@@ -259,86 +259,180 @@ fn price(option: &EquityOption, p: &MarketParams) -> McStats {
     }
 }
 
-// ── Greeks: central-difference bumps with common random numbers ─────────
+// Greeks: central-difference bumps with common random numbers, produced
+// by the central sensitivity engine (`crate::equity::greeks`) through
+// [`npv_with`] — every bumped reprice reuses the base price's draws.
+// Where the payoff is smooth enough, the pathwise estimator below
+// replaces the delta/vega bumps.
 
-pub fn delta(option: &EquityOption) -> f64 {
+/// Pathwise delta and vega for the exact terminal-GBM route: differentiate
+/// the discounted payoff along each path instead of bumping,
+///
+/// ```text
+/// dV/dS0    = e^{-rT} E[ payoff'(S_T) * S_T / S0 ]
+/// dV/dsigma = e^{-rT} E[ payoff'(S_T) * S_T * (sqrt(T) Z - sigma T) ]
+/// ```
+///
+/// (`S0` the escrowed spot, `payoff'` = ±indicator for a vanilla). One
+/// simulation instead of four, no finite-difference bias, and the same
+/// draws as the price, so the estimates are exactly reproducible.
+///
+/// Applies to European vanilla payoffs on constant-vol GBM with one-step
+/// terminal simulation; returns `None` outside that scope (path-dependent,
+/// multi-step, local vol, Heston, American), where the central bump
+/// stencils take over. The kink at the strike has measure zero, so the
+/// interchange of derivative and expectation is valid for vanillas.
+pub(crate) fn pathwise_delta_vega(option: &EquityOption) -> Option<(f64, f64)> {
+    let vanilla = option.payoff.as_any().downcast_ref::<VanillaPayoff>()?;
+    if !matches!(vanilla.exercise_style, ContractStyle::European) {
+        return None;
+    }
+    if option.model != Model::Gbm {
+        return None;
+    }
+    let cfg = option.mc_cfg();
+    if effective_steps(cfg, &option.model) > 1 {
+        return None;
+    }
     let p = market_params(option);
-    let h = p.s0 * 0.01;
-    (price(option, &MarketParams { s0: p.s0 + h, ..p }).pv
-        - price(option, &MarketParams { s0: p.s0 - h, ..p }).pv)
-        / (2.0 * h)
-}
-
-pub fn gamma(option: &EquityOption) -> f64 {
-    let p = market_params(option);
-    let h = p.s0 * 0.01;
-    (price(option, &MarketParams { s0: p.s0 + h, ..p }).pv - 2.0 * price(option, &p).pv
-        + price(option, &MarketParams { s0: p.s0 - h, ..p }).pv)
-        / (h * h)
-}
-
-pub fn vega(option: &EquityOption) -> f64 {
-    let p = market_params(option);
-    let h = 0.01;
-    (price(option, &MarketParams { sigma: p.sigma + h, ..p }).pv
-        - price(option, &MarketParams { sigma: p.sigma - h, ..p }).pv)
-        / (2.0 * h)
-}
-
-pub fn theta(option: &EquityOption) -> f64 {
-    // theta = dV/dt (calendar) = -dV/dT
-    let p = market_params(option);
-    let h = (1.0 / 365.0_f64).min(0.5 * p.t);
-    -(price(option, &MarketParams { t: p.t + h, ..p }).pv
-        - price(option, &MarketParams { t: p.t - h, ..p }).pv)
-        / (2.0 * h)
-}
-
-pub fn rho(option: &EquityOption) -> f64 {
-    let p = market_params(option);
-    let h = 1e-4;
-    (price(option, &MarketParams { r: p.r + h, ..p }).pv
-        - price(option, &MarketParams { r: p.r - h, ..p }).pv)
-        / (2.0 * h)
-}
-
-/// Vanna, estimated with common-random-number mixed spot/volatility bumps.
-pub fn vanna(option: &EquityOption) -> f64 {
-    let p = market_params(option);
-    let hs = p.s0 * 0.01;
-    let hv = 0.01;
-    (price(option, &MarketParams { s0: p.s0 + hs, sigma: p.sigma + hv, ..p }).pv
-        - price(option, &MarketParams { s0: p.s0 - hs, sigma: p.sigma + hv, ..p }).pv
-        - price(option, &MarketParams { s0: p.s0 + hs, sigma: p.sigma - hv, ..p }).pv
-        + price(option, &MarketParams { s0: p.s0 - hs, sigma: p.sigma - hv, ..p }).pv)
-        / (4.0 * hs * hv)
-}
-
-/// Charm, the calendar-time change in delta, estimated by mixed bumps.
-pub fn charm(option: &EquityOption) -> f64 {
-    let p = market_params(option);
-    let hs = p.s0 * 0.01;
-    let ht = (1.0 / 365.0_f64).min(0.5 * p.t);
-    -(price(option, &MarketParams { s0: p.s0 + hs, t: p.t + ht, ..p }).pv
-        - price(option, &MarketParams { s0: p.s0 - hs, t: p.t + ht, ..p }).pv
-        - price(option, &MarketParams { s0: p.s0 + hs, t: p.t - ht, ..p }).pv
-        + price(option, &MarketParams { s0: p.s0 - hs, t: p.t - ht, ..p }).pv)
-        / (4.0 * hs * ht)
-}
-
-/// Zomma, estimated by applying a volatility bump to the common-random-
-/// number gamma estimate.
-pub fn zomma(option: &EquityOption) -> f64 {
-    let p = market_params(option);
-    let hs = p.s0 * 0.01;
-    let hv = 0.01;
-    let gamma_at_vol = |sigma: f64| {
-        (price(option, &MarketParams { s0: p.s0 + hs, sigma, ..p }).pv
-            - 2.0 * price(option, &MarketParams { sigma, ..p }).pv
-            + price(option, &MarketParams { s0: p.s0 - hs, sigma, ..p }).pv)
-            / (hs * hs)
+    let df = exp(-p.r * p.t);
+    let drift = (p.r - p.q - 0.5 * p.sigma * p.sigma) * p.t;
+    let sqrt_t = p.t.sqrt();
+    let vol_sqrt_t = p.sigma * sqrt_t;
+    let s0 = escrowed_spot(option, &p);
+    let z = match cfg.sampler {
+        Sampler::Sobol => sobol_normals(cfg.paths),
+        Sampler::PseudoRandom => pseudo_normals(cfg.paths, cfg.seed),
     };
-    (gamma_at_vol(p.sigma + hv) - gamma_at_vol(p.sigma - hv)) / (2.0 * hv)
+    let sign = match vanilla.put_or_call {
+        PutOrCall::Call => 1.0,
+        PutOrCall::Put => -1.0,
+    };
+    let partials: Vec<(f64, f64)> = z
+        .par_chunks(PATH_CHUNK)
+        .map(|chunk| {
+            let (mut delta_sum, mut vega_sum) = (0.0, 0.0);
+            for z in chunk {
+                let s_t = s0 * exp(drift + vol_sqrt_t * z);
+                let in_the_money = match vanilla.put_or_call {
+                    PutOrCall::Call => s_t > p.strike,
+                    PutOrCall::Put => s_t < p.strike,
+                };
+                if in_the_money {
+                    delta_sum += sign * s_t / s0;
+                    vega_sum += sign * s_t * (sqrt_t * z - p.sigma * p.t);
+                }
+            }
+            (delta_sum, vega_sum)
+        })
+        .collect();
+    let (delta_sum, vega_sum) =
+        partials.into_iter().fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
+    let n = cfg.paths as f64;
+    Some((df * delta_sum / n, df * vega_sum / n))
+}
+
+/// First-order adjoint Greeks from **one** simulation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AadGreeks {
+    pub delta: f64,
+    /// Sensitivity to a parallel implied-vol shift.
+    pub vega: f64,
+    pub rho: f64,
+}
+
+/// Delta, vega and rho from a backward adjoint sweep per path: the GBM
+/// stepping and the payoff (via [`Payoff::path_payoff_var`]) are recorded
+/// on an AAD tape with `(S0, sigma, r)` as inputs, and one reverse pass
+/// per path yields all three sensitivities — the cost does not grow with
+/// the number of Greeks. Holding the draws fixed these are the classical
+/// pathwise estimators: unbiased for continuous payoffs, using exactly
+/// the draws the price uses.
+///
+/// Theta is deliberately absent: differentiating with the Brownian path
+/// held fixed while the time grid moves is not well-defined, so theta
+/// stays with the bump stencils.
+///
+/// Scope: European exercise, GBM dynamics, exact stepping, and a payoff
+/// that opts into AAD (vanilla, Asian, lookback, forward-start — the
+/// continuous ones). Returns `None` otherwise; discontinuous payoffs
+/// (barrier, binary, autocallable) never opt in because the
+/// almost-everywhere derivative of their indicator is zero.
+pub(crate) fn aad_greeks(option: &EquityOption) -> Option<AadGreeks> {
+    use crate::core::aad::{Tape, Var};
+    if !matches!(option.payoff.exercise_style(), ContractStyle::European) {
+        return None;
+    }
+    if option.model != Model::Gbm {
+        return None;
+    }
+    let cfg = option.mc_cfg();
+    if cfg.scheme != DiscretizationScheme::Exact {
+        return None;
+    }
+    let p = market_params(option);
+    let steps = if option.payoff.is_path_dependent() {
+        effective_steps(cfg, &option.model).max(PATH_DEPENDENT_MIN_STEPS)
+    } else {
+        effective_steps(cfg, &option.model).max(1)
+    };
+    // capability probe before spinning up the parallel loop
+    {
+        let tape = Tape::new();
+        let probe: Vec<Var> = (0..steps.max(2)).map(|_| tape.var(p.s0)).collect();
+        option.payoff.path_payoff_var(&probe, p.strike)?;
+    }
+    let dt = p.t / steps as f64;
+    let draws = PathDraws::new(cfg, steps, dt);
+    let divs = dividends_per_step(option, p.t, steps);
+    let chunks = cfg.paths.div_ceil(PATH_CHUNK);
+    let partials: Vec<(f64, f64, f64)> = (0..chunks)
+        .into_par_iter()
+        .map(|chunk| {
+            let mut z = vec![0.0; steps];
+            let mut w = vec![0.0; steps];
+            let mut dw = vec![0.0; steps];
+            let tape = Tape::new();
+            let mut path_vars: Vec<Var> = Vec::with_capacity(steps);
+            let (mut delta_sum, mut vega_sum, mut rho_sum) = (0.0, 0.0, 0.0);
+            for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
+                draws.fill(i, &mut z, &mut w, &mut dw);
+                tape.clear();
+                path_vars.clear();
+                let s0 = tape.var(p.s0);
+                let sigma = tape.var(p.sigma);
+                let r = tape.var(p.r);
+                let mut s = s0;
+                for (step_idx, dwi) in dw.iter().enumerate() {
+                    // exact GBM step: s * exp((r - q - sigma^2/2) dt + sigma dW)
+                    let exponent =
+                        (r - p.q) * dt - sigma * sigma * (0.5 * dt) + sigma * *dwi;
+                    s = s * exponent.exp();
+                    if let Some(divs) = &divs {
+                        if divs[step_idx] != 0.0 {
+                            s = (s - divs[step_idx]).maxf(1e-8);
+                        }
+                    }
+                    path_vars.push(s);
+                }
+                let payoff = option
+                    .payoff
+                    .path_payoff_var(&path_vars, p.strike)
+                    .expect("the probe above guaranteed AAD support");
+                let discounted = payoff * (-(r * p.t)).exp();
+                let g = discounted.grad();
+                delta_sum += g.wrt(s0);
+                vega_sum += g.wrt(sigma);
+                rho_sum += g.wrt(r);
+            }
+            (delta_sum, vega_sum, rho_sum)
+        })
+        .collect();
+    let (delta_sum, vega_sum, rho_sum) = partials
+        .into_iter()
+        .fold((0.0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+    let n = cfg.paths as f64;
+    Some(AadGreeks { delta: delta_sum / n, vega: vega_sum / n, rho: rho_sum / n })
 }
 
 /// Reprice under a shifted market (spot, parallel vol, rate, calendar time)
@@ -364,17 +458,6 @@ pub(crate) fn npv_with(
     .pv
 }
 
-/// Volga (vomma), the second price derivative in volatility, estimated with
-/// a central second difference over common-random-number reprices.
-pub fn volga(option: &EquityOption) -> f64 {
-    let p = market_params(option);
-    let hv = 0.01;
-    (price(option, &MarketParams { sigma: p.sigma + hv, ..p }).pv
-        - 2.0 * price(option, &p).pv
-        + price(option, &MarketParams { sigma: p.sigma - hv, ..p }).pv)
-        / (hv * hv)
-}
-
 // ── Volatility dynamics along a path ────────────────────────────────────
 
 enum PathVol<'a> {
@@ -395,14 +478,14 @@ fn path_vol<'a>(option: &'a EquityOption, p: &MarketParams) -> PathVol<'a> {
     match option.model {
         Model::Gbm => PathVol::Const(p.sigma),
         Model::LocalVol => PathVol::Local(LocalVol::new(
-            &option.base.vol_surface,
-            &option.base.discount_curve,
+            &option.market.vol_surface,
+            &option.market.discount_curve,
             // the local vol function is frozen at the calibration spot;
             // spot bumps (delta/gamma) move the path start, not the model
-            option.base.underlying_price.value(),
-            option.base.carry_yield(),
+            option.market.spot.value(),
+            option.carry_yield(),
             // vega bumps enter as a parallel shift of the implied surface
-            p.sigma - option.base.volatility(),
+            p.sigma - option.volatility(),
         )),
         Model::Heston(_) => unreachable!("Heston paths are generated by the dedicated routes"),
     }
@@ -615,7 +698,7 @@ fn asian_npv(option: &EquityOption, asian: &AsianPayoff, p: &MarketParams) -> Mc
         && asian.strike_type == AsianStrikeType::FixedStrike
         && option.model == Model::Gbm
         && cfg.scheme == DiscretizationScheme::Exact
-        && option.base.cash_dividends.is_empty();
+        && option.market.cash_dividends.is_empty();
     if !use_control_variate {
         return generic_path_npv(option, p);
     }
@@ -715,7 +798,7 @@ fn autocall_grid(
     r: f64,
     steps: usize,
 ) -> (Vec<usize>, Vec<f64>) {
-    let dr = r - option.base.risk_free_rate();
+    let dr = r - option.risk_free_rate();
     let n_obs = auto.observations.max(1);
     let (obs_idx, obs_times): (Vec<usize>, Vec<f64>) = match &auto.observation_times {
         Some(times) => {
@@ -740,7 +823,7 @@ fn autocall_grid(
     };
     let dfs = obs_times
         .iter()
-        .map(|&tm| option.base.discount_curve.df(tm) * exp(-dr * tm))
+        .map(|&tm| option.market.discount_curve.df(tm) * exp(-dr * tm))
         .collect();
     (obs_idx, dfs)
 }
@@ -783,7 +866,7 @@ fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketPara
 /// scheme is the planned upgrade). Vega bumps map to a parallel shift of
 /// the instantaneous and long-run vol.
 fn heston_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
-    let hp = option.heston_params().with_vol_shift(p.sigma - option.base.volatility());
+    let hp = option.heston_params().with_vol_shift(p.sigma - option.volatility());
     let cfg = option.mc_cfg();
     let steps = effective_steps(cfg, &option.model);
     let dt = p.t / steps as f64;
@@ -1164,7 +1247,7 @@ pub fn option_pricing() {
     )
     .expect("Invalid volatility");
     let curr_quote = Quote::new(curr_price.trim().parse::<f64>().unwrap());
-    let option = EquityOptionBase {
+    let base = EquityOptionBase {
         symbol: "ABC".to_string(),
         currency: None,
         exchange: None,
@@ -1172,32 +1255,35 @@ pub fn option_pricing() {
         cusip: None,
         isin: None,
         settlement_type: Some("ABC".to_string()),
+        strike_price: strike.trim().parse::<f64>().unwrap(),
+        maturity_date: future_date,
+        futures_settlement: None,
+        multiplier: 1.0,
+        current_price: Quote::new(0.0),
         entry_price: 0.0,
         long_short: LongShort::LONG,
-        underlying_price: curr_quote,
-        current_price: Quote::new(0.0),
-        strike_price: strike.trim().parse::<f64>().unwrap(),
-        vol_surface,
-        maturity_date: future_date,
-        discount_curve,
+    };
+    let market = crate::equity::vanilla_option::EquityMarketData {
+        valuation_date,
+        spot: curr_quote,
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         borrow_cost: 0.0,
         cash_dividends: vec![],
-        futures_settlement: None,
-        valuation_date,
-        multiplier: 1.0,
+        vol_surface,
+        discount_curve,
     };
-    println!("{:?}", option.time_to_maturity());
     let payoff = Box::new(VanillaPayoff {
         put_or_call: side,
         exercise_style: crate::core::utils::ContractStyle::European,
     });
     let equityoption = EquityOption {
-        base: option,
+        base,
+        market,
         payoff: payoff,
         engine: PricingEngine::MonteCarlo(MonteCarloConfig::default()),
         model: Model::Gbm,
     };
+    println!("{:?}", equityoption.time_to_maturity());
 
     let result = npv_with_stats(&equityoption);
     println!("Theoretical Price ${} (std err {})", result.pv, result.std_err);

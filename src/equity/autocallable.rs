@@ -20,7 +20,7 @@ use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::equity::utils::{Payoff, PayoffType};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AutocallablePayoff {
     pub exercise_style: ContractStyle,
     /// Early-redemption trigger level (absolute).
@@ -130,6 +130,9 @@ impl Payoff for AutocallablePayoff {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+    fn clone_box(&self) -> Box<dyn Payoff> {
+        Box::new(self.clone())
     }
 }
 

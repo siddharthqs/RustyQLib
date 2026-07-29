@@ -48,7 +48,8 @@ fn main() {
         common::section(&format!("European {pc:?}"));
         common::table_header();
         //common::row("Analytical (Black-Scholes)", &priced(base(pc), Engine::BlackScholes));
-        common::row("Binomial (1000 steps)", &priced(base(pc), Engine::Binomial));
+        let op = priced(base(pc),Engine::Binomial);
+        common::row("Binomial (1000 steps)", &op);
         // common::row("Finite difference (400x400)", &priced(base(pc), Engine::FiniteDifference));
         // common::row("Monte Carlo (Sobol, 100k)", &priced(base(pc), Engine::MonteCarlo));
         // common::row(

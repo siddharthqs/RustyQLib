@@ -1,6 +1,6 @@
 use std::error::Error;
 use chrono::{Datelike, Local, NaiveDate};
-use crate::equity::{baw,bjerksund_stensland,binomial,finite_difference,montecarlo};
+use crate::equity::{baw,bjerksund_stensland,binomial,finite_difference,greeks,montecarlo};
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::vols::VolSurface;
@@ -20,7 +20,7 @@ use crate::core::data_models::EquityOptionData;
 use crate::core::errors::RustyQLibError;
 use crate::core::results::PricingResult;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VanillaPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
@@ -47,7 +47,7 @@ pub enum LookbackType {
 /// (fixed), the put the mirror image. Discretely monitored on the path
 /// grid under Monte Carlo; the analytic engine prices the continuous-
 /// monitoring closed forms.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LookbackPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
@@ -70,6 +70,25 @@ impl Payoff for LookbackPayoff {
             (LookbackType::FixedStrike, PutOrCall::Put) => (strike - min).max(0.0),
         }
     }
+    fn path_payoff_var<'t>(
+        &self,
+        path: &[crate::core::aad::Var<'t>],
+        strike: f64,
+    ) -> Option<crate::core::aad::Var<'t>> {
+        let terminal = *path.last().expect("empty path");
+        let mut max = path[0];
+        let mut min = path[0];
+        for s in &path[1..] {
+            max = max.max(*s);
+            min = min.min(*s);
+        }
+        Some(match (self.lookback_type, &self.put_or_call) {
+            (LookbackType::FloatingStrike, PutOrCall::Call) => terminal - min,
+            (LookbackType::FloatingStrike, PutOrCall::Put) => max - terminal,
+            (LookbackType::FixedStrike, PutOrCall::Call) => (max - strike).maxf(0.0),
+            (LookbackType::FixedStrike, PutOrCall::Put) => (strike - min).maxf(0.0),
+        })
+    }
     fn is_path_dependent(&self) -> bool {
         true
     }
@@ -85,9 +104,12 @@ impl Payoff for LookbackPayoff {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn clone_box(&self) -> Box<dyn Payoff> {
+        Box::new(self.clone())
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BinaryPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
@@ -95,7 +117,7 @@ pub struct BinaryPayoff {
     /// Amount paid by a cash-or-nothing binary (ignored for asset-or-nothing).
     pub cash: f64,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BarrierPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
@@ -169,8 +191,11 @@ impl Payoff for BarrierPayoff {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn clone_box(&self) -> Box<dyn Payoff> {
+        Box::new(self.clone())
+    }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AsianPayoff {
     pub put_or_call: PutOrCall,
     pub exercise_style: ContractStyle,
@@ -207,6 +232,36 @@ impl Payoff for AsianPayoff {
             PutOrCall::Put => (short_leg - long_leg).max(0.0),
         }
     }
+    fn path_payoff_var<'t>(
+        &self,
+        path: &[crate::core::aad::Var<'t>],
+        strike: f64,
+    ) -> Option<crate::core::aad::Var<'t>> {
+        let n = path.len() as f64;
+        let average = match self.averaging {
+            AveragingType::Arithmetic => {
+                let mut sum = path[0];
+                for s in &path[1..] {
+                    sum = sum + *s;
+                }
+                sum / n
+            }
+            AveragingType::Geometric => {
+                let mut sum = path[0].ln();
+                for s in &path[1..] {
+                    sum = sum + s.ln();
+                }
+                (sum / n).exp()
+            }
+        };
+        let terminal = *path.last().expect("empty path");
+        Some(match (self.strike_type, &self.put_or_call) {
+            (AsianStrikeType::FixedStrike, PutOrCall::Call) => (average - strike).maxf(0.0),
+            (AsianStrikeType::FixedStrike, PutOrCall::Put) => (strike - average).maxf(0.0),
+            (AsianStrikeType::FloatingStrike, PutOrCall::Call) => (terminal - average).maxf(0.0),
+            (AsianStrikeType::FloatingStrike, PutOrCall::Put) => (average - terminal).maxf(0.0),
+        })
+    }
     fn is_path_dependent(&self) -> bool {
         true
     }
@@ -222,6 +277,9 @@ impl Payoff for AsianPayoff {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn clone_box(&self) -> Box<dyn Payoff> {
+        Box::new(self.clone())
+    }
 }
 impl Payoff for VanillaPayoff {
     fn payoff(&self, spot: f64, strike: f64) -> f64 {
@@ -229,6 +287,17 @@ impl Payoff for VanillaPayoff {
             PutOrCall::Call => (spot - strike).max(0.0),
             PutOrCall::Put => (strike - spot).max(0.0),
         }
+    }
+    fn path_payoff_var<'t>(
+        &self,
+        path: &[crate::core::aad::Var<'t>],
+        strike: f64,
+    ) -> Option<crate::core::aad::Var<'t>> {
+        let terminal = *path.last().expect("empty path");
+        Some(match self.put_or_call {
+            PutOrCall::Call => (terminal - strike).maxf(0.0),
+            PutOrCall::Put => (strike - terminal).maxf(0.0),
+        })
     }
     fn payoff_kind(&self) -> PayoffType {
         PayoffType::Vanilla
@@ -242,7 +311,9 @@ impl Payoff for VanillaPayoff {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-
+    fn clone_box(&self) -> Box<dyn Payoff> {
+        Box::new(self.clone())
+    }
 }
 
 /// Binary (digital) payoff, strictly in the money beyond the strike:
@@ -273,9 +344,15 @@ impl Payoff for BinaryPayoff {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn clone_box(&self) -> Box<dyn Payoff> {
+        Box::new(self.clone())
+    }
 }
 
-#[derive(Debug)]
+/// Contract terms and trade identity — **no market state**. Immutable
+/// for the life of the trade; everything that moves with the market
+/// lives in [`EquityMarketData`].
+#[derive(Debug, Clone)]
 pub struct EquityOptionBase {
     pub symbol: String,
     pub currency: Option<String>,
@@ -285,45 +362,73 @@ pub struct EquityOptionBase {
     pub isin: Option<String>,
     pub settlement_type: Option<String>,
 
-    //pub payoff_type: String, // Vanilla/Barrier/Binary
-    pub underlying_price: Quote,
-    pub current_price: Quote,
     pub strike_price: f64,
+    pub maturity_date: NaiveDate,
+    /// When set, the underlying is a future priced with Black-76
+    /// (the market spot is the futures price `F`), settled either with an
+    /// up-front discounted premium or futures-style margined. European
+    /// vanilla only, on the Analytical engine.
+    pub futures_settlement: Option<crate::equity::black76::FuturesSettlement>,
+    pub multiplier: f64,
+
+    // trade info (candidate for a future Trade struct)
+    pub current_price: Quote,
+    pub entry_price: f64,
+    pub long_short: LongShort,
+}
+
+/// The market state one equity instrument is currently **bound to** — the
+/// pricing-view companion of the contract (QuantLib's process, Strata's
+/// provider). Resolved from / snapshotted to the typed
+/// [`Market`](crate::core::market::Market) store; swapped wholesale by
+/// [`EquityOption::with_market`].
+#[derive(Debug, Clone)]
+pub struct EquityMarketData {
+    /// The as-of date of this market snapshot; anchors every year fraction.
+    pub valuation_date: NaiveDate,
+    pub spot: Quote,
     pub dividend_yield: f64,
     /// Continuous stock borrow (repo) cost; part of the carry alongside
     /// the dividend yield.
     pub borrow_cost: f64,
-    /// When set, the underlying is a future priced with Black-76
-    /// (`underlying_price` is the futures price `F`), settled either with an
-    /// up-front discounted premium or futures-style margined. European
-    /// vanilla only, on the Analytical engine.
-    pub futures_settlement: Option<crate::equity::black76::FuturesSettlement>,
-    /// Discrete cash dividends (ex-date, amount per share). Analytic,
-    /// tree and terminal Monte Carlo engines use the escrowed model
-    /// (spot minus PV of dividends); path-wise Monte Carlo and finite
-    /// difference apply the jumps at the ex-dates.
+    /// Discrete cash dividend forecasts (ex-date, amount per share).
+    /// Analytic, tree and terminal Monte Carlo engines use the escrowed
+    /// model (spot minus PV of dividends); path-wise Monte Carlo and
+    /// finite difference apply the jumps at the ex-dates.
     pub cash_dividends: Vec<(NaiveDate, f64)>,
     /// Volatility surface; a flat surface represents a single constant vol.
     pub vol_surface: VolSurface,
-    pub maturity_date: NaiveDate,
-    pub valuation_date: NaiveDate,
     /// Discounting curve anchored at `valuation_date`; discount factors are
     /// the source of truth, rates are derived views.
     pub discount_curve: YieldCurve,
-    pub entry_price: f64,
-    pub long_short: LongShort,
-    pub multiplier: f64,
-
 }
+
 #[derive(Debug)]
 pub struct EquityOption {
+    /// The contract (and trade identity): pure data, never market state.
     pub base: EquityOptionBase,
+    /// The market this instrument is currently bound to.
+    pub market: EquityMarketData,
     pub payoff: Box<dyn Payoff>,
     /// The numerical method, carrying its own settings.
     pub engine: PricingEngine,
     /// The dynamics of the underlying (GBM, local vol, or Heston with
     /// its parameters); consulted by the MC, FD and analytic engines.
     pub model: Model,
+}
+
+// manual impl: `payoff` clones through the trait object, engine and model
+// are Copy
+impl Clone for EquityOption {
+    fn clone(&self) -> Self {
+        EquityOption {
+            base: self.base.clone(),
+            market: self.market.clone(),
+            payoff: self.payoff.clone_box(),
+            engine: self.engine,
+            model: self.model,
+        }
+    }
 }
 
 impl EquityOption {
@@ -379,13 +484,6 @@ impl EquityOption {
             _ => unreachable!("lattice code path reached on a non-Binomial engine"),
         }
     }
-}
-impl EquityOption{
-    pub fn time_to_maturity(&self) -> f64{
-        let time_to_maturity = (self.base.maturity_date - self.base.valuation_date).num_days() as f64/365.0;
-        time_to_maturity
-    }
-
 }
 impl EquityOption {
 
@@ -485,21 +583,22 @@ impl EquityOption {
             cusip: data.base.cusip.clone(),
             isin: data.base.isin.clone(),
             settlement_type: data.base.settlement_type.clone(),
-
-            underlying_price: Quote::new(data.base.underlying_price),
-            current_price: Quote::new(data.current_price.unwrap_or(0.0)),
             strike_price,
-            vol_surface,
             maturity_date,
-            discount_curve,
+            futures_settlement,
+            multiplier: data.multiplier.unwrap_or(1.0),
+            current_price: Quote::new(data.current_price.unwrap_or(0.0)),
             entry_price: data.entry_price.unwrap_or(0.0),
             long_short: LongShort::LONG,
+        };
+        let market_data = EquityMarketData {
+            valuation_date,
+            spot: Quote::new(data.base.underlying_price),
             dividend_yield: data.dividend.unwrap_or(0.0),
             borrow_cost: data.base.borrow_cost.unwrap_or(0.0),
             cash_dividends,
-            futures_settlement,
-            valuation_date,
-            multiplier: data.multiplier.unwrap_or(1.0),
+            vol_surface,
+            discount_curve,
         };
         let payoff_type = &payoff_type;
         let side: PutOrCall;
@@ -761,7 +860,8 @@ impl EquityOption {
             other => PricingEngine::from_kind(other),
         };
         let model = Model::from_contract(data.mc_model.as_deref(), data.heston)?;
-        let equityoption = EquityOption { base: base_option, payoff, engine, model };
+        let equityoption =
+            EquityOption { base: base_option, market: market_data, payoff, engine, model };
         Ok(Box::new(equityoption))
     }
 }
@@ -824,29 +924,43 @@ fn autocall_times_from_dates(
 }
 
 impl EquityOptionBase {
-    pub fn time_to_maturity(&self) -> f64{
-        let time_to_maturity = (self.maturity_date - self.valuation_date).num_days() as f64/365.0;
-        time_to_maturity
+    /// True when the underlying is a future priced with Black-76.
+    pub fn is_futures_option(&self) -> bool {
+        self.futures_settlement.is_some()
+    }
+    /// The contract's currency code, falling back to
+    /// [`DEFAULT_CURRENCY`](crate::core::market::DEFAULT_CURRENCY) when the
+    /// contract does not state one — used as the [`Discount`]
+    /// (crate::core::market::Discount) key into a [`Market`]
+    /// (crate::core::market::Market).
+    pub fn currency_code(&self) -> &str {
+        self.currency.as_deref().unwrap_or(crate::core::market::DEFAULT_CURRENCY)
+    }
+}
+
+// Contract-and-market quantities: these straddle the boundary (a year
+// fraction needs the contract's maturity AND the market's valuation
+// date), so they live on the pairing — the option — not on either half.
+impl EquityOption {
+    pub fn time_to_maturity(&self) -> f64 {
+        (self.base.maturity_date - self.market.valuation_date).num_days() as f64 / 365.0
     }
     /// Discount factor from the valuation date to maturity, off the curve.
     pub fn maturity_discount_factor(&self) -> f64 {
-        self.discount_curve.df(self.time_to_maturity())
+        self.market.discount_curve.df(self.time_to_maturity())
     }
     /// Continuously compounded zero rate to maturity implied by the curve.
     /// This is the `r` that enters d1/d2; it is consistent with
     /// [`maturity_discount_factor`](Self::maturity_discount_factor) by construction.
     pub fn risk_free_rate(&self) -> f64 {
-        self.discount_curve
+        self.market
+            .discount_curve
             .zero_rate_with(self.time_to_maturity(), Compounding::Continuous)
     }
     /// Total continuous carry on the underlying: dividend yield plus
     /// borrow cost. This is the "q" every pricing formula uses.
     pub fn carry_yield(&self) -> f64 {
-        self.dividend_yield + self.borrow_cost
-    }
-    /// True when the underlying is a future priced with Black-76.
-    pub fn is_futures_option(&self) -> bool {
-        self.futures_settlement.is_some()
+        self.market.dividend_yield + self.market.borrow_cost
     }
     /// Escrow value of the cash dividends with ex-dates inside the option's
     /// life: the amount to carve out of spot so the risky stub reproduces
@@ -855,20 +969,24 @@ impl EquityOptionBase {
     /// Each dividend is discounted at the **net carry rate** `r - carry`,
     /// not the risk-free rate, so that the escrow accretes at the same rate
     /// the risky stub grows (`effective_spot` is grown at `r - carry` in
-    /// [`forward_price`]). This makes the analytic forward match the
-    /// well-defined jump model `F = (S - D e^{-(r-carry)t}) e^{(r-carry)T}`
-    /// used by the FD and path-wise Monte Carlo engines. With no continuous
-    /// carry this reduces to plain risk-free discounting.
+    /// [`forward_price`](Self::forward_price)). This makes the analytic
+    /// forward match the well-defined jump model
+    /// `F = (S - D e^{-(r-carry)t}) e^{(r-carry)T}` used by the FD and
+    /// path-wise Monte Carlo engines. With no continuous carry this
+    /// reduces to plain risk-free discounting.
     pub fn pv_cash_dividends(&self) -> f64 {
         let carry = self.carry_yield();
-        self.cash_dividends
+        self.market
+            .cash_dividends
             .iter()
-            .filter(|(date, _)| *date > self.valuation_date && *date <= self.maturity_date)
+            .filter(|(date, _)| {
+                *date > self.market.valuation_date && *date <= self.base.maturity_date
+            })
             .map(|(date, amount)| {
-                let t = (*date - self.valuation_date).num_days() as f64 / 365.0;
+                let t = (*date - self.market.valuation_date).num_days() as f64 / 365.0;
                 // df(t) = e^{-r t}; multiplying by e^{carry t} discounts at
                 // the net carry (r - carry), generalizing to any curve shape.
-                amount * self.discount_curve.df(t) * (carry * t).exp()
+                amount * self.market.discount_curve.df(t) * (carry * t).exp()
             })
             .sum()
     }
@@ -876,7 +994,7 @@ impl EquityOptionBase {
     /// paid over the option's life. This is the lognormal driver for the
     /// analytic and terminal-simulation engines.
     pub fn effective_spot(&self) -> f64 {
-        let s = self.underlying_price.value() - self.pv_cash_dividends();
+        let s = self.market.spot.value() - self.pv_cash_dividends();
         assert!(s > 0.0, "cash dividends exceed the spot price");
         s
     }
@@ -889,28 +1007,28 @@ impl EquityOptionBase {
     /// Black volatility for this option's strike and expiry, read off the
     /// surface (a flat surface returns its single vol).
     pub fn volatility(&self) -> f64 {
-        self.vol_surface
-            .vol(self.strike_price, self.forward_price(), self.time_to_maturity())
+        self.market
+            .vol_surface
+            .vol(self.base.strike_price, self.forward_price(), self.time_to_maturity())
     }
     pub fn d1(&self) -> f64 {
         // Black-Scholes-Merton d1 on the escrowed spot and total carry
         let volatility = self.volatility();
-        let d1_numerator = (self.effective_spot() / self.strike_price).ln()
+        let d1_numerator = (self.effective_spot() / self.base.strike_price).ln()
             + (self.risk_free_rate() - self.carry_yield() + 0.5 * volatility.powi(2))
-            * self.time_to_maturity();
-
+                * self.time_to_maturity();
         let d1_denominator = volatility * (self.time_to_maturity().sqrt());
-        return d1_numerator / d1_denominator;
+        d1_numerator / d1_denominator
     }
     pub fn d2(&self) -> f64 {
-        let d2 = self.d1() - self.volatility() * self.time_to_maturity().powf(0.5);
-        return d2;
+        self.d1() - self.volatility() * self.time_to_maturity().sqrt()
     }
 }
 impl EquityOption {
     pub fn get_premium_at_risk(&self) -> f64 {
         let value = self.npv();
-        let mut pay_off = self.payoff.payoff_amount(&self.base);
+        let mut pay_off =
+            self.payoff.payoff_amount(self.market.spot.value(), self.base.strike_price);
         if pay_off > 0.0 {
             return value - pay_off;
         } else {
@@ -922,10 +1040,10 @@ impl EquityOption {
     /// Newton with arbitrage-bound checks); does not modify the option.
     pub fn try_imp_vol(&self, option_price: f64) -> Result<f64, RustyQLibError> {
         blackscholes::implied_vol_from_price(
-            self.base.effective_spot(),
+            self.effective_spot(),
             self.base.strike_price,
-            self.base.risk_free_rate(),
-            self.base.carry_yield(),
+            self.risk_free_rate(),
+            self.carry_yield(),
             self.time_to_maturity(),
             option_price,
             *self.payoff.put_or_call(),
@@ -944,10 +1062,10 @@ impl EquityOption {
         self.imp_vol(target)
     }
     fn set_flat_vol(&mut self, vol: f64) {
-        self.base.vol_surface = VolSurface::flat(
+        self.market.vol_surface = VolSurface::flat(
             vol,
-            self.base.vol_surface.reference_date(),
-            self.base.vol_surface.day_count(),
+            self.market.vol_surface.reference_date(),
+            self.market.vol_surface.day_count(),
         )
         .expect("vol must be positive");
     }
@@ -1054,146 +1172,62 @@ impl Instrument for EquityOption  {
     }
 
     /// Value, all nine Greeks, and (on the Monte Carlo engine) the
-    /// standard error, from one call.
+    /// standard error, from one call — batched through the central
+    /// sensitivity engine ([`crate::equity::greeks`]), which shares
+    /// solves and reprices across the Greeks.
     fn price(&self) -> Result<PricingResult, RustyQLibError> {
         self.check_engine_support()?;
-        let (pv, std_err) = match self.engine {
-            PricingEngine::MonteCarlo(_) => {
-                let stats = montecarlo::npv_with_stats(self);
-                (stats.pv, Some(stats.std_err))
-            }
-            _ => (self.try_npv()?, None),
-        };
-        Ok(PricingResult {
-            pv,
-            greeks: crate::core::results::Greeks {
-                delta: self.delta(),
-                gamma: self.gamma(),
-                vega: self.vega(),
-                theta: self.theta(),
-                rho: self.rho(),
-                vanna: self.vanna(),
-                charm: self.charm(),
-                gamma_p: self.gamma_p(),
-                zomma: self.zomma(),
-            },
-            std_err,
-        })
+        Ok(crate::equity::greeks::pricing_result(self))
     }
 }
 
-/// Greeks per engine: Monte Carlo uses bump-and-reprice with common random
-/// numbers (supporting American via Longstaff-Schwartz repricing); the FD
-/// engine reads delta/gamma/theta off its own grid (so American and barrier
-/// sensitivities are engine-consistent) with vega/rho by re-solving; the
-/// remaining engines use the analytic Black-Scholes closed forms.
+/// Greeks route through the central sensitivity engine
+/// ([`crate::equity::greeks`]): the FD and Binomial engines read
+/// delta/gamma/theta off their own grid/tree with higher orders from
+/// bumped solutions; the analytic engine uses the payoff-aware
+/// Black-Scholes closed forms (including Black-76 futures); the bump
+/// engines (Monte Carlo with common random numbers, BAW,
+/// Bjerksund-Stensland, analytic Heston) share one set of
+/// central-difference stencils with per-engine bump sizes.
 impl EquityOption {
-    fn analytic_heston(&self) -> bool {
+    pub(crate) fn analytic_heston(&self) -> bool {
         matches!(self.engine, PricingEngine::BlackScholes | PricingEngine::Binomial(_))
             && self.model.is_heston()
     }
     pub fn delta(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::delta(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::delta(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::delta(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::delta(&self),
-            _ if self.analytic_heston() => heston::analytic_delta(&self),
-            _ => BlackScholesPricer::new().delta(&self),
-        }
+        greeks::delta(self)
     }
     pub fn gamma(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::gamma(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::gamma(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::gamma(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::gamma(&self),
-            _ if self.analytic_heston() => heston::analytic_gamma(&self),
-            _ => BlackScholesPricer::new().gamma(&self),
-        }
+        greeks::gamma(self)
     }
     pub fn vega(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::vega(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::vega(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::vega(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::vega(&self),
-            _ if self.analytic_heston() => heston::analytic_vega(&self),
-            _ => BlackScholesPricer::new().vega(&self),
-        }
+        greeks::vega(self)
     }
     pub fn theta(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::theta(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::theta(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::theta(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::theta(&self),
-            _ if self.analytic_heston() => heston::analytic_theta(&self),
-            _ => BlackScholesPricer::new().theta(&self),
-        }
+        greeks::theta(self)
     }
     pub fn rho(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::rho(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::rho(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::rho(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::rho(&self),
-            _ if self.analytic_heston() => heston::analytic_rho(&self),
-            _ => BlackScholesPricer::new().rho(&self),
-        }
+        greeks::rho(self)
     }
     /// Vanna: change in delta per unit change in implied volatility.
     pub fn vanna(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::vanna(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::vanna(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::vanna(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::vanna(&self),
-            _ if self.analytic_heston() => heston::analytic_vanna(&self),
-            _ => BlackScholesPricer::new().vanna(&self),
-        }
+        greeks::vanna(self)
     }
     /// Charm: change in delta per year of calendar time.
     pub fn charm(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::charm(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::charm(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::charm(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::charm(&self),
-            _ if self.analytic_heston() => heston::analytic_charm(&self),
-            _ => BlackScholesPricer::new().charm(&self),
-        }
+        greeks::charm(self)
     }
     /// Delta elasticity (`S * gamma / delta`), also called percentage gamma.
     pub fn gamma_p(&self) -> f64 {
-        let delta = self.delta();
-        if delta == 0.0 {
-            f64::NAN
-        } else {
-            self.base.underlying_price.value() * self.gamma() / delta
-        }
+        greeks::gamma_p(self)
     }
     /// Zomma: change in gamma per unit change in implied volatility.
     pub fn zomma(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::zomma(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::zomma(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::zomma(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::zomma(&self),
-            _ if self.analytic_heston() => heston::analytic_zomma(&self),
-            _ => BlackScholesPricer::new().zomma(&self),
-        }
+        greeks::zomma(self)
     }
     /// Volga (vomma): change in vega per unit change in implied volatility.
     pub fn volga(&self) -> f64 {
-        match self.engine {
-            PricingEngine::MonteCarlo(_) => montecarlo::volga(&self),
-            PricingEngine::FiniteDifference(_) => finite_difference::volga(&self),
-            PricingEngine::BaroneAdesiWhaley => baw::volga(&self),
-            PricingEngine::BjerksundStensland => bjerksund_stensland::volga(&self),
-            _ if self.analytic_heston() => heston::analytic_volga(&self),
-            _ => BlackScholesPricer::new().volga(&self),
-        }
+        greeks::volga(self)
     }
     /// Reprice under a shifted market: spot `+ d_spot`, a parallel implied
     /// vol shift `+ d_vol`, rate `+ d_rate`, and `d_time` years of elapsed
@@ -1201,18 +1235,17 @@ impl EquityOption {
     /// portfolio PnL attribution uses the difference of the two.
     ///
     /// Monte Carlo repricing uses common random numbers, so the difference is
-    /// free of sampling noise. The binomial tree has no bump machinery and
-    /// falls back to the analytic reprice, mirroring its Greeks.
+    /// free of sampling noise.
     pub fn price_with(&self, d_spot: f64, d_vol: f64, d_rate: f64, d_time: f64) -> f64 {
         if self.base.is_futures_option() {
-            let f = self.base.underlying_price.value();
+            let f = self.market.spot.value();
             let k = self.base.strike_price;
             let t = self.time_to_maturity();
-            let sigma = self.base.vol_surface.vol(k, f, t);
+            let sigma = self.market.vol_surface.vol(k, f, t);
             return crate::equity::black76::price(
                 f + d_spot,
                 k,
-                self.base.risk_free_rate() + d_rate,
+                self.risk_free_rate() + d_rate,
                 sigma + d_vol,
                 (t - d_time).max(1e-6),
                 *self.payoff.put_or_call(),
@@ -1233,6 +1266,7 @@ impl EquityOption {
             _ if self.analytic_heston() => {
                 heston::price_with(&self, d_spot, d_vol, d_rate, -d_time)
             }
+            PricingEngine::Binomial(_) => binomial::npv_with(&self, d_spot, d_vol, d_rate, d_time),
             _ => BlackScholesPricer::price_with(&self, d_spot, d_vol, d_rate, -d_time),
         }
     }

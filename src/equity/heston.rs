@@ -411,10 +411,10 @@ use crate::core::errors::RustyQLibError;
 /// sqrt(theta) in parallel.
 pub(crate) fn price_with(option: &EquityOption, ds: f64, dvol: f64, dr: f64, dt_shift: f64) -> f64 {
     let hp = option.heston_params().with_vol_shift(dvol);
-    let s = option.base.effective_spot() + ds;
+    let s = option.effective_spot() + ds;
     let k = option.base.strike_price;
-    let r = option.base.risk_free_rate() + dr;
-    let q = option.base.carry_yield();
+    let r = option.risk_free_rate() + dr;
+    let q = option.carry_yield();
     let t = option.time_to_maturity() + dt_shift;
     let pc = *option.payoff.put_or_call();
     match option.payoff.payoff_kind() {
@@ -442,68 +442,33 @@ pub(crate) fn price_with(option: &EquityOption, ds: f64, dvol: f64, dr: f64, dt_
 pub fn analytic_npv(option: &EquityOption) -> f64 {
     price_with(option, 0.0, 0.0, 0.0, 0.0)
 }
-pub fn analytic_delta(option: &EquityOption) -> f64 {
-    let h = option.base.underlying_price.value() * 1e-4;
-    (price_with(option, h, 0.0, 0.0, 0.0) - price_with(option, -h, 0.0, 0.0, 0.0)) / (2.0 * h)
-}
-pub fn analytic_gamma(option: &EquityOption) -> f64 {
-    let h = option.base.underlying_price.value() * 1e-3;
-    (price_with(option, h, 0.0, 0.0, 0.0) - 2.0 * price_with(option, 0.0, 0.0, 0.0, 0.0)
-        + price_with(option, -h, 0.0, 0.0, 0.0))
-        / (h * h)
-}
-/// Sensitivity to a parallel shift of the instantaneous and long-run vol.
-pub fn analytic_vega(option: &EquityOption) -> f64 {
-    let h = 1e-4;
-    (price_with(option, 0.0, h, 0.0, 0.0) - price_with(option, 0.0, -h, 0.0, 0.0)) / (2.0 * h)
-}
-pub fn analytic_theta(option: &EquityOption) -> f64 {
-    let h = (1.0 / 365.0_f64).min(0.5 * option.time_to_maturity());
-    -(price_with(option, 0.0, 0.0, 0.0, h) - price_with(option, 0.0, 0.0, 0.0, -h)) / (2.0 * h)
-}
-pub fn analytic_rho(option: &EquityOption) -> f64 {
-    let h = 1e-5;
-    (price_with(option, 0.0, 0.0, h, 0.0) - price_with(option, 0.0, 0.0, -h, 0.0)) / (2.0 * h)
-}
-/// Change in delta for a parallel shift of the Heston instantaneous and
-/// long-run volatility levels.
-pub fn analytic_vanna(option: &EquityOption) -> f64 {
-    let hs = option.base.underlying_price.value() * 1e-4;
-    let hv = 1e-4;
-    (price_with(option, hs, hv, 0.0, 0.0) - price_with(option, -hs, hv, 0.0, 0.0)
-        - price_with(option, hs, -hv, 0.0, 0.0) + price_with(option, -hs, -hv, 0.0, 0.0))
-        / (4.0 * hs * hv)
-}
-/// Calendar-time change in delta.
-pub fn analytic_charm(option: &EquityOption) -> f64 {
-    let hs = option.base.underlying_price.value() * 1e-4;
-    let ht = (1.0 / 365.0_f64).min(0.5 * option.time_to_maturity());
-    -(price_with(option, hs, 0.0, 0.0, ht) - price_with(option, -hs, 0.0, 0.0, ht)
-        - price_with(option, hs, 0.0, 0.0, -ht) + price_with(option, -hs, 0.0, 0.0, -ht))
-        / (4.0 * hs * ht)
-}
-/// Change in gamma for a parallel shift of the Heston instantaneous and
-/// long-run volatility levels.
-pub fn analytic_zomma(option: &EquityOption) -> f64 {
-    let hs = option.base.underlying_price.value() * 1e-3;
-    let hv = 1e-4;
-    let gamma_at_vol = |dvol: f64| {
-        (price_with(option, hs, dvol, 0.0, 0.0)
-            - 2.0 * price_with(option, 0.0, dvol, 0.0, 0.0)
-            + price_with(option, -hs, dvol, 0.0, 0.0))
-            / (hs * hs)
-    };
-    (gamma_at_vol(hv) - gamma_at_vol(-hv)) / (2.0 * hv)
-}
-/// Volga: change in vega for a parallel shift of the Heston instantaneous
-/// and long-run volatility levels (second price derivative in that shift).
-/// A larger step than vega tempers the roundoff of a second difference
-/// against the characteristic-function integration error.
-pub fn analytic_volga(option: &EquityOption) -> f64 {
-    let hv = 1e-2;
-    (price_with(option, 0.0, hv, 0.0, 0.0) - 2.0 * price_with(option, 0.0, 0.0, 0.0, 0.0)
-        + price_with(option, 0.0, -hv, 0.0, 0.0))
-        / (hv * hv)
+// Greeks: central-difference bumps of [`price_with`] (a vol bump shifts
+// sqrt(v0) and sqrt(theta) in parallel), produced by the central
+// sensitivity engine (`crate::equity::greeks`) — except vanilla delta,
+// which falls out of the price integration for free below.
+
+/// Vanilla delta directly from the characteristic-function integration:
+/// the call price is `S e^{-qT} P1 - K e^{-rT} P2` and the homogeneity
+/// identity cancels the `dP/dS` terms, so delta is `e^{-qT} P1` for calls
+/// and `e^{-qT} (P1 - 1)` for puts — the probability the pricer already
+/// integrates, no bump and no extra integration. `None` for non-vanilla
+/// payoffs (binaries keep the central bump stencils).
+pub(crate) fn native_vanilla_delta(option: &EquityOption) -> Option<f64> {
+    if option.payoff.payoff_kind() != PayoffType::Vanilla {
+        return None;
+    }
+    let hp = option.heston_params();
+    let s = option.effective_spot();
+    let k = option.base.strike_price;
+    let r = option.risk_free_rate();
+    let q = option.carry_yield();
+    let t = option.time_to_maturity();
+    let (p1, _) = probabilities(s, k, r, q, t, hp);
+    let dfq = (-q * t).exp();
+    Some(match option.payoff.put_or_call() {
+        PutOrCall::Call => dfq * p1,
+        PutOrCall::Put => dfq * (p1 - 1.0),
+    })
 }
 
 #[cfg(test)]

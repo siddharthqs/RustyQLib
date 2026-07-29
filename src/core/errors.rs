@@ -50,6 +50,15 @@ pub enum RustyQLibError {
     /// Contract or market data could not be parsed / deserialized.
     #[error("parse error: {0}")]
     ParseError(String),
+
+    /// A [`Market`](crate::core::market::Market) lookup found no datum at
+    /// the given key. `key` is the debug rendering of the typed key, e.g.
+    /// `Spot("ACME")`.
+    #[error("missing market data: {key}")]
+    MissingMarketData {
+        /// The key that had no entry.
+        key: String,
+    },
 }
 
 impl From<crate::core::vols::VolError> for RustyQLibError {

@@ -149,6 +149,17 @@ impl Serialize for SmileCoord {
     }
 }
 
+/// A shift applied to a whole surface by [`VolSurface::bumped`]. The
+/// surface owns the semantics: shifts move every quoted vol, preserving
+/// the smile shape and the surface's coordinate system.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VolShift {
+    /// Add `d` vol points to every quote (e.g. `0.01` = +1 vol point).
+    ParallelAbsolute(f64),
+    /// Scale every quote by `1 + r` (e.g. `0.10` = vols up 10%).
+    ParallelRelative(f64),
+}
+
 /// A canonical Black volatility surface anchored at `reference_date`.
 #[derive(Debug, Clone, Serialize)]
 pub struct VolSurface {
@@ -319,6 +330,37 @@ impl VolSurface {
         }
     }
 
+    /// This surface with `shift` applied to every quoted vol — the smile
+    /// shape, coordinate system and expiry pillars are preserved. Errors
+    /// when any bumped vol would be non-positive (a shock that large is a
+    /// data problem, not a market).
+    pub fn bumped(&self, shift: VolShift) -> Result<VolSurface, VolError> {
+        let apply = |v: f64| match shift {
+            VolShift::ParallelAbsolute(d) => v + d,
+            VolShift::ParallelRelative(r) => v * (1.0 + r),
+        };
+        let mut bumped = self.clone();
+        match &mut bumped.data {
+            SurfaceData::Flat(v) => {
+                *v = apply(*v);
+                if *v <= 0.0 {
+                    return Err(VolError::NonPositiveVol(*v));
+                }
+            }
+            SurfaceData::Term { smiles, .. } => {
+                for smile in smiles {
+                    for point in &mut smile.points {
+                        point.1 = apply(point.1);
+                        if point.1 <= 0.0 {
+                            return Err(VolError::NonPositiveVol(point.1));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(bumped)
+    }
+
     pub fn reference_date(&self) -> NaiveDate {
         self.reference_date
     }
@@ -465,6 +507,39 @@ mod tests {
         // wings are flat
         assert!((s.vol(50.0, 100.0, 1.0) - 0.22).abs() < 1e-14);
         assert!((s.vol(500.0, 100.0, 1.0) - 0.19).abs() < 1e-14);
+    }
+
+    #[test]
+    fn bumped_shifts_every_quote_and_preserves_the_smile() {
+        let flat = VolSurface::flat(0.30, asof(), DayCountConvention::Act365).unwrap();
+        let up = flat.bumped(VolShift::ParallelAbsolute(0.05)).unwrap();
+        assert!((up.vol(100.0, 100.0, 1.0) - 0.35).abs() < 1e-14);
+        let scaled = flat.bumped(VolShift::ParallelRelative(0.10)).unwrap();
+        assert!((scaled.vol(100.0, 100.0, 1.0) - 0.33).abs() < 1e-14);
+
+        let s = strike_grid();
+        let up = s.bumped(VolShift::ParallelAbsolute(0.01)).unwrap();
+        // every pillar moves by the shift; the skew (differences) is intact
+        assert!((up.vol(100.0, 100.0, 1.0) - 0.21).abs() < 1e-14);
+        assert!((up.vol(90.0, 100.0, 2.0) - 0.28).abs() < 1e-14);
+        let skew_base = s.vol(90.0, 100.0, 1.0) - s.vol(110.0, 100.0, 1.0);
+        let skew_up = up.vol(90.0, 100.0, 1.0) - up.vol(110.0, 100.0, 1.0);
+        assert!((skew_base - skew_up).abs() < 1e-14, "parallel shift must keep the skew");
+        // the original is untouched
+        assert!((s.vol(100.0, 100.0, 1.0) - 0.20).abs() < 1e-14);
+    }
+
+    #[test]
+    fn bumped_rejects_non_positive_vols() {
+        let flat = VolSurface::flat(0.20, asof(), DayCountConvention::Act365).unwrap();
+        assert!(matches!(
+            flat.bumped(VolShift::ParallelAbsolute(-0.20)),
+            Err(VolError::NonPositiveVol(_))
+        ));
+        assert!(matches!(
+            strike_grid().bumped(VolShift::ParallelRelative(-1.0)),
+            Err(VolError::NonPositiveVol(_))
+        ));
     }
 
     #[test]

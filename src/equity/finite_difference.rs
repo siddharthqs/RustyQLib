@@ -117,7 +117,7 @@ pub fn vanna(option: &EquityOption) -> f64 {
 
 /// Charm from the spot derivative of the grid's calendar theta.
 pub fn charm(option: &EquityOption) -> f64 {
-    let h = option.base.underlying_price.value() * 1e-3;
+    let h = option.market.spot.value() * 1e-3;
     (solve_dispatch(option, 0.0, 0.0, h).theta - solve_dispatch(option, 0.0, 0.0, -h).theta)
         / (2.0 * h)
 }
@@ -144,6 +144,48 @@ pub fn solution(option: &EquityOption) -> FdSolution {
     solve_dispatch(option, 0.0, 0.0, 0.0)
 }
 
+/// Value and all nine reported Greeks from a **shared** set of grid solves
+/// instead of a re-solve per Greek: the base solve yields the price plus
+/// delta/gamma/theta for free, the two vol-bumped solves yield vega, vanna
+/// and zomma together, two rate bumps yield rho, and two spot-bumped
+/// solves yield charm — nine solves in total. Each number is produced by
+/// exactly the same solves and arithmetic as its accessor above.
+pub fn pricing_result(option: &EquityOption) -> crate::core::results::PricingResult {
+    use crate::core::results::{Greeks, PricingResult};
+    let base = solution(option);
+    let hv = 1e-3;
+    let vol_up = solve_dispatch(option, hv, 0.0, 0.0);
+    let vol_down = solve_dispatch(option, -hv, 0.0, 0.0);
+    let hr = 1e-4;
+    let rho = (solve_dispatch(option, 0.0, hr, 0.0).npv
+        - solve_dispatch(option, 0.0, -hr, 0.0).npv)
+        / (2.0 * hr);
+    let hs = option.market.spot.value() * 1e-3;
+    let charm = (solve_dispatch(option, 0.0, 0.0, hs).theta
+        - solve_dispatch(option, 0.0, 0.0, -hs).theta)
+        / (2.0 * hs);
+    let gamma_p = if base.delta == 0.0 {
+        f64::NAN
+    } else {
+        option.market.spot.value() * base.gamma / base.delta
+    };
+    PricingResult {
+        pv: base.npv,
+        greeks: Greeks {
+            delta: base.delta,
+            gamma: base.gamma,
+            vega: (vol_up.npv - vol_down.npv) / (2.0 * hv),
+            theta: base.theta,
+            rho,
+            vanna: (vol_up.delta - vol_down.delta) / (2.0 * hv),
+            charm,
+            gamma_p,
+            zomma: (vol_up.gamma - vol_down.gamma) / (2.0 * hv),
+        },
+        std_err: None,
+    }
+}
+
 /// Reprice under a shifted market for PnL attribution. The grid has no
 /// calendar-time shift, so the elapsed-time effect is rolled forward with the
 /// bumped grid's own theta (exact to first order in `d_time`, which is small
@@ -167,7 +209,7 @@ fn solve_dispatch(
 ) -> FdSolution {
     let t = option.time_to_maturity();
     assert!(t >= 0.0, "Option is expired or negative time");
-    let s0 = option.base.underlying_price.value() + spot_bump;
+    let s0 = option.market.spot.value() + spot_bump;
     assert!(s0 > 0.0, "underlying price must be positive");
     if t == 0.0 {
         let mut sol = FdSolution::zero();
@@ -230,10 +272,10 @@ fn solve(
     let cfg = option.fd_cfg();
     let payoff = option.payoff.as_ref();
     let strike = option.base.strike_price;
-    let s0 = option.base.underlying_price.value() + spot_bump;
-    let q = option.base.carry_yield();
+    let s0 = option.market.spot.value() + spot_bump;
+    let q = option.carry_yield();
     let t = option.time_to_maturity();
-    let sigma_ref = option.base.volatility() + sigma_bump;
+    let sigma_ref = option.volatility() + sigma_bump;
     assert!(sigma_ref > 0.0, "volatility must be positive");
     let american = matches!(payoff.exercise_style(), ContractStyle::American);
     // Bermudan: backward step s covers calendar time t-(s+1)dt, so an
@@ -256,11 +298,11 @@ fn solve(
     let vol_field = match option.model {
         Model::Gbm => FdVol::Const(sigma_ref),
         Model::LocalVol => FdVol::Local(LocalVol::new(
-            &option.base.vol_surface,
-            &option.base.discount_curve,
+            &option.market.vol_surface,
+            &option.market.discount_curve,
             // A spot bump moves the valuation point, not the calibrated
             // local-vol surface reference spot.
-            option.base.underlying_price.value(),
+            option.market.spot.value(),
             q,
             sigma_bump,
         )),
@@ -273,7 +315,7 @@ fn solve(
     // ── Grid geometry (log-spot). A knock-out barrier becomes the exact
     // grid edge (absorbing boundary); otherwise the grid centers on x0.
     let x0 = s0.ln();
-    let r_flat = option.base.risk_free_rate() + r_bump;
+    let r_flat = option.risk_free_rate() + r_bump;
     let drift_width = ((r_flat - q - 0.5 * sigma_ref * sigma_ref) * t).abs();
     let half_width =
         cfg.grid_stdevs * sigma_ref * t.sqrt() + drift_width + (strike / s0).ln().abs().max(1e-2);
@@ -294,7 +336,7 @@ fn solve(
     // consistent drift and discounting), plus any rho bump.
     let steps = cfg.time_steps;
     let dt = t / steps as f64;
-    let curve = &option.base.discount_curve;
+    let curve = &option.market.discount_curve;
     let step_rates: Vec<f64> = (0..steps)
         .map(|k| {
             // step k advances time-to-expiry tau from k*dt to (k+1)*dt,
@@ -314,11 +356,11 @@ fn solve(
 
     // cash dividend ex-dates as year fractions inside the option's life
     let cash_divs: Vec<(f64, f64)> = option
-        .base
+        .market
         .cash_dividends
         .iter()
         .filter_map(|(date, amount)| {
-            let td = (*date - option.base.valuation_date).num_days() as f64 / 365.0;
+            let td = (*date - option.market.valuation_date).num_days() as f64 / 365.0;
             (td > 0.0 && td <= t).then_some((td, *amount))
         })
         .collect();

@@ -36,7 +36,7 @@ pub use measures::{
 pub use performance::{max_drawdown, sharpe_ratio, sortino_ratio};
 pub use portfolio_risk::{delta_gamma_var, full_revaluation_var, PortfolioRisk, RiskConfig};
 pub use stress::{
-    prepare_bump, stress_mtm, BumpMode, MarketBump, RiskFactor, ScenarioResult, Shock,
-    StressConfig, StressScenario, TradeStress,
+    stress_mtm, BumpMode, RiskFactor, ScenarioResult, Shock, StressConfig, StressScenario,
+    TradeStress,
 };
 pub use volatility::{ewma_volatility, realized_volatility};

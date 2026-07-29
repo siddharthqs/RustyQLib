@@ -7,6 +7,7 @@ pub mod daycount;
 pub mod fd_solvers;
 pub mod lattice;
 pub mod linalg;
+pub mod market;
 pub mod montecarlo;
 pub mod optimization;
 pub mod solvers;

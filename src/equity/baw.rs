@@ -169,11 +169,11 @@ fn critical_put(k: f64, r: f64, b: f64, sigma: f64, t: f64) -> f64 {
 // continuous zero rate, the total carry, and the surface vol at this strike.
 
 fn reprice(option: &EquityOption, d_spot: f64, d_vol: f64, d_rate: f64, d_maturity: f64) -> f64 {
-    let s = option.base.effective_spot() + d_spot;
+    let s = option.effective_spot() + d_spot;
     let k = option.base.strike_price;
-    let r = option.base.risk_free_rate() + d_rate;
-    let q = option.base.carry_yield();
-    let sigma = option.base.volatility() + d_vol;
+    let r = option.risk_free_rate() + d_rate;
+    let q = option.carry_yield();
+    let sigma = option.volatility() + d_vol;
     let t = (option.time_to_maturity() + d_maturity).max(1e-8);
     let pc = *option.payoff.put_or_call();
     match option.payoff.exercise_style() {
@@ -195,9 +195,9 @@ pub fn npv(option: &EquityOption) -> f64 {
 pub fn critical_spot(option: &EquityOption) -> f64 {
     let (k, r, b, sigma, t) = (
         option.base.strike_price,
-        option.base.risk_free_rate(),
-        option.base.risk_free_rate() - option.base.carry_yield(),
-        option.base.volatility(),
+        option.risk_free_rate(),
+        option.risk_free_rate() - option.carry_yield(),
+        option.volatility(),
         option.time_to_maturity(),
     );
     match option.payoff.put_or_call() {
@@ -213,76 +213,100 @@ pub fn price_with(option: &EquityOption, d_spot: f64, d_vol: f64, d_rate: f64, d
     reprice(option, d_spot, d_vol, d_rate, -d_time)
 }
 
-// Greeks by bump-and-reprice on the fast closed form. The American price is
-// smooth below the exercise boundary, so central differences are well-behaved.
+// Greeks: central-difference bumps on the fast closed form, produced by
+// the central sensitivity engine (`crate::equity::greeks`) through
+// [`price_with`]. The American price is smooth below the exercise
+// boundary, so central differences are well-behaved.
 
-fn spot_bump(option: &EquityOption) -> f64 {
-    option.base.effective_spot() * 1e-4
+/// The spot-independent pieces of one BAW evaluation: the critical price
+/// `S*`, the quadratic exponent and the premium coefficient depend on
+/// `(K, r, b, sigma, T)` but **not on spot**, so the delta/gamma spot
+/// ladder of the central sensitivity engine solves the boundary once and
+/// reprices the ladder through [`value`](Self::value). Produces exactly
+/// the same numbers as [`price`] evaluation by evaluation.
+pub(crate) struct SpotKernel {
+    k: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    t: f64,
+    pc: PutOrCall,
+    american: bool,
+    /// `(s_star, exponent, coefficient)` when the early-exercise premium
+    /// is live; `None` for the pure-European cases.
+    premium: Option<(f64, f64, f64)>,
 }
 
-pub fn delta(option: &EquityOption) -> f64 {
-    let h = spot_bump(option);
-    (reprice(option, h, 0.0, 0.0, 0.0) - reprice(option, -h, 0.0, 0.0, 0.0)) / (2.0 * h)
-}
+impl SpotKernel {
+    /// Solve the boundary for this option under (vol, rate, maturity)
+    /// shifts; `d_maturity` extends the maturity (the same convention as
+    /// [`reprice`]).
+    pub(crate) fn new(option: &EquityOption, d_vol: f64, d_rate: f64, d_maturity: f64) -> Self {
+        let k = option.base.strike_price;
+        let r = option.risk_free_rate() + d_rate;
+        let q = option.carry_yield();
+        let sigma = option.volatility() + d_vol;
+        let t = (option.time_to_maturity() + d_maturity).max(1e-8);
+        let pc = *option.payoff.put_or_call();
+        let american = matches!(option.payoff.exercise_style(), ContractStyle::American);
+        let b = r - q;
+        let premium = if !american || sigma <= 0.0 {
+            None
+        } else {
+            match pc {
+                // never optimal to exercise a call early when b >= r
+                PutOrCall::Call if b >= r => None,
+                PutOrCall::Call => {
+                    let s_star = critical_call(k, r, b, sigma, t);
+                    let q2 = quadratic_root(r, b, sigma, t, true);
+                    let d1 = d1_of(s_star, k, b, sigma, t);
+                    let a2 = (s_star / q2) * (1.0 - ((b - r) * t).exp() * norm_cdf(d1));
+                    Some((s_star, q2, a2))
+                }
+                PutOrCall::Put => {
+                    let s_star = critical_put(k, r, b, sigma, t);
+                    let q1 = quadratic_root(r, b, sigma, t, false);
+                    let d1 = d1_of(s_star, k, b, sigma, t);
+                    let a1 = -(s_star / q1) * (1.0 - ((b - r) * t).exp() * norm_cdf(-d1));
+                    Some((s_star, q1, a1))
+                }
+            }
+        };
+        SpotKernel { k, r, q, sigma, t, pc, american, premium }
+    }
 
-pub fn gamma(option: &EquityOption) -> f64 {
-    let h = spot_bump(option);
-    (reprice(option, h, 0.0, 0.0, 0.0) - 2.0 * reprice(option, 0.0, 0.0, 0.0, 0.0)
-        + reprice(option, -h, 0.0, 0.0, 0.0))
-        / (h * h)
-}
-
-pub fn vega(option: &EquityOption) -> f64 {
-    let h = 1e-4;
-    (reprice(option, 0.0, h, 0.0, 0.0) - reprice(option, 0.0, -h, 0.0, 0.0)) / (2.0 * h)
-}
-
-pub fn rho(option: &EquityOption) -> f64 {
-    let h = 1e-4;
-    (reprice(option, 0.0, 0.0, h, 0.0) - reprice(option, 0.0, 0.0, -h, 0.0)) / (2.0 * h)
-}
-
-pub fn theta(option: &EquityOption) -> f64 {
-    // calendar theta = dV/dt = -dV/dT
-    let h = (1.0 / 365.0_f64).min(0.5 * option.time_to_maturity());
-    -(reprice(option, 0.0, 0.0, 0.0, h) - reprice(option, 0.0, 0.0, 0.0, -h)) / (2.0 * h)
-}
-
-pub fn vanna(option: &EquityOption) -> f64 {
-    let hs = spot_bump(option);
-    let hv = 1e-4;
-    (reprice(option, hs, hv, 0.0, 0.0) - reprice(option, -hs, hv, 0.0, 0.0)
-        - reprice(option, hs, -hv, 0.0, 0.0)
-        + reprice(option, -hs, -hv, 0.0, 0.0))
-        / (4.0 * hs * hv)
-}
-
-pub fn charm(option: &EquityOption) -> f64 {
-    let hs = spot_bump(option);
-    let ht = (1.0 / 365.0_f64).min(0.5 * option.time_to_maturity());
-    // charm = -d(delta)/dT; the maturity bump is +ht
-    -(reprice(option, hs, 0.0, 0.0, ht) - reprice(option, -hs, 0.0, 0.0, ht)
-        - reprice(option, hs, 0.0, 0.0, -ht)
-        + reprice(option, -hs, 0.0, 0.0, -ht))
-        / (4.0 * hs * ht)
-}
-
-pub fn zomma(option: &EquityOption) -> f64 {
-    let hs = spot_bump(option);
-    let hv = 1e-4;
-    let gamma_at = |dv: f64| {
-        (reprice(option, hs, dv, 0.0, 0.0) - 2.0 * reprice(option, 0.0, dv, 0.0, 0.0)
-            + reprice(option, -hs, dv, 0.0, 0.0))
-            / (hs * hs)
-    };
-    (gamma_at(hv) - gamma_at(-hv)) / (2.0 * hv)
-}
-
-pub fn volga(option: &EquityOption) -> f64 {
-    let hv = 1e-3;
-    (reprice(option, 0.0, hv, 0.0, 0.0) - 2.0 * reprice(option, 0.0, 0.0, 0.0, 0.0)
-        + reprice(option, 0.0, -hv, 0.0, 0.0))
-        / (hv * hv)
+    /// Value at `s` (the escrowed spot, shift already applied) — the
+    /// assembly step of [`price`] with the boundary work factored out.
+    pub(crate) fn value(&self, s: f64) -> f64 {
+        let intrinsic = match self.pc {
+            PutOrCall::Call => (s - self.k).max(0.0),
+            PutOrCall::Put => (self.k - s).max(0.0),
+        };
+        // mirror `price`: degenerate American inputs return intrinsic
+        // before the European leg; European style always prices through
+        // bs_price (as `reprice` does)
+        if self.american && self.sigma <= 0.0 {
+            return intrinsic;
+        }
+        let euro = bs_price(s, self.k, self.r, self.q, self.sigma, self.t, self.pc);
+        if !self.american {
+            return euro;
+        }
+        match self.premium {
+            None => euro,
+            Some((s_star, exponent, coefficient)) => {
+                let exercised = match self.pc {
+                    PutOrCall::Call => s >= s_star,
+                    PutOrCall::Put => s <= s_star,
+                };
+                if exercised {
+                    intrinsic
+                } else {
+                    euro + coefficient * (s / s_star).powf(exponent)
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

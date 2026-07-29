@@ -80,6 +80,23 @@ impl<'a> Var<'a> {
         }
     }
 
+    /// `min(self, other)` with the one-sided subgradient at ties.
+    pub fn min(self, other: Var<'a>) -> Var<'a> {
+        if self.val <= other.val {
+            Var {
+                tape: self.tape,
+                idx: self.tape.push2(self.idx, 1.0, other.idx, 0.0),
+                val: self.val,
+            }
+        } else {
+            Var {
+                tape: self.tape,
+                idx: self.tape.push2(self.idx, 0.0, other.idx, 1.0),
+                val: other.val,
+            }
+        }
+    }
+
     /// `max(self, constant)` — the positive-part operator for payoffs
     /// (`x.maxf(0.0)`), differentiable almost everywhere.
     pub fn maxf(self, c: f64) -> Var<'a> {

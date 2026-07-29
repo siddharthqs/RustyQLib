@@ -21,15 +21,16 @@
 //! underlying = "ACME"     # only this name (omit or "*" for all)
 //! ```
 //!
-//! The bump layer converts each shock into the absolute market deltas
-//! the pricing layer understands — relative shocks are scaled by the
-//! position's own market level (its spot, its smile vol, its curve
-//! rate), multiple shocks on one factor compose additively on the base
-//! market — and every position reprices through
-//! [`EquityOption::price_with`], i.e. full revaluation on its own
-//! engine. Results come back **per trade** and **aggregated per
-//! scenario**, with the aggregation identity `portfolio = sum(trades)`
-//! exact by construction.
+//! The book's market is snapshotted once into a typed
+//! [`Market`](crate::core::market::Market) store, each scenario bumps it
+//! ([`Market::bumped`](crate::core::market::Market::bumped) — every risk
+//! factor object performs its own bump, shocks apply in order, relative
+//! shocks scale the current level), and every position reprices fully on
+//! its own engine under the bumped snapshot
+//! ([`EquityOption::npv_in`](crate::equity::vanilla_option::EquityOption)).
+//! Results come back **per trade** and **aggregated per scenario**, with
+//! the aggregation identity `portfolio = sum(trades)` exact by
+//! construction.
 //!
 //! The `time` factor is an absolute horizon in days (theta-inclusive
 //! stresses); dividend/carry shocks are not yet supported by the
@@ -37,7 +38,7 @@
 
 use serde::Deserialize;
 
-use crate::equity::market::MarketData;
+use crate::core::market::Market;
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::utils::PayoffType;
 use crate::equity::vanilla_option::EquityOption;
@@ -45,7 +46,7 @@ use crate::core::errors::RustyQLibError;
 
 // the shock vocabulary is the market layer's; re-exported here so stress
 // configs keep their import paths
-pub use crate::equity::market::{BumpMode, RiskFactor, Shock};
+pub use crate::core::market::{BumpMode, RiskFactor, Shock};
 
 /// A named collection of shocks applied together.
 #[derive(Debug, Clone, Deserialize)]
@@ -100,54 +101,6 @@ impl StressConfig {
     }
 }
 
-/// The absolute market deltas a scenario implies for one position — the
-/// shape [`EquityOption::price_with`] consumes.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct MarketBump {
-    pub d_spot: f64,
-    pub d_vol: f64,
-    pub d_rate: f64,
-    /// Elapsed calendar time in years.
-    pub d_time: f64,
-}
-
-/// Convert a scenario's shocks into the absolute bumps for `option`:
-/// relative shocks scale by the position's own market levels; shocks
-/// filtered to other underlyings are skipped; repeated factors add.
-pub fn prepare_bump(option: &EquityOption, shocks: &[Shock]) -> MarketBump {
-    let mut bump = MarketBump::default();
-    for shock in shocks {
-        if !shock.applies_to(&option.base.symbol) {
-            continue;
-        }
-        match shock.factor {
-            RiskFactor::Spot => {
-                bump.d_spot += match shock.mode {
-                    BumpMode::Relative => option.base.underlying_price.value() * shock.size,
-                    BumpMode::Absolute => shock.size,
-                };
-            }
-            RiskFactor::Vol => {
-                bump.d_vol += match shock.mode {
-                    BumpMode::Relative => option.base.volatility() * shock.size,
-                    BumpMode::Absolute => shock.size,
-                };
-            }
-            RiskFactor::Rate => {
-                bump.d_rate += match shock.mode {
-                    BumpMode::Relative => option.base.risk_free_rate() * shock.size,
-                    BumpMode::Absolute => shock.size,
-                };
-            }
-            RiskFactor::Time => {
-                // absolute, in days (validated at parse time)
-                bump.d_time += shock.size / 365.0;
-            }
-        }
-    }
-    bump
-}
-
 /// One trade's stress result.
 #[derive(Debug, Clone)]
 pub struct TradeStress {
@@ -181,28 +134,28 @@ fn trade_label(option: &EquityOption, quantity: f64) -> String {
 }
 
 /// Run every scenario in `config` over the book, through the pricing
-/// context: the book's market is captured once, each scenario bumps it
-/// ([`MarketData::bump`]), and every position revalues fully on its own
+/// context: the book's market is snapshotted once, each scenario bumps it
+/// ([`Market::bumped`]), and every position revalues fully on its own
 /// engine under the bumped snapshot. Reported per trade and aggregated;
 /// `portfolio = sum(trades)` is exact by construction.
 pub fn stress_mtm(book: &EquityPortfolio, config: &StressConfig) -> Vec<ScenarioResult> {
-    let base_market = MarketData::capture(book);
+    let base_market = book.snapshot_market();
     config
         .scenarios
         .iter()
         .map(|scenario| {
             let stressed_market = base_market
-                .bump(&scenario.shocks)
+                .bumped(&scenario.shocks)
                 .expect("stress configs are validated at parse time");
             let mut trades = Vec::with_capacity(book.positions.len());
             let mut base_total = 0.0;
             let mut stressed_total = 0.0;
             for position in &book.positions {
-                let value_under = |market: &MarketData| {
+                let value_under = |market: &Market| {
                     position.quantity
                         * position
                             .option
-                            .npv_under(market)
+                            .npv_in(market)
                             .expect("captured market covers every position")
                 };
                 let base = value_under(&base_market);
@@ -323,19 +276,22 @@ mod tests {
     }
 
     #[test]
-    fn bumps_scale_relative_shocks_by_the_position_market() {
+    fn shocks_bump_the_market_levels_in_order_and_honour_filters() {
+        use crate::core::market::{Spot, Vol};
         let opt = option("ACME", PutOrCall::Call, 100.0);
+        let market = opt.snapshot_market();
         let shocks = vec![
             Shock { factor: RiskFactor::Spot, mode: BumpMode::Relative, size: -0.2, underlying: None },
-            Shock { factor: RiskFactor::Vol, mode: BumpMode::Absolute, size: 0.1, underlying: None },
             Shock { factor: RiskFactor::Spot, mode: BumpMode::Absolute, size: -1.0, underlying: None },
             // filtered out: different underlying
-            Shock { factor: RiskFactor::Rate, mode: BumpMode::Absolute, size: 0.05, underlying: Some("OTHER".into()) },
+            Shock { factor: RiskFactor::Vol, mode: BumpMode::Absolute, size: 0.1, underlying: Some("OTHER".into()) },
         ];
-        let bump = prepare_bump(&opt, &shocks);
-        assert!((bump.d_spot - (-21.0)).abs() < 1e-12, "composed spot {}", bump.d_spot);
-        assert!((bump.d_vol - 0.1).abs() < 1e-12);
-        assert_eq!(bump.d_rate, 0.0, "filtered shock must not apply");
+        let bumped = market.bumped(&shocks).unwrap();
+        // in order: 100 * 0.8 = 80, then - 1
+        let spot = bumped.get(&Spot("ACME".to_string())).unwrap().value();
+        assert!((spot - 79.0).abs() < 1e-12, "composed spot {spot}");
+        let vol = bumped.get(&Vol("ACME".to_string())).unwrap().vol(100.0, 100.0, 1.0);
+        assert!((vol - 0.25).abs() < 1e-12, "filtered vol shock must not apply, got {vol}");
     }
 
     #[test]
