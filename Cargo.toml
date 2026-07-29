@@ -37,7 +37,7 @@ xml = ["dep:quick-xml"]
 # TOML stress-scenario configuration files
 stress-config = ["dep:toml"]
 # the `rustyqlib` command-line binary and its file plumbing
-cli = ["dep:clap", "dep:csv", "xml", "stress-config"]
+cli = ["dep:clap", "dep:csv", "dep:env_logger", "xml", "stress-config"]
 
 [dependencies]
 rand = "0.8.4"
@@ -53,9 +53,11 @@ thiserror = "1"
 strum_macros = "0.25"
 ndarray = "0.15"
 rayon = "1.5.1"
+log = "0.4"
 
 # feature-gated: CLI and alternative formats
 clap = { version = "4.5", optional = true }
+env_logger = { version = "0.11", optional = true }
 csv = { version = "1.1", optional = true }
 quick-xml = { version = "0.41.0", default-features = false, optional = true }
 toml = { version = "0.8", optional = true }

@@ -1,6 +1,10 @@
 use rustyqlib::utils::build_cli;
 
 fn main() {
+    // Diagnostics go to stderr via RUST_LOG (e.g. RUST_LOG=rustyqlib=debug);
+    // stdout stays reserved for pricing output.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+
     let matches = build_cli::build_cli().get_matches();
 
     // Match and dispatch subcommand

@@ -217,8 +217,8 @@ impl RainbowOption {
             Err(RustyQLibError::NumericalError(ref msg))
                 if msg.contains("positive semi-definite") =>
             {
-                eprintln!(
-                    "warning: correlation matrix is not PSD; \
+                log::warn!(
+                    "correlation matrix is not PSD; \
                      projecting to the nearest correlation matrix (Higham)"
                 );
                 let repaired = nearest_correlation(&data.correlations, 1e-12, 200)?;

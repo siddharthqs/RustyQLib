@@ -39,7 +39,7 @@ pub fn build_implied_vol_surface(contracts: &[Box<EquityOption>]) -> Result<VolS
                 .or_default()
                 .push((option.base.strike_price, vol)),
             Err(err) => {
-                eprintln!(
+                log::warn!(
                     "skipping quote {} K={} T={}: {err}",
                     option.base.symbol, option.base.strike_price, option.base.maturity_date
                 );

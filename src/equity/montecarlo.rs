@@ -23,9 +23,7 @@
 //! draw dimension and adding a second bridge; the per-path stream and
 //! stepping structure is factor-agnostic.
 
-use std::io;
 use std::str::FromStr;
-use chrono::{Local, NaiveDate};
 use libm::exp;
 use rayon::prelude::*;
 
@@ -35,18 +33,13 @@ use super::autocallable::AutocallablePayoff;
 use super::barrier::{BarrierDirection, KnockType};
 use super::heston::HestonParams;
 use super::local_vol::LocalVol;
-use super::vanilla_option::{AsianPayoff, BarrierPayoff, EquityOption, EquityOptionBase, VanillaPayoff};
-use super::utils::{Engine, LongShort, Model, Payoff, PricingEngine};
+use super::vanilla_option::{AsianPayoff, BarrierPayoff, EquityOption, VanillaPayoff};
+use super::utils::Model;
 use crate::core::trade::PutOrCall;
 use crate::core::montecarlo::{
     path_normals, pseudo_normals, sobol_normals, BrownianBridge, QmcSequence,
 };
-use crate::core::quotes::Quote;
-use crate::core::curves::{Compounding, YieldCurve};
-use crate::core::daycount::DayCountConvention;
 use crate::core::data_models::EquityOptionData;
-use crate::core::vols::VolSurface;
-use crate::core::traits::Instrument;
 
 /// Time-stepping scheme for path-wise simulation.
 /// `Exact` samples the closed-form GBM transition (no discretization bias);
@@ -1180,115 +1173,3 @@ fn least_squares(rows: &[([f64; LSMC_BASIS], f64)]) -> Option<[f64; LSMC_BASIS]>
     Some(beta)
 }
 
-// ── Interactive CLI helper ──────────────────────────────────────────────
-
-pub fn option_pricing() {
-    println!("Welcome to the Monte Carlo Option pricer.");
-    println!("(Step 1/7) What is the current price of the underlying asset?");
-    let mut curr_price = String::new();
-    io::stdin()
-        .read_line(&mut curr_price)
-        .expect("Failed to read line");
-
-    println!("(Step 2/7) Do you want a call option ('C') or a put option ('P') ?");
-    let mut side_input = String::new();
-    io::stdin()
-        .read_line(&mut side_input)
-        .expect("Failed to read line");
-
-    let side: PutOrCall;
-    match side_input.trim() {
-        "C" | "c" | "Call" | "call" => side = PutOrCall::Call,
-        "P" | "p" | "Put" | "put" => side = PutOrCall::Put,
-        _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
-    }
-
-    println!("Stike price:");
-    let mut strike = String::new();
-    io::stdin()
-        .read_line(&mut strike)
-        .expect("Failed to read line");
-
-    println!("Expected annualized volatility in %:");
-    println!("E.g.: Enter 50% chance as 0.50 ");
-    let mut vol = String::new();
-    io::stdin()
-        .read_line(&mut vol)
-        .expect("Failed to read line");
-
-    println!("Risk-free rate in %:");
-    let mut rf = String::new();
-    io::stdin().read_line(&mut rf).expect("Failed to read line");
-
-    println!("Maturity date in YYYY-MM-DD format:");
-    let mut expiry = String::new();
-    io::stdin()
-        .read_line(&mut expiry)
-        .expect("Failed to read line");
-    let future_date = NaiveDate::parse_from_str(&expiry.trim(), "%Y-%m-%d").expect("Invalid date format");
-    println!("Dividend yield on this stock:");
-    let mut div = String::new();
-    io::stdin()
-        .read_line(&mut div)
-        .expect("Failed to read line");
-
-    let valuation_date = Local::now().date_naive();
-    let discount_curve = YieldCurve::flat(
-        rf.trim().parse::<f64>().unwrap(),
-        valuation_date,
-        DayCountConvention::Act365,
-        Compounding::Continuous,
-    )
-    .expect("Invalid risk free rate");
-    let vol_surface = VolSurface::flat(
-        vol.trim().parse::<f64>().unwrap(),
-        valuation_date,
-        DayCountConvention::Act365,
-    )
-    .expect("Invalid volatility");
-    let curr_quote = Quote::new(curr_price.trim().parse::<f64>().unwrap());
-    let base = EquityOptionBase {
-        symbol: "ABC".to_string(),
-        currency: None,
-        exchange: None,
-        name: None,
-        cusip: None,
-        isin: None,
-        settlement_type: Some("ABC".to_string()),
-        strike_price: strike.trim().parse::<f64>().unwrap(),
-        maturity_date: future_date,
-        futures_settlement: None,
-        multiplier: 1.0,
-        current_price: Quote::new(0.0),
-        entry_price: 0.0,
-        long_short: LongShort::LONG,
-    };
-    let market = crate::equity::vanilla_option::EquityMarketData {
-        valuation_date,
-        spot: curr_quote,
-        dividend_yield: div.trim().parse::<f64>().unwrap(),
-        borrow_cost: 0.0,
-        cash_dividends: vec![],
-        vol_surface,
-        discount_curve,
-    };
-    let payoff = Box::new(VanillaPayoff {
-        put_or_call: side,
-        exercise_style: crate::core::utils::ContractStyle::European,
-    });
-    let equityoption = EquityOption {
-        base,
-        market,
-        payoff: payoff,
-        engine: PricingEngine::MonteCarlo(MonteCarloConfig::default()),
-        model: Model::Gbm,
-    };
-    println!("{:?}", equityoption.time_to_maturity());
-
-    let result = npv_with_stats(&equityoption);
-    println!("Theoretical Price ${} (std err {})", result.pv, result.std_err);
-    let mut wait = String::new();
-    io::stdin()
-        .read_line(&mut wait)
-        .expect("Failed to read line");
-}

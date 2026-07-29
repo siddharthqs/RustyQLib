@@ -1,28 +1,15 @@
-use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::fs;
 use std::io::Read;
-use chrono::{Datelike, Local, NaiveDate};
-use crate::core::quotes::Quote;
-use crate::core::termstructure::YieldTermStructure;
+use chrono::Local;
 use crate::equity::vanilla_option::{EquityOption};
-//use crate::core::utils::{dN, N};
-//use super::vanilla_option::{EquityOption};
-use crate::equity::utils::{Engine};
-//use crate::cmdty::cmdty_option::{CmdtyOption};
-use crate::core::trade;
-use crate::cmdty::cmdty_option;
-use crate::core::traits::{Instrument, Rates};
-use crate::core::utils::{Contract,CombinedContract, ContractOutput, Contracts, OutputJson,EngineType};
-use crate::core::utils::ContractStyle;
+use crate::core::traits::Rates;
+use crate::core::utils::{Contract, Contracts};
 use std::io::Write;
-use std::env::temp_dir;
-//use crate::read_csv::read_ts;
 use crate::rates;
 use crate::rates::deposits::Deposit;
-use crate::rates::build_contracts::{build_ir_contracts, build_ir_contracts_from_json, build_term_structure};
+use crate::rates::build_contracts::{build_ir_contracts_from_json, build_term_structure};
 use crate::equity::build_contracts::{build_eq_contracts_from_json};
-use crate::core::vols::VolSurface;
 use crate::equity::handle_equity_contracts::handle_equity_contract;
 
 use rayon::prelude::*;
@@ -56,11 +43,11 @@ pub fn build_curve(file: &mut File, output_filename: &str) -> () {
         panic!("No contracts found in JSON file");
     }
     else if list_contracts.asset=="EQ"{
-        println!("Building implied volatility surface");
+        log::info!("building implied volatility surface");
         let contracts:Vec<Box<EquityOption>> = build_eq_contracts_from_json(list_contracts.contracts);
         let vol_surface = crate::equity::vol_surface::build_implied_vol_surface(&contracts)
             .expect("Failed to build implied vol surface");
-        println!("{}", vol_surface);
+        log::debug!("implied vol surface:\n{}", vol_surface);
         let vol_value = serde_json::to_value(&vol_surface).unwrap();
         let serialized_vol_surface =
             serialization::render_value(&vol_value, format, "vol_surface");
@@ -104,7 +91,7 @@ pub fn parse_contract(file: &mut File, output_filename: &str) {
         .unwrap_or_else(|e| panic!("Failed to read {in_format:?} contracts: {e}"));
 
     if list_contracts.contracts.is_empty() {
-        println!("No contracts found in the input document");
+        log::warn!("no contracts found in the input document; nothing written");
         return;
     }
     // parallel processing of each contract using rayon
@@ -121,74 +108,18 @@ pub fn parse_contract(file: &mut File, output_filename: &str) {
 }
 pub fn process_contract(data: &Contract) -> serde_json::Value {
 
-    let date =  vec![0.01,0.02,0.05,0.1,0.5,1.0,2.0,3.0];
-    let rates = vec![0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05];
-    let ts = YieldTermStructure::new(date,rates);
-
     if data.action=="PV" && data.asset=="EQ"{
         return handle_equity_contract(data);
 
     }
-    // else if data.action=="PV" && data.asset=="CO"{
-    //     let market_data = data.market_data.clone().unwrap();
-    //     let curr_quote = Quote::new( market_data.underlying_price);
-    //     let option_type = &market_data.option_type;
-    //     let side: trade::OptionType;
-    //     let option_type = match &market_data.option_type {
-    //         Some(x) => x.clone(),
-    //         None => "".to_string(),
-    //     };
-    //     match option_type.trim() {
-    //         "C" | "c" | "Call" | "call" => side = trade::OptionType::Call,
-    //         "P" | "p" | "Put" | "put" => side = trade:: OptionType::Put,
-    //         _ => panic!("Invalide side argument! Side has to be either 'C' or 'P'."),
-    //     }
-    //     let maturity_date = &market_data.maturity;
-    //     let today = Local::today();
-    //     let future_date = NaiveDate::parse_from_str(&maturity_date, "%Y-%m-%d").expect("Invalid date format");
-    //     let duration = future_date.signed_duration_since(today.naive_utc());
-    //     let year_fraction = duration.num_days() as f64 / 365.0;
-    //     let vol = Some(market_data.volatility).unwrap();
-    //
-    //     let sim = market_data.simulation;
-    //     if data.pricer=="Analytical"{
-    //         let mut option: CmdtyOption = CmdtyOption {
-    //             option_type: side,
-    //             transection: trade::Transection::Buy,
-    //             current_price: curr_quote,
-    //             strike_price: market_data.strike_price.unwrap_or(0.0),
-    //             volatility: vol.unwrap(),
-    //             time_to_maturity: year_fraction,
-    //             transection_price: 0.0,
-    //             term_structure: ts,
-    //             engine: cmdty_option::Engine::Black76,
-    //             simulation: Option::from(sim.unwrap_or(10000)),
-    //             time_to_future_maturity: None,
-    //             risk_free_rate: None
-    //         };
-    //         let contract_output = ContractOutput{pv:option.npv(),delta:option.delta(),gamma:option.gamma(),vega:option.vega(),theta:option.theta(),rho:option.rho(), error: None };
-    //         println!("Theoretical Price ${}", contract_output.pv);
-    //         println!("Delta ${}", contract_output.delta);
-    //         let combined_ = CombinedContract{
-    //             contract: data.clone(),
-    //             output:contract_output
-    //         };
-    //         let output_json = serde_json::to_string(&combined_).expect("Failed to generate output");
-    //         return output_json;
-    //
-    //
-    //     }
-    //
-    // }
     else if data.action=="PV" && data.asset=="IR"{
-        //println!("Processing {:?}",data);
         let rate_data = data.rate_data.clone().unwrap();
         let mut start_date_str = rate_data.start_date; // Only for 0M case
         let mut maturity_date_str = rate_data.maturity_date;
         let current_date = Local::now().date_naive();
         let maturity_date = rates::utils::convert_mm_to_date(maturity_date_str);
         let start_date = rates::utils::convert_mm_to_date(start_date_str);
-        println!("Maturity Date {:?}",maturity_date);
+        log::debug!("deposit maturity date {:?}", maturity_date);
         let mut deposit = Deposit {
             start_date: start_date,
             maturity_date: maturity_date,
@@ -212,7 +143,7 @@ pub fn process_contract(data: &Contract) -> serde_json::Value {
             _ => {}
         }
         let df = deposit.get_discount_factor();
-        println!("Discount Factor {:?}",df);
+        log::debug!("deposit discount factor {:?}", df);
         return serde_json::Value::String("Work in progress".to_string());
     }
     else{

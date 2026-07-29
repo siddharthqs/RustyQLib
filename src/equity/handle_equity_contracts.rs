@@ -27,7 +27,7 @@ pub fn handle_equity_contract(data: &Contract) -> serde_json::Value {
         }
     };
     if let Some(err) = &output.error {
-        eprintln!("contract error: {err}");
+        log::warn!("contract error: {err}");
     }
     let combined_ = CombinedContract { contract: data.clone(), output };
     serde_json::to_value(&combined_).expect("Failed to generate output")
@@ -38,20 +38,19 @@ fn price_equity_contract(data: &Contract) -> Result<ContractOutput, RustyQLibErr
         ProductData::Option(opt) => {
             let option = EquityOption::try_from_json(opt)?;
             let contract_output = ContractOutput::from(option.price()?);
-            println!("Theoretical Price ${}", contract_output.pv);
-            println!("Delta ${}", contract_output.delta);
+            log::debug!("option pv {} delta {}", contract_output.pv, contract_output.delta);
             Ok(contract_output)
         }
         ProductData::Future(fut) => {
             let future = EquityFuture::try_from_json(fut)?;
             let contract_output = ContractOutput::from(future.price()?);
-            println!("Equity Future Price: {}", contract_output.pv);
+            log::debug!("equity future pv {}", contract_output.pv);
             Ok(contract_output)
         }
         ProductData::Forward(forward) => {
             let future = EquityForward::try_from_json(forward)?;
             let contract_output = ContractOutput::from(future.price()?);
-            println!("Equity Forward Price: {}", contract_output.pv);
+            log::debug!("equity forward pv {}", contract_output.pv);
             Ok(contract_output)
         }
         ProductData::RainbowOption(rb) => {
@@ -60,28 +59,26 @@ fn price_equity_contract(data: &Contract) -> Result<ContractOutput, RustyQLibErr
             let mut contract_output = ContractOutput::from(option.price()?);
             contract_output.deltas = Some(option.deltas());
             contract_output.vegas = Some(option.vegas());
-            println!("Rainbow Option Price: {}", contract_output.pv);
+            log::debug!("rainbow option pv {}", contract_output.pv);
             Ok(contract_output)
         }
         ProductData::CliquetOption(cq) => {
             let cliquet = crate::equity::cliquet::Cliquet::try_from_json(cq)?;
             let contract_output = ContractOutput::from(cliquet.price()?);
-            println!("Cliquet Option Price: {}", contract_output.pv);
+            log::debug!("cliquet option pv {}", contract_output.pv);
             Ok(contract_output)
         }
         ProductData::Accumulator(acc) => {
             let accumulator = crate::equity::accumulator::Accumulator::try_from_json(acc)?;
             let contract_output = ContractOutput::from(accumulator.price()?);
-            println!("Accumulator Price: {}", contract_output.pv);
+            log::debug!("accumulator pv {}", contract_output.pv);
             Ok(contract_output)
         }
         ProductData::VarianceSwap(vs) => {
             let swap = crate::equity::variance_swap::VarianceSwap::try_from_json(vs)?;
-            // a variance swap is pure vega-family exposure: the fair strike
-            // diagnostics are reported through the print below
             let contract_output = ContractOutput::from(swap.price()?);
-            println!(
-                "Variance Swap MtM: {} (fair strike {:.4} vol)",
+            log::debug!(
+                "variance swap mtm {} (fair strike {:.4} vol)",
                 contract_output.pv,
                 swap.fair_remaining_variance.sqrt()
             );

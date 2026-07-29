@@ -6,8 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::io;
 use std::io::Write;
-use crate::equity::blackscholes;
-use crate::equity::montecarlo;
+use crate::utils::interactive;
 pub fn build_cli() -> Command {
     Command::new("RustyQLib Quant Library for Option Pricing")
         .version("0.0.2")
@@ -87,10 +86,7 @@ pub fn handle_build(matches: &ArgMatches) {
     measure_time("build_curve", || {
         let mut file = File::open(input_file).expect("Failed to open JSON file");
         parse_contracts::build_curve(&mut file, output_file);
-        println!("(Stub) build_curve from {}", input_file);
     });
-
-    // Save or do something with output_file if needed
 }
 
 /// Handle the "file" subcommand.
@@ -101,7 +97,6 @@ pub fn handle_file(matches: &ArgMatches) {
     measure_time("parse_contract (single file)", || {
         let mut file = File::open(input_file).expect("Failed to open JSON file");
         parse_contracts::parse_contract(&mut file, output_file);
-        println!("(Stub) parse_contract from {}", input_file);
     });
 }
 
@@ -135,10 +130,7 @@ pub fn handle_dir(matches: &ArgMatches) {
                 );
 
                 parse_contracts::parse_contract(&mut file, output_file_path.to_str().unwrap());
-                println!(
-                    "(Stub) parse_contract from {:?} -> {:?}",
-                    path, output_file_path
-                );
+                log::debug!("priced contracts {:?} -> {:?}", path, output_file_path);
             }
         }
     });
@@ -188,20 +180,13 @@ pub fn handle_interactive() {
                 };
 
                 match model_num {
-                    1 => {
-                        blackscholes::option_pricing();
-                        println!("(Stub) blackscholes::option_pricing()");
-                    }
-                    2 => {
-                        montecarlo::option_pricing();
-                        println!("(Stub) montecarlo::option_pricing()");
-                    }
+                    1 => interactive::black_scholes_pricing(),
+                    2 => interactive::monte_carlo_pricing(),
                     _ => println!("You gave a wrong number! Accepted arguments are 1 and 2."),
                 }
             }
             2 => {
-                blackscholes::implied_volatility();
-                println!("(Stub) blackscholes::implied_volatility()");
+                println!("Implied volatility calculation is not implemented yet.");
             }
             3 => {
                 println!("Exiting interactive mode...");
@@ -217,5 +202,5 @@ fn measure_time<F: FnOnce()>(label: &str, f: F) {
     let start_time = Instant::now();
     f();
     let elapsed_time = start_time.elapsed();
-    println!("Time taken for {}: {:?}", label, elapsed_time);
+    log::debug!("time taken for {}: {:?}", label, elapsed_time);
 }
