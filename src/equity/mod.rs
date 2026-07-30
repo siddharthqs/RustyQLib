@@ -12,6 +12,7 @@ pub mod cos;
 pub mod rainbow;
 pub mod vanilla_option;
 pub mod montecarlo;
+pub mod processes;
 pub mod forward_start_option;
 pub mod utils;
 pub mod binomial;

@@ -14,8 +14,10 @@
 //! `call = S e^{-qT} P1 - K e^{-rT} P2`, cash-or-nothing `= e^{-rT} P2`,
 //! asset-or-nothing `= S e^{-qT} P1`.
 //!
-//! Monte Carlo simulation lives in the Monte Carlo engine (full-truncation
-//! Euler; the Andersen QE scheme is the planned upgrade).
+//! Monte Carlo simulation lives in the Monte Carlo engine through
+//! [`HestonProcess`](crate::equity::processes::HestonProcess): Andersen
+//! QE with martingale correction by default, full-truncation Euler on
+//! request.
 
 use serde::{Deserialize, Serialize};
 

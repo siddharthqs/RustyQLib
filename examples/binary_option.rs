@@ -41,9 +41,9 @@ fn main() {
             common::section(&format!("{name} {pc:?}"));
             common::table_header();
             for (label, engine) in [
-                ("Analytical (closed form)", Engine::BlackScholes),
-                ("Binomial (1000 steps)", Engine::Binomial),
-                ("Finite difference", Engine::FiniteDifference),
+                //("Analytical (closed form)", Engine::BlackScholes),
+                //("Binomial (1000 steps)", Engine::Binomial),
+                //("Finite difference", Engine::FiniteDifference),
                 ("Monte Carlo (Sobol, 100k)", Engine::MonteCarlo),
             ] {
                 common::row(label, &base().binary(pc, binary_type, cash).engine(engine).build().expect("option must build"));
