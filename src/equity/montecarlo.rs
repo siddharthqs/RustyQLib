@@ -14,7 +14,9 @@
 //!   geometric control variate for arithmetic Asians.
 //! - American exercise via **two-pass Longstaff-Schwartz** (regression on
 //!   one set of paths, valuation on an independent set — removes foresight
-//!   bias) with a cubic polynomial basis.
+//!   bias) with a cubic polynomial basis; under Heston the paths and the
+//!   regression basis carry the `(spot, variance)` state, stepping the
+//!   Andersen QE scheme.
 //! - [`npv_with_stats`] reports the standard error alongside the price.
 //! - Greeks by central-difference bump-and-reprice with common random
 //!   numbers (deterministic draws make every reprice use identical paths).
@@ -1026,25 +1028,13 @@ fn lsmc_basis(x: f64) -> [f64; LSMC_BASIS] {
     [1.0, x, x * x, x * x * x]
 }
 
-/// Two-pass least-squares Monte Carlo (Longstaff-Schwartz):
-/// pass 1 fits the per-date continuation-value regressions on one set of
-/// paths; pass 2 applies the fitted exercise rule to an independent set,
-/// which removes the foresight (in-sample) bias of single-pass LSMC.
-/// Always uses pseudo-random per-path streams.
-fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
-    let cfg = option.mc_cfg();
-    if option.model .is_heston() {
-        panic!("Early exercise under the Heston model is not supported yet");
-    }
-    let steps = if cfg.time_steps > 1 { cfg.time_steps } else { LSMC_DEFAULT_STEPS }
-        .max(if option.model == Model::LocalVol { LOCAL_VOL_MIN_STEPS } else { 1 });
-    let dt = p.t / steps as f64;
-    // exercise rights per path index k (spot at time (k+1)dt): every step
-    // for American, only mapped steps for Bermudan
-    let allowed: Vec<bool> = match option.payoff.exercise_style() {
+/// Exercise rights per path index k (spot at time (k+1)dt): every step
+/// for American, only mapped steps for Bermudan.
+fn exercise_mask(option: &EquityOption, t: f64, steps: usize) -> Vec<bool> {
+    match option.payoff.exercise_style() {
         ContractStyle::Bermudan(times) => {
             let mut mask = vec![false; steps.saturating_sub(1)];
-            for g in crate::core::utils::times_to_grid_steps(times, p.t, steps) {
+            for g in crate::core::utils::times_to_grid_steps(times, t, steps) {
                 if g < steps {
                     mask[g - 1] = true;
                 }
@@ -1052,7 +1042,26 @@ fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
             mask
         }
         _ => vec![true; steps.saturating_sub(1)],
-    };
+    }
+}
+
+/// Two-pass least-squares Monte Carlo (Longstaff-Schwartz):
+/// pass 1 fits the per-date continuation-value regressions on one set of
+/// paths; pass 2 applies the fitted exercise rule to an independent set,
+/// which removes the foresight (in-sample) bias of single-pass LSMC.
+/// Always uses pseudo-random per-path streams. Heston takes its own
+/// route ([`heston_american_npv`]): the exercise decision there depends
+/// on the variance state, so both the paths and the regression basis are
+/// two-dimensional.
+fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
+    let cfg = option.mc_cfg();
+    if option.model.is_heston() {
+        return heston_american_npv(option, p);
+    }
+    let steps = if cfg.time_steps > 1 { cfg.time_steps } else { LSMC_DEFAULT_STEPS }
+        .max(if option.model == Model::LocalVol { LOCAL_VOL_MIN_STEPS } else { 1 });
+    let dt = p.t / steps as f64;
+    let allowed = exercise_mask(option, p.t, steps);
     let disc = exp(-p.r * dt);
     let process = bs_process(option, p);
     let seed_regression = cfg.seed ^ 0xA11C_E5ED;
@@ -1163,41 +1172,196 @@ fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     stats(sum, sum_sq, cfg.paths, steps, 0.0)
 }
 
-fn dot(a: &[f64; LSMC_BASIS], b: &[f64; LSMC_BASIS]) -> f64 {
+// ── American under Heston ───────────────────────────────────────────────
+
+const HESTON_LSMC_BASIS: usize = 6;
+
+/// Regression basis over the two-dimensional Heston state: cubic in the
+/// normalized spot plus the variance level and its spot cross term — the
+/// continuation value of an American option under stochastic vol depends
+/// on how much volatility is left, not just on where the spot is.
+fn heston_lsmc_basis(x: f64, v: f64) -> [f64; HESTON_LSMC_BASIS] {
+    [1.0, x, x * x, x * x * x, v, x * v]
+}
+
+/// Two-pass Longstaff-Schwartz under Heston dynamics, stepping the
+/// two-factor [`HestonProcess`] (Andersen QE-M under the default `Exact`
+/// scheme, full-truncation Euler otherwise) and regressing on the
+/// `(spot, variance)` state. Same structure as [`american_npv`]:
+/// regression pass on one set of antithetic pseudo-random paths,
+/// valuation pass on an independent set. QE's coarse-grid accuracy is
+/// what makes this affordable — the exercise grid (default
+/// [`LSMC_DEFAULT_STEPS`]) is all the resolution it needs, where
+/// full-truncation Euler must step at [`HESTON_MIN_STEPS`].
+fn heston_american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
+    let hp = option.heston_params().with_vol_shift(p.sigma - option.volatility());
+    let cfg = option.mc_cfg();
+    let scheme = match cfg.scheme {
+        DiscretizationScheme::Exact => HestonScheme::QuadraticExponential,
+        _ => HestonScheme::FullTruncation,
+    };
+    let floor = match scheme {
+        HestonScheme::QuadraticExponential => HESTON_QE_MIN_STEPS,
+        HestonScheme::FullTruncation => HESTON_MIN_STEPS,
+    };
+    let steps = if cfg.time_steps > 1 { cfg.time_steps } else { LSMC_DEFAULT_STEPS }.max(floor);
+    let dt = p.t / steps as f64;
+    let allowed = exercise_mask(option, p.t, steps);
+    let disc = exp(-p.r * dt);
+    let process = HestonProcess { drift_rate: p.r - p.q, params: hp, scheme };
+    let sqrt_dt = dt.sqrt();
+    let seed_regression = cfg.seed ^ 0xA11C_E5ED;
+    let seed_valuation = cfg.seed ^ 0xB0B5_1EED;
+
+    // fill one path's spot and (truncated) variance levels; antithetic
+    // pairs (2k, 2k+1) share a stream with negated draws, as everywhere
+    let simulate = |seed: u64, i: usize, z: &mut [f64], spots: &mut [f64], vars: &mut [f64]| {
+        path_normals(seed, (i / 2) as u64, z);
+        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let mut x = [p.s0, hp.v0];
+        let mut x_next = [0.0; 2];
+        for j in 0..steps {
+            let dw = [sign * sqrt_dt * z[2 * j], sign * sqrt_dt * z[2 * j + 1]];
+            process.evolve(j as f64 * dt, &x, dt, &dw, &mut x_next);
+            x = x_next;
+            spots[j] = x[0];
+            vars[j] = x[1].max(0.0);
+        }
+    };
+
+    // ── pass 1: simulate (S, v) paths and fit regressions backwards
+    let paths_sv: Vec<(Vec<f64>, Vec<f64>)> = (0..cfg.paths)
+        .into_par_iter()
+        .map_init(
+            || vec![0.0; 2 * steps],
+            |z, i| {
+                let mut spots = vec![0.0; steps];
+                let mut vars = vec![0.0; steps];
+                simulate(seed_regression, i, z, &mut spots, &mut vars);
+                (spots, vars)
+            },
+        )
+        .collect();
+
+    let mut cashflow: Vec<f64> = paths_sv
+        .iter()
+        .map(|(spots, _)| option.payoff.payoff(spots[steps - 1], p.strike))
+        .collect();
+    let mut betas: Vec<Option<[f64; HESTON_LSMC_BASIS]>> = vec![None; steps.saturating_sub(1)];
+    for step_idx in (0..steps - 1).rev() {
+        for cf in cashflow.iter_mut() {
+            *cf *= disc;
+        }
+        if !allowed[step_idx] {
+            continue;
+        }
+        let itm: Vec<usize> = (0..paths_sv.len())
+            .filter(|&i| option.payoff.payoff(paths_sv[i].0[step_idx], p.strike) > 0.0)
+            .collect();
+        if itm.len() < HESTON_LSMC_BASIS {
+            continue;
+        }
+        let rows: Vec<([f64; HESTON_LSMC_BASIS], f64)> = itm
+            .iter()
+            .map(|&i| {
+                let (spots, vars) = &paths_sv[i];
+                (heston_lsmc_basis(spots[step_idx] / p.s0, vars[step_idx]), cashflow[i])
+            })
+            .collect();
+        let Some(beta) = least_squares(&rows) else { continue };
+        for &i in &itm {
+            let (spots, vars) = &paths_sv[i];
+            let s = spots[step_idx];
+            let pay = option.payoff.payoff(s, p.strike);
+            let continuation = dot(&beta, &heston_lsmc_basis(s / p.s0, vars[step_idx]));
+            if pay > continuation {
+                cashflow[i] = pay;
+            }
+        }
+        betas[step_idx] = Some(beta);
+    }
+    drop(paths_sv);
+    drop(cashflow);
+
+    // ── pass 2: apply the fitted exercise rule to independent paths
+    let partials: Vec<(f64, f64)> = (0..cfg.paths.div_ceil(PATH_CHUNK))
+        .into_par_iter()
+        .map(|chunk| {
+            let mut z = vec![0.0; 2 * steps];
+            let mut spots = vec![0.0; steps];
+            let mut vars = vec![0.0; steps];
+            let (mut c_sum, mut c_sum_sq) = (0.0, 0.0);
+            for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
+                simulate(seed_valuation, i, &mut z, &mut spots, &mut vars);
+                let mut value = 0.0;
+                let mut exercised = false;
+                for k in 0..steps - 1 {
+                    let pay = option.payoff.payoff(spots[k], p.strike);
+                    if pay > 0.0 {
+                        if let Some(beta) = &betas[k] {
+                            let continuation =
+                                dot(beta, &heston_lsmc_basis(spots[k] / p.s0, vars[k]));
+                            if pay > continuation {
+                                value = pay * disc.powi(k as i32 + 1);
+                                exercised = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !exercised {
+                    value = option.payoff.payoff(spots[steps - 1], p.strike)
+                        * disc.powi(steps as i32);
+                }
+                c_sum += value;
+                c_sum_sq += value * value;
+            }
+            (c_sum, c_sum_sq)
+        })
+        .collect();
+    let (sum, sum_sq) = partials.into_iter().fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
+    stats(sum, sum_sq, cfg.paths, steps, 0.0)
+}
+
+fn dot<const K: usize>(a: &[f64; K], b: &[f64; K]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Least squares via the normal equations with partial-pivot Gaussian
-/// elimination; None if (near-)singular.
-fn least_squares(rows: &[([f64; LSMC_BASIS], f64)]) -> Option<[f64; LSMC_BASIS]> {
-    let k = LSMC_BASIS;
-    let mut m = [[0.0; LSMC_BASIS + 1]; LSMC_BASIS];
+/// elimination; None if (near-)singular. Generic over the basis size so
+/// the one-dimensional (spot) and Heston (spot, variance) regressions
+/// share it.
+fn least_squares<const K: usize>(rows: &[([f64; K], f64)]) -> Option<[f64; K]> {
+    let mut m = [[0.0; K]; K];
+    let mut rhs = [0.0; K];
     for (basis, y) in rows {
-        for i in 0..k {
-            for j in 0..k {
+        for i in 0..K {
+            for j in 0..K {
                 m[i][j] += basis[i] * basis[j];
             }
-            m[i][k] += basis[i] * y;
+            rhs[i] += basis[i] * y;
         }
     }
-    for col in 0..k {
+    for col in 0..K {
         let pivot =
-            (col..k).max_by(|&i, &j| m[i][col].abs().partial_cmp(&m[j][col].abs()).unwrap())?;
+            (col..K).max_by(|&i, &j| m[i][col].abs().partial_cmp(&m[j][col].abs()).unwrap())?;
         if m[pivot][col].abs() < 1e-10 {
             return None;
         }
         m.swap(col, pivot);
-        for row in col + 1..k {
+        rhs.swap(col, pivot);
+        for row in col + 1..K {
             let f = m[row][col] / m[col][col];
-            for c in col..=k {
+            for c in col..K {
                 m[row][c] -= f * m[col][c];
             }
+            rhs[row] -= f * rhs[col];
         }
     }
-    let mut beta = [0.0; LSMC_BASIS];
-    for row in (0..k).rev() {
-        let mut acc = m[row][k];
-        for c in row + 1..k {
+    let mut beta = [0.0; K];
+    for row in (0..K).rev() {
+        let mut acc = rhs[row];
+        for c in row + 1..K {
             acc -= m[row][c] * beta[c];
         }
         beta[row] = acc / m[row][row];

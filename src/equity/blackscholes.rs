@@ -2276,6 +2276,53 @@ mod tests {
         assert!(asian_price > 0.0 && asian_price < vanilla);
     }
 
+    fn heston_american_put() -> Box<dyn Payoff> {
+        Box::new(VanillaPayoff {
+            put_or_call: PutOrCall::Put,
+            exercise_style: ContractStyle::American,
+        })
+    }
+
+    #[test]
+    fn heston_american_put_degenerates_to_the_lattice_price() {
+        // vol_of_vol -> 0 with v0 = theta = sigma^2: the dynamics collapse
+        // to GBM, so the (S, v)-basis LSMC on QE paths must reproduce the
+        // binomial American price at sigma = 30%
+        let mut lattice = test_option_with(heston_american_put(), flat_5pct());
+        lattice.market.dividend_yield = 0.02;
+        lattice.engine = crate::equity::utils::PricingEngine::from_kind(Engine::Binomial);
+        let reference = lattice.npv();
+
+        let mut mc = heston_option(heston_american_put());
+        mc.model = crate::equity::utils::Model::Heston(crate::equity::heston::HestonParams {
+            v0: 0.09,
+            kappa: 1.0,
+            theta: 0.09,
+            vol_of_vol: 1e-3,
+            rho: 0.0,
+        });
+        mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc.mc_cfg_mut().paths = 50_000;
+        let lsmc = mc.npv();
+        // two-pass LSMC is slightly low-biased (suboptimal fitted rule)
+        // on top of sampler noise
+        assert!((lsmc - reference).abs() < 0.2, "lsmc={lsmc} lattice={reference}");
+    }
+
+    #[test]
+    fn heston_american_put_carries_an_early_exercise_premium() {
+        // r > q: the American put must be worth strictly more than the
+        // semi-analytic European under the same (full-strength) dynamics
+        let european = heston_vanilla(PutOrCall::Put).npv();
+        let mut american = heston_option(heston_american_put());
+        american.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        american.mc_cfg_mut().paths = 50_000;
+        let am = american.npv();
+        assert!(am > european + 0.05, "american={am} european={european}");
+        // sanity ceiling: the premium is a fraction of the option value
+        assert!(am - european < 3.0, "american={am} european={european}");
+    }
+
     // ── Borrow cost and dividends ───────────────────────────────────────
 
     #[test]
