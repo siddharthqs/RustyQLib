@@ -136,6 +136,7 @@ pub enum PayoffType {
     ForwardStart,
     Autocallable,
     Lookback,
+    Accumulator,
 }
 impl FromStr for PayoffType {
     type Err = Box<dyn Error>;

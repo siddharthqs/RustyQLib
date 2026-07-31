@@ -125,6 +125,9 @@ pub enum CurveError {
     NonPositiveTime(f64),
     NonIncreasingTimes,
     InvalidForwardPeriod { t1: f64, t2: f64 },
+    /// Two key-rate bump tenors resolve to the same curve pillar (they are
+    /// closer together than twice [`KEY_RATE_TENOR_TOLERANCE`]).
+    TenorCollision { t1: f64, t2: f64 },
 }
 
 impl fmt::Display for CurveError {
@@ -139,6 +142,9 @@ impl fmt::Display for CurveError {
             CurveError::NonIncreasingTimes => write!(f, "pillar times must be strictly increasing"),
             CurveError::InvalidForwardPeriod { t1, t2 } => {
                 write!(f, "forward period requires t2 > t1 >= 0, got t1={t1}, t2={t2}")
+            }
+            CurveError::TenorCollision { t1, t2 } => {
+                write!(f, "bump tenors {t1} and {t2} resolve to the same curve pillar")
             }
         }
     }
@@ -157,17 +163,40 @@ pub struct CurvePillar {
     pub zero_rate: f64,
 }
 
-/// A shift applied to a whole curve by [`YieldCurve::bumped`]. Shifts act
-/// on the **continuously compounded zero rates** (the curve's discount
-/// factors are re-derived exactly), independent of the curve's quoting
-/// convention.
+/// One inter-pillar segment and its discrete continuously compounded
+/// forward rate, as reported by [`YieldCurve::min_forward`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ForwardSegment {
+    pub t1: f64,
+    pub t2: f64,
+    pub forward: f64,
+}
+
+/// A shift applied to a curve by [`YieldCurve::bumped`]. Shifts act on the
+/// **continuously compounded zero rates** (the curve's discount factors
+/// are re-derived exactly), independent of the curve's quoting convention.
+#[derive(Debug, Clone, PartialEq)]
 pub enum RateShift {
     /// Add `d` to every continuous zero rate (e.g. `0.0001` = +1bp).
     ParallelAbsolute(f64),
     /// Scale every continuous zero rate by `1 + r`.
     ParallelRelative(f64),
+    /// Key-rate bump: add `shifts[i]` to the continuous zero rate at pillar
+    /// `tenors[i]` (year fractions, strictly increasing). Each tenor reuses
+    /// the nearest existing pillar within [`KEY_RATE_TENOR_TOLERANCE`];
+    /// otherwise a pillar is inserted on the base curve first, so the bump
+    /// is represented exactly. Off-pillar shape follows the curve's own
+    /// interpolation — no separate shift interpolation exists — which makes
+    /// node bumps exactly additive: single-tenor bumps over the full pillar
+    /// set sum to the parallel bump to machine precision.
+    KeyRateAbsolute { tenors: Vec<f64>, shifts: Vec<f64> },
 }
+
+/// A bump tenor within this distance (in years, ~3.7 days) of an existing
+/// pillar reuses that pillar; farther away, a new pillar is inserted.
+/// Prevents needle-thin tents when date-built pillars sit at times like
+/// `1.0027` and the bump asks for `1.0`.
+pub const KEY_RATE_TENOR_TOLERANCE: f64 = 0.01;
 
 /// A canonical discount curve anchored at `reference_date`.
 ///
@@ -314,19 +343,72 @@ impl YieldCurve {
     }
 
     /// This curve with `shift` applied to its continuous zero rates.
-    /// The discount factors are re-derived exactly at every pillar:
+    /// The discount factors are re-derived exactly at the affected pillars:
     /// `z -> z + d` gives `df -> df * exp(-d*t)`, `z -> z*(1+r)` gives
-    /// `df -> df^(1+r)`. Pillars, day count, quoting convention and
-    /// interpolation are unchanged; `df(0) = 1` is preserved.
-    pub fn bumped(&self, shift: RateShift) -> YieldCurve {
+    /// `df -> df^(1+r)`. Day count, quoting convention and interpolation
+    /// are unchanged; `df(0) = 1` is preserved. A key-rate shift may add
+    /// pillars (see [`RateShift::KeyRateAbsolute`]); parallel shifts never
+    /// do. Errors only on a malformed key-rate shift.
+    pub fn bumped(&self, shift: &RateShift) -> Result<YieldCurve, CurveError> {
         let mut bumped = self.clone();
-        for (df, &t) in bumped.dfs.iter_mut().zip(self.times.iter()) {
-            *df = match shift {
-                RateShift::ParallelAbsolute(d) => *df * (-d * t).exp(),
-                RateShift::ParallelRelative(r) => df.powf(1.0 + r),
-            };
+        match shift {
+            RateShift::ParallelAbsolute(d) => {
+                for (df, &t) in bumped.dfs.iter_mut().zip(self.times.iter()) {
+                    *df *= (-d * t).exp();
+                }
+            }
+            RateShift::ParallelRelative(r) => {
+                for df in bumped.dfs.iter_mut() {
+                    *df = df.powf(1.0 + r);
+                }
+            }
+            RateShift::KeyRateAbsolute { tenors, shifts } => {
+                Self::validate_key_rate(tenors, shifts)?;
+                // Pass 1: give every bump tenor a pillar. Missing ones are
+                // inserted with the *base* curve's df — both interpolation
+                // methods are piecewise linear in a transform, so inserting
+                // an on-curve point leaves df(t) unchanged everywhere.
+                let mut targets: Vec<usize> = Vec::with_capacity(tenors.len());
+                let mut prev: Option<(usize, f64)> = None;
+                for &tenor in tenors {
+                    let idx = match bumped.nearest_pillar(tenor) {
+                        Some(i) => i,
+                        None => bumped.insert_pillar(tenor, self.df(tenor)),
+                    };
+                    if let Some((prev_idx, prev_tenor)) = prev {
+                        if idx <= prev_idx {
+                            return Err(CurveError::TenorCollision { t1: prev_tenor, t2: tenor });
+                        }
+                    }
+                    prev = Some((idx, tenor));
+                    targets.push(idx);
+                }
+                // Pass 2: shift each target pillar's continuous zero.
+                for (&idx, &d) in targets.iter().zip(shifts) {
+                    bumped.dfs[idx] *= (-d * bumped.times[idx]).exp();
+                }
+            }
         }
-        bumped
+        Ok(bumped)
+    }
+
+    /// The inter-pillar segment with the smallest discrete continuous
+    /// forward `ln(df(t1)/df(t2)) / (t2 - t1)` — the no-arbitrage
+    /// diagnostic: a value below zero means the discount factors increase
+    /// somewhere. Checking consecutive pillars suffices: under
+    /// [`InterpolationMethod::LogLinearDf`] this *is* the instantaneous
+    /// forward on the segment; under `LinearZero` it is the segment
+    /// average. The first segment starts at the `t = 0` anchor.
+    pub fn min_forward(&self) -> ForwardSegment {
+        let mut worst = ForwardSegment { t1: 0.0, t2: 0.0, forward: f64::INFINITY };
+        for i in 0..self.times.len() - 1 {
+            let (t1, t2) = (self.times[i], self.times[i + 1]);
+            let forward = (self.dfs[i] / self.dfs[i + 1]).ln() / (t2 - t1);
+            if forward < worst.forward {
+                worst = ForwardSegment { t1, t2, forward };
+            }
+        }
+        worst
     }
 
     // ── Queries ─────────────────────────────────────────────────────────
@@ -436,6 +518,49 @@ impl YieldCurve {
         -self.dfs[i].ln() / self.times[i]
     }
 
+    fn validate_key_rate(tenors: &[f64], shifts: &[f64]) -> Result<(), CurveError> {
+        if tenors.is_empty() {
+            return Err(CurveError::Empty);
+        }
+        if tenors.len() != shifts.len() {
+            return Err(CurveError::LengthMismatch { tenors: tenors.len(), values: shifts.len() });
+        }
+        for &t in tenors {
+            if t <= 0.0 {
+                return Err(CurveError::NonPositiveTime(t));
+            }
+        }
+        if tenors.windows(2).any(|w| w[1] <= w[0]) {
+            return Err(CurveError::NonIncreasingTimes);
+        }
+        Ok(())
+    }
+
+    /// The real pillar (index >= 1, never the t=0 anchor) nearest to `t`
+    /// within [`KEY_RATE_TENOR_TOLERANCE`], if any.
+    fn nearest_pillar(&self, t: f64) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for i in 1..self.times.len() {
+            let dist = (self.times[i] - t).abs();
+            if dist <= KEY_RATE_TENOR_TOLERANCE
+                && best.map_or(true, |j| dist < (self.times[j] - t).abs())
+            {
+                best = Some(i);
+            }
+        }
+        best
+    }
+
+    /// Insert a pillar at time `t` with discount factor `df`, keeping the
+    /// grids sorted; returns its index. The date is unknown (`None`).
+    fn insert_pillar(&mut self, t: f64, df: f64) -> usize {
+        let idx = self.times.partition_point(|&x| x < t);
+        self.times.insert(idx, t);
+        self.dfs.insert(idx, df);
+        self.dates.insert(idx, None);
+        idx
+    }
+
     fn resolve_tenors(
         tenors: &[Tenor],
         reference_date: NaiveDate,
@@ -504,6 +629,12 @@ impl fmt::Display for YieldCurve {
             let date = p.date.map_or_else(|| "-".to_string(), |d| d.to_string());
             writeln!(f, "{:>12} {:>12.6} {:>12.8} {:>12.6}", date, p.time, p.df, p.zero_rate)?;
         }
+        let worst = self.min_forward();
+        writeln!(
+            f,
+            "min forward (cont): {:.6} on [{:.4}, {:.4}]",
+            worst.forward, worst.t1, worst.t2
+        )?;
         Ok(())
     }
 }
@@ -523,7 +654,7 @@ mod tests {
     #[test]
     fn bumped_shifts_continuous_zeros_exactly() {
         let curve = flat_5pct();
-        let up = curve.bumped(RateShift::ParallelAbsolute(0.01));
+        let up = curve.bumped(&RateShift::ParallelAbsolute(0.01)).unwrap();
         for t in [0.1, 1.0, 4.2, 10.0, 30.0, 60.0] {
             // +100bp on a 5% flat curve = a 6% flat curve, including extrapolation
             assert!(
@@ -534,11 +665,145 @@ mod tests {
             assert!((up.zero_rate_with(t, Compounding::Continuous) - 0.06).abs() < 1e-12);
         }
         // relative: zeros scale, 5% * 1.2 = 6%
-        let scaled = curve.bumped(RateShift::ParallelRelative(0.20));
+        let scaled = curve.bumped(&RateShift::ParallelRelative(0.20)).unwrap();
         assert!((scaled.zero_rate_with(1.0, Compounding::Continuous) - 0.06).abs() < 1e-12);
         // df(0) = 1 preserved, original untouched
         assert_eq!(up.df(0.0), 1.0);
         assert!((curve.zero_rate_with(1.0, Compounding::Continuous) - 0.05).abs() < 1e-12);
+    }
+
+    fn key_rate(tenors: &[f64], shifts: &[f64]) -> RateShift {
+        RateShift::KeyRateAbsolute { tenors: tenors.to_vec(), shifts: shifts.to_vec() }
+    }
+
+    #[test]
+    fn key_rate_bump_moves_target_pillar_and_decays_to_neighbours() {
+        let curve = flat_5pct();
+        let up = curve.bumped(&key_rate(&[2.0], &[0.01])).unwrap();
+        let z = |c: &YieldCurve, t: f64| c.zero_rate_with(t, Compounding::Continuous);
+        // full bump at the target pillar, neighbours (1y, 3y pillars) untouched
+        assert!((z(&up, 2.0) - 0.06).abs() < 1e-12);
+        assert!((z(&up, 1.0) - 0.05).abs() < 1e-12);
+        assert!((z(&up, 3.0) - 0.05).abs() < 1e-12);
+        // strictly between: partial bump, shaped by the curve interpolation
+        let mid = z(&up, 2.5);
+        assert!(mid > 0.05 + 1e-6 && mid < 0.06 - 1e-6, "mid-tent zero {mid}");
+        // pillar count unchanged: 2.0 is an existing grid point
+        assert_eq!(up.pillars().len(), curve.pillars().len());
+    }
+
+    #[test]
+    fn key_rate_plateau_between_equally_bumped_tenors() {
+        let curve = flat_5pct();
+        let up = curve.bumped(&key_rate(&[1.0, 2.0], &[0.005, 0.005])).unwrap();
+        // interior of [1y, 2y] carries exactly the full bump (log-linear df
+        // interpolation is linear in z*t, so equal node bumps lerp exactly)
+        for t in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            assert!(
+                (up.zero_rate_with(t, Compounding::Continuous) - 0.055).abs() < 1e-12,
+                "plateau broken at t={t}"
+            );
+        }
+        // decays outside toward the adjacent unbumped pillars (0.5y, 3y)
+        assert!((up.zero_rate_with(0.5, Compounding::Continuous) - 0.05).abs() < 1e-12);
+        assert!((up.zero_rate_with(3.0, Compounding::Continuous) - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn key_rate_bumps_sum_exactly_to_parallel() {
+        let curve = flat_5pct();
+        let d = 0.0025;
+        let pillar_times: Vec<f64> = curve.pillars().iter().map(|p| p.time).collect();
+        // apply single-tenor bumps successively: composition = sum, since
+        // each bump touches only its own pillar
+        let mut laddered = curve.clone();
+        for &t in &pillar_times {
+            laddered = laddered.bumped(&key_rate(&[t], &[d])).unwrap();
+        }
+        let parallel = curve.bumped(&RateShift::ParallelAbsolute(d)).unwrap();
+        for t in [0.1, 0.7, 1.0, 2.5, 9.0, 30.0, 55.0] {
+            assert!(
+                (laddered.df(t) - parallel.df(t)).abs() < 1e-14,
+                "ladder != parallel at t={t}: {} vs {}",
+                laddered.df(t),
+                parallel.df(t)
+            );
+        }
+    }
+
+    #[test]
+    fn key_rate_tenor_off_grid_inserts_a_pillar_exactly() {
+        let curve = flat_5pct();
+        let up = curve.bumped(&key_rate(&[1.5], &[0.01])).unwrap();
+        assert_eq!(up.pillars().len(), curve.pillars().len() + 1);
+        // the inserted pillar carries base + bump exactly; grid pillars around
+        // it are untouched
+        assert!((up.zero_rate_with(1.5, Compounding::Continuous) - 0.06).abs() < 1e-12);
+        assert!((up.zero_rate_with(1.0, Compounding::Continuous) - 0.05).abs() < 1e-12);
+        assert!((up.zero_rate_with(2.0, Compounding::Continuous) - 0.05).abs() < 1e-12);
+        // a zero-size bump at an off-grid tenor reproduces the base curve
+        let noop = curve.bumped(&key_rate(&[1.5], &[0.0])).unwrap();
+        for t in [0.3, 1.2, 1.5, 1.9, 4.0] {
+            assert!((noop.df(t) - curve.df(t)).abs() < 1e-15, "insertion changed df({t})");
+        }
+    }
+
+    #[test]
+    fn key_rate_tolerance_matches_nearby_pillar_instead_of_inserting() {
+        // date-built pillar at 367/365 ≈ 1.0055; a 1.0 bump tenor must reuse it
+        let pillar_date = NaiveDate::from_ymd_opt(2027, 7, 18).unwrap(); // 367 days
+        let curve = YieldCurve::from_zero_rates(
+            &[Tenor::Date(pillar_date), Tenor::YearFraction(2.0)],
+            &[0.05, 0.05],
+            asof(),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+            InterpolationMethod::LogLinearDf,
+        )
+        .unwrap();
+        let up = curve.bumped(&key_rate(&[1.0], &[0.01])).unwrap();
+        assert_eq!(up.pillars().len(), curve.pillars().len(), "must not insert");
+        let t_pillar = 367.0 / 365.0;
+        assert!((up.zero_rate_with(t_pillar, Compounding::Continuous) - 0.06).abs() < 1e-12);
+    }
+
+    #[test]
+    fn key_rate_validation_errors() {
+        let curve = flat_5pct();
+        assert_eq!(curve.bumped(&key_rate(&[], &[])).unwrap_err(), CurveError::Empty);
+        assert!(matches!(
+            curve.bumped(&key_rate(&[1.0], &[0.01, 0.02])).unwrap_err(),
+            CurveError::LengthMismatch { .. }
+        ));
+        assert!(matches!(
+            curve.bumped(&key_rate(&[-1.0], &[0.01])).unwrap_err(),
+            CurveError::NonPositiveTime(_)
+        ));
+        assert_eq!(
+            curve.bumped(&key_rate(&[2.0, 1.0], &[0.01, 0.01])).unwrap_err(),
+            CurveError::NonIncreasingTimes
+        );
+        // 1.0 and 1.005 both resolve to the 1y pillar
+        assert!(matches!(
+            curve.bumped(&key_rate(&[1.0, 1.005], &[0.01, 0.01])).unwrap_err(),
+            CurveError::TenorCollision { .. }
+        ));
+    }
+
+    #[test]
+    fn min_forward_flags_negative_forwards_from_a_hard_down_bump() {
+        let curve = flat_5pct();
+        assert!((curve.min_forward().forward - 0.05).abs() < 1e-10, "flat curve forward");
+        // -200bp at 10y: the zero bump amplifies into the preceding forward
+        // by t/dt = 10/3 => forward 5% - 2%*10/3 < 0 on [7, 10]
+        let down = curve.bumped(&key_rate(&[10.0], &[-0.02])).unwrap();
+        let worst = down.min_forward();
+        assert!(worst.forward < 0.0, "expected negative forward, got {}", worst.forward);
+        assert!((worst.t1 - 7.0).abs() < 1e-12 && (worst.t2 - 10.0).abs() < 1e-12);
+        // the same size at the short end stays arbitrage-free: entering the
+        // [1y, 2y] plateau costs only d * t/dt = 2% * 1/0.5 = 4% < 5%
+        let gentle = curve.bumped(&key_rate(&[1.0, 2.0], &[-0.02, -0.02])).unwrap();
+        assert!(gentle.min_forward().forward > 0.0, "got {:?}", gentle.min_forward());
     }
 
     #[test]

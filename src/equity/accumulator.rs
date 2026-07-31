@@ -266,6 +266,99 @@ impl Accumulator {
     }
 }
 
+/// The accumulator as a mainline [`Payoff`], pricing inside
+/// [`EquityOption`](crate::equity::vanilla_option::EquityOption) on the
+/// shared Monte Carlo engine (GBM, local vol and Heston via QE-M) — which
+/// gives it the market context for free: `snapshot_market`/`npv_in`
+/// rebinding, portfolio membership and the stress runner. The strike is
+/// the contract's `strike_price`; spot, curve and surface come from the
+/// bound market. The standalone [`Accumulator`] remains the closed-form
+/// (continuously monitored) validation reference.
+///
+/// Cash flows land on their own observation dates, so like
+/// [`AutocallablePayoff`](crate::equity::autocallable::AutocallablePayoff)
+/// it is valued per path through [`path_value`](Self::path_value) with
+/// per-date discount factors, not through `path_payoff`.
+#[derive(Debug, Clone)]
+pub struct AccumulatorPayoff {
+    pub exercise_style: crate::core::utils::ContractStyle,
+    pub side: AccumulatorSide,
+    /// Knock-out level (above spot for accumulators, below for
+    /// decumulators; enforced at build).
+    pub barrier: f64,
+    /// Equally spaced observation days over the life (last = maturity).
+    pub observations: usize,
+    pub shares_per_day: f64,
+    /// Quantity multiplier on the adverse side (2 = classic double-up).
+    pub gearing: f64,
+}
+
+impl AccumulatorPayoff {
+    /// Value of one simulated path: daily accrual `q [ (S_i - K)+ -
+    /// gearing (K - S_i)+ ]` (mirrored for decumulators), each day
+    /// discounted on its own date, stopping — without accruing — on the
+    /// first observation at or through the knock-out. `obs_idx` maps
+    /// observation m to its path step; `dfs[m]` discounts its date.
+    pub fn path_value(&self, path: &[f64], obs_idx: &[usize], dfs: &[f64], strike: f64) -> f64 {
+        let mut value = 0.0;
+        for (m, &idx) in obs_idx.iter().enumerate() {
+            let s = path[idx];
+            let (knocked, day) = match self.side {
+                AccumulatorSide::Accumulator => (
+                    s >= self.barrier,
+                    (s - strike).max(0.0) - self.gearing * (strike - s).max(0.0),
+                ),
+                AccumulatorSide::Decumulator => (
+                    s <= self.barrier,
+                    (strike - s).max(0.0) - self.gearing * (s - strike).max(0.0),
+                ),
+            };
+            if knocked {
+                break;
+            }
+            value += self.shares_per_day * day * dfs[m];
+        }
+        value
+    }
+}
+
+impl crate::equity::utils::Payoff for AccumulatorPayoff {
+    /// Degenerate single-point value: zero (all value is schedule- and
+    /// path-dependent).
+    fn payoff(&self, _spot: f64, _strike: f64) -> f64 {
+        0.0
+    }
+    fn path_payoff(&self, _path: &[f64], _strike: f64) -> f64 {
+        panic!(
+            "Accumulators pay at multiple dates and cannot be valued through \
+             path_payoff; the Monte Carlo engine prices them via path_value"
+        );
+    }
+    fn is_path_dependent(&self) -> bool {
+        true
+    }
+    fn payoff_kind(&self) -> crate::equity::utils::PayoffType {
+        crate::equity::utils::PayoffType::Accumulator
+    }
+    fn put_or_call(&self) -> &crate::core::trade::PutOrCall {
+        // the holder's daily optionality is call-shaped for accumulators
+        // (buy below), put-shaped for decumulators; not used by pricing
+        match self.side {
+            AccumulatorSide::Accumulator => &crate::core::trade::PutOrCall::Call,
+            AccumulatorSide::Decumulator => &crate::core::trade::PutOrCall::Put,
+        }
+    }
+    fn exercise_style(&self) -> &crate::core::utils::ContractStyle {
+        &self.exercise_style
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn crate::equity::utils::Payoff> {
+        Box::new(self.clone())
+    }
+}
+
 impl Instrument for Accumulator {
     fn try_npv(&self) -> Result<f64, RustyQLibError> {
         Ok(self.price()?.pv)
@@ -410,6 +503,220 @@ mod tests {
         let mut vol = base();
         vol.sigma = 0.40;
         assert!(vol.analytic_npv() < baseline, "accumulator holder is short vol");
+    }
+
+    // ── the mainline payoff: EquityOption integration ───────────────────
+
+    use crate::core::market::{BumpMode, RiskFactor, Shock};
+    use crate::core::utils::ContractStyle;
+    use crate::equity::builder::EquityOptionBuilder;
+    use crate::equity::portfolio::EquityPortfolio;
+    use crate::equity::utils::Engine;
+    use crate::equity::vanilla_option::EquityOption;
+    use crate::risk::stress::{stress_mtm, ArbitrageCheck, StressConfig, StressScenario};
+
+    fn payoff() -> AccumulatorPayoff {
+        AccumulatorPayoff {
+            exercise_style: ContractStyle::European,
+            side: AccumulatorSide::Accumulator,
+            barrier: 110.0,
+            observations: 4,
+            shares_per_day: 1.0,
+            gearing: 2.0,
+        }
+    }
+
+    fn option_accumulator(observations: usize, paths: usize) -> EquityOption {
+        // the builder twin of `base()`: same market and contract terms
+        EquityOptionBuilder::new()
+            .symbol("ACCU")
+            .spot(100.0)
+            .strike(95.0)
+            .flat_vol(0.25)
+            .flat_rate(0.03)
+            .dividend_yield(0.01)
+            .years_to_maturity(1.0)
+            .accumulator(110.0, observations, 1.0, 2.0)
+            .engine(Engine::MonteCarlo)
+            .paths(paths)
+            .seed(42)
+            .build()
+            .expect("accumulator option must build")
+    }
+
+    #[test]
+    fn payoff_accrues_daily_and_stops_without_accruing_at_knockout() {
+        let accu = payoff();
+        let obs_idx = [0, 1, 2, 3];
+        let dfs = [0.99, 0.98, 0.97, 0.96];
+        // day 1: +5; day 2: 0 - 2*(95-94) = -2 (geared); day 3: knocked
+        // at 112 >= 110 with no accrual; day 4 never reached
+        let path = [100.0, 94.0, 112.0, 120.0];
+        let value = accu.path_value(&path, &obs_idx, &dfs, 95.0);
+        assert!((value - (5.0 * 0.99 - 2.0 * 0.98)).abs() < 1e-12, "{value}");
+        // the decumulator mirrors: sell at 105, geared above, KO below 90
+        let mut decu = payoff();
+        decu.side = AccumulatorSide::Decumulator;
+        decu.barrier = 90.0;
+        // day 1: (105-100)=+5; day 2: 0 - 2*(112-105) = -14; day 3: 89 knocks
+        let path = [100.0, 112.0, 89.0, 80.0];
+        let value = decu.path_value(&path, &obs_idx, &dfs, 105.0);
+        assert!((value - (5.0 * 0.99 - 14.0 * 0.98)).abs() < 1e-12, "{value}");
+        // shares_per_day scales linearly
+        let mut sized = payoff();
+        sized.shares_per_day = 100.0;
+        let path = [100.0, 94.0, 112.0, 120.0];
+        let value = sized.path_value(&path, &obs_idx, &dfs, 95.0);
+        assert!((value - 100.0 * (5.0 * 0.99 - 2.0 * 0.98)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn equity_option_route_tracks_the_standalone_reference() {
+        // same contract on both routes: the standalone continuous-KO strip
+        // vs the engine's discretely monitored Monte Carlo (Sobol, 252
+        // observations) — same tolerance shape as the standalone MC test
+        let reference = base().analytic_npv();
+        let mc = option_accumulator(252, 20_000).npv();
+        assert!(
+            (mc - reference).abs() < 0.05 * reference.abs().max(5.0) + 0.5,
+            "engine mc {mc} vs standalone analytic {reference}"
+        );
+        // direction of the monitoring gap: discrete KO survives longer,
+        // and for the GEARED holder living longer is worse (the same
+        // toxic-tail economics as `risk_features_move_the_price_the_right
+        // _way`: a tighter/earlier knock-out helps) — so the discretely
+        // monitored value sits at or below the continuous strip
+        assert!(mc < reference + 1.0, "discrete KO {mc} vs continuous {reference}");
+    }
+
+    #[test]
+    fn accumulator_reprices_in_the_market_context_and_stresses_sensibly() {
+        let option = option_accumulator(12, 8_000);
+        // snapshot / rebind parity is exact: the engine is seeded
+        let market = option.snapshot_market();
+        let direct = option.npv();
+        let rebound = option.npv_in(&market).expect("must reprice");
+        assert!((rebound - direct).abs() < 1e-12, "rebound {rebound} direct {direct}");
+
+        // and the whole point of the migration: the stress runner sees it
+        let mut book = EquityPortfolio::new();
+        book.add(option, 1.0);
+        let config = StressConfig {
+            scenarios: vec![
+                StressScenario {
+                    name: "crash".into(),
+                    shocks: vec![Shock {
+                        factor: RiskFactor::Spot,
+                        mode: BumpMode::Relative,
+                        size: -0.20,
+                        underlying: None,
+                        tenors: None,
+                        shifts: None,
+                    }],
+                },
+                StressScenario {
+                    name: "vols_up".into(),
+                    shocks: vec![Shock {
+                        factor: RiskFactor::Vol,
+                        mode: BumpMode::Absolute,
+                        size: 0.10,
+                        underlying: None,
+                        tenors: None,
+                        shifts: None,
+                    }],
+                },
+            ],
+            arbitrage: ArbitrageCheck::default(),
+        };
+        let results = stress_mtm(&book, &config).expect("stress must run");
+        // spot -20% through the geared strike is the toxic scenario
+        assert!(results[0].stress_pnl < 0.0, "crash pnl {:?}", results[0].stress_pnl);
+        // the geared holder is short vol (short the wings)
+        assert!(results[1].stress_pnl < 0.0, "vol pnl {:?}", results[1].stress_pnl);
+        // labels identify the product in reports
+        assert!(results[0].trades[0].label.contains("Accumulator"), "{}", results[0].trades[0].label);
+    }
+
+    #[test]
+    fn heston_route_degenerates_to_gbm_when_vol_of_vol_vanishes() {
+        // v0 = theta = 0.25^2 and vanishing vol-of-vol: the QE-M paths
+        // are (near) constant-variance, so the Heston route must land on
+        // the GBM route's value up to sampler differences
+        let gbm = option_accumulator(12, 8_000).npv();
+        let heston = EquityOptionBuilder::new()
+            .symbol("ACCU")
+            .spot(100.0)
+            .strike(95.0)
+            .flat_rate(0.03)
+            .dividend_yield(0.01)
+            .years_to_maturity(1.0)
+            .accumulator(110.0, 12, 1.0, 2.0)
+            .heston(crate::equity::heston::HestonParams {
+                v0: 0.0625,
+                kappa: 2.0,
+                theta: 0.0625,
+                vol_of_vol: 1e-4,
+                rho: 0.0,
+            })
+            .engine(Engine::MonteCarlo)
+            .paths(8_000)
+            .seed(42)
+            .build()
+            .expect("heston accumulator must build")
+            .npv();
+        assert!(
+            (heston - gbm).abs() < 0.05 * gbm.abs().max(5.0),
+            "heston {heston} vs gbm {gbm}"
+        );
+    }
+
+    #[test]
+    fn builder_validates_sides_and_engine_support() {
+        let build = |barrier: f64| {
+            EquityOptionBuilder::new()
+                .symbol("ACCU")
+                .spot(100.0)
+                .strike(95.0)
+                .flat_vol(0.25)
+                .flat_rate(0.03)
+                .years_to_maturity(1.0)
+                .accumulator(barrier, 12, 1.0, 2.0)
+                .engine(Engine::MonteCarlo)
+                .build()
+        };
+        // accumulator knock-out below the spot is rejected
+        assert!(build(90.0).is_err());
+        assert!(build(110.0).is_ok());
+        // decumulator mirrored
+        let decu = EquityOptionBuilder::new()
+            .symbol("ACCU")
+            .spot(100.0)
+            .strike(105.0)
+            .flat_vol(0.25)
+            .flat_rate(0.03)
+            .years_to_maturity(1.0)
+            .decumulator(110.0, 12, 1.0, 2.0)
+            .engine(Engine::MonteCarlo)
+            .build();
+        assert!(decu.is_err(), "decumulator KO above spot must be rejected");
+        // non-positive quantity and negative gearing are rejected
+        let bad_shares = EquityOptionBuilder::new()
+            .spot(100.0).strike(95.0).flat_vol(0.25).flat_rate(0.03)
+            .years_to_maturity(1.0)
+            .accumulator(110.0, 12, 0.0, 2.0)
+            .engine(Engine::MonteCarlo)
+            .build();
+        assert!(bad_shares.is_err());
+        // the analytic engine refuses accumulators at build time (build
+        // runs check_engine_support), naming the engine that can price
+        let err = EquityOptionBuilder::new()
+            .spot(100.0).strike(95.0).flat_vol(0.25).flat_rate(0.03)
+            .years_to_maturity(1.0)
+            .accumulator(110.0, 12, 1.0, 2.0)
+            .engine(Engine::BlackScholes)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("MonteCarlo"), "{err}");
     }
 
     #[test]

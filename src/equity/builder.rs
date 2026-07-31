@@ -32,6 +32,7 @@ use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::core::vols::VolSurface;
 use crate::equity::asian::{AsianStrikeType, AveragingType};
+use crate::equity::accumulator::{AccumulatorPayoff, AccumulatorSide};
 use crate::equity::autocallable::AutocallablePayoff;
 use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::finite_difference::FdConfig;
@@ -91,6 +92,13 @@ enum PayoffSpec {
         coupon_barrier: Option<f64>,
         memory: bool,
         observation_dates: Option<Vec<NaiveDate>>,
+    },
+    Accumulator {
+        side: AccumulatorSide,
+        barrier: f64,
+        observations: usize,
+        shares_per_day: f64,
+        gearing: f64,
     },
     /// Escape hatch: a caller-supplied payoff is used as given (its own
     /// exercise style included).
@@ -450,6 +458,48 @@ impl EquityOptionBuilder {
         self
     }
 
+    /// Accumulator: the holder buys `shares_per_day` at the strike (set
+    /// via `.strike(...)`, below spot) on every equally spaced
+    /// observation day, knocked out when the spot reaches `barrier`
+    /// (above spot), with `gearing`x the quantity on days the spot closes
+    /// below the strike. Prices on the MonteCarlo engine.
+    pub fn accumulator(
+        mut self,
+        barrier: f64,
+        observations: usize,
+        shares_per_day: f64,
+        gearing: f64,
+    ) -> Self {
+        self.payoff = Some(PayoffSpec::Accumulator {
+            side: AccumulatorSide::Accumulator,
+            barrier,
+            observations,
+            shares_per_day,
+            gearing,
+        });
+        self
+    }
+
+    /// Decumulator: the mirror of [`accumulator`](Self::accumulator) —
+    /// sell at the strike (above spot), knocked out at `barrier` (below
+    /// spot), geared on days the spot closes above the strike.
+    pub fn decumulator(
+        mut self,
+        barrier: f64,
+        observations: usize,
+        shares_per_day: f64,
+        gearing: f64,
+    ) -> Self {
+        self.payoff = Some(PayoffSpec::Accumulator {
+            side: AccumulatorSide::Decumulator,
+            barrier,
+            observations,
+            shares_per_day,
+            gearing,
+        });
+        self
+    }
+
     // ── Engine and model ────────────────────────────────────────────────
 
     pub fn engine(mut self, engine: Engine) -> Self {
@@ -771,6 +821,44 @@ impl EquityOptionBuilder {
                     }
                 }
             }
+            PayoffSpec::Accumulator { side, barrier, observations, shares_per_day, gearing } => {
+                if !(barrier.is_finite() && *barrier > 0.0) {
+                    return invalid(
+                        "barrier",
+                        format!("barrier must be positive and finite, got {barrier}"),
+                    );
+                }
+                match side {
+                    AccumulatorSide::Accumulator if *barrier <= self.spot => {
+                        return invalid(
+                            "barrier",
+                            "accumulator knock-out must be above the spot".to_string(),
+                        );
+                    }
+                    AccumulatorSide::Decumulator if *barrier >= self.spot => {
+                        return invalid(
+                            "barrier",
+                            "decumulator knock-out must be below the spot".to_string(),
+                        );
+                    }
+                    _ => {}
+                }
+                if *observations < 1 {
+                    return invalid("observations", "need at least one observation".to_string());
+                }
+                if !(shares_per_day.is_finite() && *shares_per_day > 0.0) {
+                    return invalid(
+                        "shares_per_day",
+                        format!("shares_per_day must be positive and finite, got {shares_per_day}"),
+                    );
+                }
+                if !(gearing.is_finite() && *gearing >= 0.0) {
+                    return invalid(
+                        "gearing",
+                        format!("gearing must be non-negative and finite, got {gearing}"),
+                    );
+                }
+            }
             _ => {}
         }
         if self.futures_settlement.is_some() {
@@ -917,6 +1005,16 @@ impl EquityOptionBuilder {
                     observation_times,
                 })
             }
+            PayoffSpec::Accumulator { side, barrier, observations, shares_per_day, gearing } => {
+                Box::new(AccumulatorPayoff {
+                    exercise_style: style,
+                    side,
+                    barrier,
+                    observations,
+                    shares_per_day,
+                    gearing,
+                })
+            }
             PayoffSpec::Custom(p) => p,
         };
         let base = EquityOptionBase {
@@ -941,8 +1039,8 @@ impl EquityOptionBuilder {
             dividend_yield: self.dividend_yield,
             borrow_cost: self.borrow_cost,
             cash_dividends: self.cash_dividends,
-            vol_surface,
-            discount_curve,
+            vol_surface: std::sync::Arc::new(vol_surface),
+            discount_curve: std::sync::Arc::new(discount_curve),
         };
         let engine = match self.engine {
             Engine::BlackScholes => PricingEngine::BlackScholes,

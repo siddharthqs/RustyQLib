@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::sync::Arc;
 use chrono::{Datelike, Local, NaiveDate};
 use crate::equity::{baw,bjerksund_stensland,binomial,finite_difference,greeks,montecarlo};
 use crate::core::curves::{Compounding, YieldCurve};
@@ -397,10 +398,15 @@ pub struct EquityMarketData {
     /// finite difference apply the jumps at the ex-dates.
     pub cash_dividends: Vec<(NaiveDate, f64)>,
     /// Volatility surface; a flat surface represents a single constant vol.
-    pub vol_surface: VolSurface,
+    /// `Arc`-shared with the [`Market`](crate::core::market::Market) store:
+    /// rebinding an instrument is a refcount bump, and replacing the
+    /// surface means installing a **new** `Arc` (copy-on-write), never
+    /// mutating through it.
+    pub vol_surface: Arc<VolSurface>,
     /// Discounting curve anchored at `valuation_date`; discount factors are
-    /// the source of truth, rates are derived views.
-    pub discount_curve: YieldCurve,
+    /// the source of truth, rates are derived views. `Arc`-shared and
+    /// copy-on-write, like `vol_surface`.
+    pub discount_curve: Arc<YieldCurve>,
 }
 
 #[derive(Debug)]
@@ -597,8 +603,8 @@ impl EquityOption {
             dividend_yield: data.dividend.unwrap_or(0.0),
             borrow_cost: data.base.borrow_cost.unwrap_or(0.0),
             cash_dividends,
-            vol_surface,
-            discount_curve,
+            vol_surface: Arc::new(vol_surface),
+            discount_curve: Arc::new(discount_curve),
         };
         let payoff_type = &payoff_type;
         let side: PutOrCall;
@@ -639,6 +645,15 @@ impl EquityOption {
         };
 
         let payoff:Box<dyn Payoff> = match &payoff_type {
+            // not reachable from JSON yet: PayoffType::from_str does not
+            // produce Accumulator; build through EquityOptionBuilder
+            PayoffType::Accumulator => {
+                return Err(RustyQLibError::invalid_input(
+                    "payoff_type",
+                    "accumulators are built through EquityOptionBuilder::accumulator, \
+                     not JSON contract data",
+                ));
+            }
             PayoffType::Vanilla => Box::new(VanillaPayoff{
                 put_or_call:side,
                 exercise_style:style}),
@@ -1058,16 +1073,18 @@ impl EquityOption {
         vol
     }
     pub fn get_imp_vol(&mut self) -> f64 {
-        let target = self.base.current_price.value;
+        let target = self.base.current_price.mid();
         self.imp_vol(target)
     }
     fn set_flat_vol(&mut self, vol: f64) {
-        self.market.vol_surface = VolSurface::flat(
-            vol,
-            self.market.vol_surface.reference_date(),
-            self.market.vol_surface.day_count(),
-        )
-        .expect("vol must be positive");
+        self.market.vol_surface = Arc::new(
+            VolSurface::flat(
+                vol,
+                self.market.vol_surface.reference_date(),
+                self.market.vol_surface.day_count(),
+            )
+            .expect("vol must be positive"),
+        );
     }
 }
 
@@ -1111,9 +1128,14 @@ impl EquityOption {
                 );
             }
             if matches!(self.engine, PricingEngine::BlackScholes)
-                && matches!(self.payoff.payoff_kind(), PayoffType::Autocallable)
+                && matches!(
+                    self.payoff.payoff_kind(),
+                    PayoffType::Autocallable | PayoffType::Accumulator
+                )
             {
-                return unsupported("Autocallables price on the MonteCarlo engine only");
+                return unsupported(
+                    "Autocallables and accumulators price on the MonteCarlo engine only",
+                );
             }
         }
         let heston = self.model.is_heston();

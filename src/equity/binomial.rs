@@ -45,7 +45,7 @@ fn setup_with(
     d_rate: f64,
     d_time: f64,
 ) -> TreeSetup {
-    assert!(option.market.spot.value >= 0.0);
+    assert!(option.market.spot.mid() >= 0.0);
     let t = (option.time_to_maturity() - d_time).max(1e-6);
     let r = option.risk_free_rate() + d_rate;
     let b = r - option.carry_yield();

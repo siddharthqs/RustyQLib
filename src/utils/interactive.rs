@@ -113,8 +113,8 @@ pub fn black_scholes_pricing() {
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         borrow_cost: 0.0,
         cash_dividends: vec![],
-        vol_surface,
-        discount_curve,
+        vol_surface: std::sync::Arc::new(vol_surface),
+        discount_curve: std::sync::Arc::new(discount_curve),
     };
     let payoff = Box::new(VanillaPayoff {
         put_or_call: side,
@@ -229,8 +229,8 @@ pub fn monte_carlo_pricing() {
         dividend_yield: div.trim().parse::<f64>().unwrap(),
         borrow_cost: 0.0,
         cash_dividends: vec![],
-        vol_surface,
-        discount_curve,
+        vol_surface: std::sync::Arc::new(vol_surface),
+        discount_curve: std::sync::Arc::new(discount_curve),
     };
     let payoff = Box::new(VanillaPayoff {
         put_or_call: side,

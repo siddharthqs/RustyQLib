@@ -34,6 +34,7 @@ use rayon::prelude::*;
 
 use crate::core::utils::ContractStyle;
 use super::asian::{self, AsianStrikeType, AveragingType};
+use super::accumulator::AccumulatorPayoff;
 use super::autocallable::AutocallablePayoff;
 use super::barrier::{BarrierDirection, KnockType};
 use super::heston::HestonParams;
@@ -229,7 +230,7 @@ pub fn npv(option: &EquityOption) -> f64 {
 pub fn npv_with_stats(option: &EquityOption) -> McStats {
     assert!(option.volatility() >= 0.0);
     assert!(option.time_to_maturity() >= 0.0);
-    assert!(option.market.spot.value >= 0.0);
+    assert!(option.market.spot.mid() >= 0.0);
     if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
         assert!(
             !(barrier.rebate != 0.0 && barrier.rebate_at_hit),
@@ -580,6 +581,8 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
             asian_npv(option, asian, p)
         } else if let Some(auto) = option.payoff.as_any().downcast_ref::<AutocallablePayoff>() {
             autocall_npv(option, auto, p)
+        } else if let Some(accu) = option.payoff.as_any().downcast_ref::<AccumulatorPayoff>() {
+            accumulator_npv(option, accu, p)
         } else {
             generic_path_npv(option, p)
         };
@@ -761,16 +764,17 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
 /// `observation_times` (business-day adjusted call dates as year
 /// fractions) map to the nearest grid step and discount at their exact
 /// times; without them observations are equally spaced.
-fn autocall_grid(
+fn observation_grid(
     option: &EquityOption,
-    auto: &AutocallablePayoff,
+    n_obs: usize,
+    observation_times: Option<&Vec<f64>>,
     t: f64,
     r: f64,
     steps: usize,
 ) -> (Vec<usize>, Vec<f64>) {
     let dr = r - option.risk_free_rate();
-    let n_obs = auto.observations.max(1);
-    let (obs_idx, obs_times): (Vec<usize>, Vec<f64>) = match &auto.observation_times {
+    let n_obs = n_obs.max(1);
+    let (obs_idx, obs_times): (Vec<usize>, Vec<f64>) = match observation_times {
         Some(times) => {
             let mut idx = Vec::with_capacity(times.len());
             let mut prev: i64 = 0;
@@ -808,7 +812,8 @@ fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketPara
     let n_obs = auto.observations.max(1);
     let steps = effective_steps(cfg, &option.model).max(PATH_DEPENDENT_MIN_STEPS).div_ceil(n_obs) * n_obs;
     let dt = p.t / steps as f64;
-    let (obs_idx, dfs) = autocall_grid(option, auto, p.t, p.r, steps);
+    let (obs_idx, dfs) =
+        observation_grid(option, n_obs, auto.observation_times.as_ref(), p.t, p.r, steps);
     let divs = dividends_per_step(option, p.t, steps);
     let process = bs_process(option, p);
     let draws = PathDraws::new(cfg, steps, dt);
@@ -823,6 +828,36 @@ fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketPara
             path.push(s);
         }
         auto.path_value(path, &obs_idx, &dfs)
+    });
+    stats(sum, sum_sq, cfg.paths, steps, 0.0)
+}
+
+/// Accumulator valuation: daily accruals land on their own observation
+/// dates (each discounted on the option's curve), with the knock-out
+/// checked **discretely** at each observation — the contractual daily-
+/// close convention. Steps are aligned so every observation falls exactly
+/// on a simulation step. Runs under GBM and local vol; the Heston route
+/// lives in `heston_european_npv`.
+fn accumulator_npv(option: &EquityOption, accu: &AccumulatorPayoff, p: &MarketParams) -> McStats {
+    let cfg = option.mc_cfg();
+    let n_obs = accu.observations.max(1);
+    let steps = effective_steps(cfg, &option.model).max(PATH_DEPENDENT_MIN_STEPS).div_ceil(n_obs) * n_obs;
+    let dt = p.t / steps as f64;
+    let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
+    let divs = dividends_per_step(option, p.t, steps);
+    let process = bs_process(option, p);
+    let draws = PathDraws::new(cfg, steps, dt);
+    let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
+        path.clear();
+        let mut s = p.s0;
+        for (i, d) in dw.iter().enumerate() {
+            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
+            if let Some(divs) = &divs {
+                s = (s - divs[i]).max(1e-8);
+            }
+            path.push(s);
+        }
+        accu.path_value(path, &obs_idx, &dfs, p.strike)
     });
     stats(sum, sum_sq, cfg.paths, steps, 0.0)
 }
@@ -886,9 +921,21 @@ fn heston_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         let n_obs = auto.observations.max(1);
         let steps = steps.div_ceil(n_obs) * n_obs;
         let dt = p.t / steps as f64;
-        let (obs_idx, dfs) = autocall_grid(option, auto, p.t, p.r, steps);
+        let (obs_idx, dfs) =
+            observation_grid(option, n_obs, auto.observation_times.as_ref(), p.t, p.r, steps);
         let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, _| {
             auto.path_value(spots, &obs_idx, &dfs)
+        });
+        return stats(sum, sum_sq, cfg.paths, steps, 0.0);
+    }
+
+    if let Some(accu) = option.payoff.as_any().downcast_ref::<AccumulatorPayoff>() {
+        let n_obs = accu.observations.max(1);
+        let steps = steps.div_ceil(n_obs) * n_obs;
+        let dt = p.t / steps as f64;
+        let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
+        let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, _| {
+            accu.path_value(spots, &obs_idx, &dfs, p.strike)
         });
         return stats(sum, sum_sq, cfg.paths, steps, 0.0);
     }

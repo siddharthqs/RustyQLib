@@ -15,13 +15,18 @@
 //! - [`backtest`]: the Kupiec proportion-of-failures VaR backtest;
 //! - [`stress`]: TOML-configured **stress MtM** — named shock scenarios
 //!   (relative/absolute, per-underlying) bumped into the market data and
-//!   fully revalued, reported per trade and aggregated per scenario.
+//!   fully revalued, reported per trade and aggregated per scenario;
+//! - [`ladder`]: **risk ladders** — full revaluation on a grid of
+//!   relative spot moves (ladder delta/gamma) or parallel vol shifts
+//!   (ladder vega/volga) read off adjacent rungs: the non-local risk
+//!   view for barrier-heavy books.
 //!
 //! Conventions: confidence levels are one-sided (0.99), VaR/ES are
 //! positive loss amounts, and every simulation is deterministic per
 //! seed.
 
 pub mod backtest;
+pub mod ladder;
 pub mod stress;
 pub mod measures;
 pub mod performance;
@@ -29,6 +34,9 @@ pub mod portfolio_risk;
 pub mod volatility;
 
 pub use backtest::{kupiec_pof, KupiecTest};
+pub use ladder::{
+    spot_ladder, symmetric_moves, vol_ladder, LadderPoint, SpotLadder, VolLadder, VolLadderPoint,
+};
 pub use measures::{
     cornish_fisher_var, delta_normal_var, historical_expected_shortfall, historical_var,
     parametric_expected_shortfall, parametric_var, DeltaNormalVar,
@@ -36,7 +44,7 @@ pub use measures::{
 pub use performance::{max_drawdown, sharpe_ratio, sortino_ratio};
 pub use portfolio_risk::{delta_gamma_var, full_revaluation_var, PortfolioRisk, RiskConfig};
 pub use stress::{
-    stress_mtm, BumpMode, RiskFactor, ScenarioResult, Shock, StressConfig, StressScenario,
-    TradeStress,
+    stress_mtm, ArbitrageCheck, ArbitragePolicy, BumpMode, RiskFactor, ScenarioResult, Shock,
+    StressConfig, StressScenario, TradeStress,
 };
 pub use volatility::{ewma_volatility, realized_volatility};

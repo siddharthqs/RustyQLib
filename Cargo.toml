@@ -70,6 +70,10 @@ criterion = "0.5"
 name = "engines"
 harness = false
 
+[[bench]]
+name = "stress"
+harness = false
+
 [[example]]
 name = "convert_format"
 required-features = ["xml"]

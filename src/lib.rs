@@ -34,7 +34,11 @@ pub use crate::core::errors::RustyQLibError;
 pub use crate::core::results::{Greeks, PricingResult};
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;
-pub use crate::core::market::{BumpMode, Discount, Market, MarketKey, RiskFactor, Shock, Spot, Vol};
+pub use crate::core::depth::{DepthLevel, MarketDepth};
+pub use crate::core::market::{
+    BumpMode, Depth, Discount, Market, MarketKey, RiskFactor, Shock, Spot, Vol,
+};
+pub use crate::core::quotes::Quote;
 pub use crate::core::calendar::{BusinessDayConvention, Calendar, DateGeneration, Period, Schedule};
 pub use crate::core::daycount::DayCountConvention;
 pub use crate::core::traits::Instrument;

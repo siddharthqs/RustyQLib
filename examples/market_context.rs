@@ -48,7 +48,7 @@ fn option(symbol: &str, strike: f64, engine: Engine) -> EquityOption {
 }
 
 fn shock(factor: RiskFactor, mode: BumpMode, size: f64) -> Shock {
-    Shock { factor, mode, size, underlying: None }
+    Shock { factor, mode, size, underlying: None, tenors: None, shifts: None }
 }
 
 fn main() {

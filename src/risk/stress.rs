@@ -19,6 +19,17 @@
 //! mode = "absolute"
 //! size = 0.10             # implied vol up 10 points
 //! underlying = "ACME"     # only this name (omit or "*" for all)
+//!
+//! [[scenarios.shocks]]
+//! factor = "rate"
+//! mode = "absolute"
+//! size = 0.005
+//! tenors = [1.0, 2.0]     # key-rate: bump only this part of the curve
+//! # shifts = [0.005, 0.003]  # optional per-tenor sizes (default: size)
+//!
+//! [arbitrage]             # optional guard on bumped curves
+//! policy = "warn"         # allow | warn (default) | reject
+//! forward_floor = 0.0
 //! ```
 //!
 //! The book's market is snapshotted once into a typed
@@ -38,7 +49,7 @@
 
 use serde::Deserialize;
 
-use crate::core::market::Market;
+use crate::core::market::{Discount, Market};
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::utils::PayoffType;
 use crate::equity::vanilla_option::EquityOption;
@@ -55,10 +66,52 @@ pub struct StressScenario {
     pub shocks: Vec<Shock>,
 }
 
+/// What to do when a bumped scenario curve implies a forward rate below
+/// the configured floor (see
+/// [`min_forward`](crate::core::curves::YieldCurve::min_forward)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ArbitragePolicy {
+    /// Accept the curve silently.
+    Allow,
+    /// Log a warning and revalue anyway — the default: stress scenarios
+    /// are deliberately extreme, and the P&L number is usually still wanted.
+    #[default]
+    Warn,
+    /// Fail the run, naming the scenario, curve and offending segment.
+    Reject,
+}
+
+/// The no-arbitrage guard applied to every bumped curve of every scenario.
+///
+/// ```toml
+/// [arbitrage]
+/// policy = "reject"        # allow | warn (default) | reject
+/// forward_floor = 0.0      # smallest admissible continuous forward
+/// ```
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct ArbitrageCheck {
+    pub policy: ArbitragePolicy,
+    /// Smallest admissible continuously compounded forward. `0.0` is the
+    /// classic no-arbitrage bound; set it negative to tolerate negative
+    /// forwards (the library allows negative rates).
+    pub forward_floor: f64,
+}
+
+impl Default for ArbitrageCheck {
+    fn default() -> Self {
+        ArbitrageCheck { policy: ArbitragePolicy::default(), forward_floor: 0.0 }
+    }
+}
+
 /// The whole stress configuration (one or more scenarios).
 #[derive(Debug, Clone, Deserialize)]
 pub struct StressConfig {
     pub scenarios: Vec<StressScenario>,
+    /// No-arbitrage guard on bumped curves; defaults to warn at floor 0.
+    #[serde(default)]
+    pub arbitrage: ArbitrageCheck,
 }
 
 impl StressConfig {
@@ -94,6 +147,30 @@ impl StressConfig {
                         "scenario '{}': time shocks must be absolute (days)",
                         scenario.name
                     )));
+                }
+                let scenario_error = |reason: &str| {
+                    RustyQLibError::ParseError(format!("scenario '{}': {reason}", scenario.name))
+                };
+                if let Some(tenors) = &shock.tenors {
+                    if shock.factor != RiskFactor::Rate {
+                        return Err(scenario_error("tenors are only supported on rate shocks"));
+                    }
+                    if shock.mode == BumpMode::Relative {
+                        return Err(scenario_error("key-rate rate shocks must be absolute"));
+                    }
+                    if tenors.is_empty() {
+                        return Err(scenario_error("tenors must not be empty"));
+                    }
+                    if tenors.windows(2).any(|w| w[1] <= w[0]) || tenors.iter().any(|&t| t <= 0.0) {
+                        return Err(scenario_error("tenors must be positive and strictly increasing"));
+                    }
+                    if let Some(shifts) = &shock.shifts {
+                        if shifts.len() != tenors.len() {
+                            return Err(scenario_error("shifts must match tenors in length"));
+                        }
+                    }
+                } else if shock.shifts.is_some() {
+                    return Err(scenario_error("shifts require tenors"));
                 }
             }
         }
@@ -133,52 +210,79 @@ fn trade_label(option: &EquityOption, quantity: f64) -> String {
     )
 }
 
+/// Enforce the config's [`ArbitrageCheck`] on every discount curve of a
+/// bumped scenario market.
+fn check_arbitrage(
+    market: &Market,
+    check: &ArbitrageCheck,
+    scenario: &str,
+) -> Result<(), RustyQLibError> {
+    if check.policy == ArbitragePolicy::Allow {
+        return Ok(());
+    }
+    let keys: Vec<Discount> = market.keys::<Discount>().cloned().collect();
+    for key in keys {
+        let worst = market.get(&key)?.min_forward();
+        if worst.forward < check.forward_floor {
+            let detail = format!(
+                "scenario '{scenario}': curve {key:?} implies forward {:.6} on [{:.4}, {:.4}], below floor {}",
+                worst.forward, worst.t1, worst.t2, check.forward_floor
+            );
+            match check.policy {
+                ArbitragePolicy::Warn => log::warn!("{detail}"),
+                ArbitragePolicy::Reject => {
+                    return Err(RustyQLibError::invalid_input("stress scenario", detail));
+                }
+                ArbitragePolicy::Allow => unreachable!("handled above"),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Run every scenario in `config` over the book, through the pricing
 /// context: the book's market is snapshotted once, each scenario bumps it
-/// ([`Market::bumped`]), and every position revalues fully on its own
-/// engine under the bumped snapshot. Reported per trade and aggregated;
-/// `portfolio = sum(trades)` is exact by construction.
-pub fn stress_mtm(book: &EquityPortfolio, config: &StressConfig) -> Vec<ScenarioResult> {
+/// ([`Market::bumped`]), the bumped curves pass the config's no-arbitrage
+/// guard ([`ArbitrageCheck`]), and every position revalues fully on its
+/// own engine under the bumped snapshot. Reported per trade and
+/// aggregated; `portfolio = sum(trades)` is exact by construction.
+/// Errors on a malformed shock, a rejected arbitrage check, or a position
+/// the captured market cannot price.
+pub fn stress_mtm(
+    book: &EquityPortfolio,
+    config: &StressConfig,
+) -> Result<Vec<ScenarioResult>, RustyQLibError> {
     let base_market = book.snapshot_market();
-    config
-        .scenarios
-        .iter()
-        .map(|scenario| {
-            let stressed_market = base_market
-                .bumped(&scenario.shocks)
-                .expect("stress configs are validated at parse time");
-            let mut trades = Vec::with_capacity(book.positions.len());
-            let mut base_total = 0.0;
-            let mut stressed_total = 0.0;
-            for position in &book.positions {
-                let value_under = |market: &Market| {
-                    position.quantity
-                        * position
-                            .option
-                            .npv_in(market)
-                            .expect("captured market covers every position")
-                };
-                let base = value_under(&base_market);
-                let stressed = value_under(&stressed_market);
-                base_total += base;
-                stressed_total += stressed;
-                trades.push(TradeStress {
-                    label: trade_label(&position.option, position.quantity),
-                    quantity: position.quantity,
-                    base_mtm: base,
-                    stressed_mtm: stressed,
-                    stress_pnl: stressed - base,
-                });
-            }
-            ScenarioResult {
-                scenario: scenario.name.clone(),
-                trades,
-                base_mtm: base_total,
-                stressed_mtm: stressed_total,
-                stress_pnl: stressed_total - base_total,
-            }
-        })
-        .collect()
+    // base MtM is scenario-independent: price the book once, reuse the
+    // per-position values across every scenario
+    let base_values = book.position_values_in(&base_market)?;
+    let base_total: f64 = base_values.iter().sum();
+    let mut results = Vec::with_capacity(config.scenarios.len());
+    for scenario in &config.scenarios {
+        let stressed_market = base_market.bumped(&scenario.shocks)?;
+        check_arbitrage(&stressed_market, &config.arbitrage, &scenario.name)?;
+        let mut trades = Vec::with_capacity(book.positions.len());
+        let mut stressed_total = 0.0;
+        for (position, &base) in book.positions.iter().zip(&base_values) {
+            let stressed = position.quantity * position.option.npv_in(&stressed_market)?;
+            stressed_total += stressed;
+            trades.push(TradeStress {
+                label: trade_label(&position.option, position.quantity),
+                quantity: position.quantity,
+                base_mtm: base,
+                stressed_mtm: stressed,
+                stress_pnl: stressed - base,
+            });
+        }
+        results.push(ScenarioResult {
+            scenario: scenario.name.clone(),
+            trades,
+            base_mtm: base_total,
+            stressed_mtm: stressed_total,
+            stress_pnl: stressed_total - base_total,
+        });
+    }
+    Ok(results)
 }
 
 // silence the unused-import lint path for PayoffType (used in labels)
@@ -281,10 +385,10 @@ mod tests {
         let opt = option("ACME", PutOrCall::Call, 100.0);
         let market = opt.snapshot_market();
         let shocks = vec![
-            Shock { factor: RiskFactor::Spot, mode: BumpMode::Relative, size: -0.2, underlying: None },
-            Shock { factor: RiskFactor::Spot, mode: BumpMode::Absolute, size: -1.0, underlying: None },
+            Shock { factor: RiskFactor::Spot, mode: BumpMode::Relative, size: -0.2, underlying: None, tenors: None, shifts: None },
+            Shock { factor: RiskFactor::Spot, mode: BumpMode::Absolute, size: -1.0, underlying: None, tenors: None, shifts: None },
             // filtered out: different underlying
-            Shock { factor: RiskFactor::Vol, mode: BumpMode::Absolute, size: 0.1, underlying: Some("OTHER".into()) },
+            Shock { factor: RiskFactor::Vol, mode: BumpMode::Absolute, size: 0.1, underlying: Some("OTHER".into()), tenors: None, shifts: None },
         ];
         let bumped = market.bumped(&shocks).unwrap();
         // in order: 100 * 0.8 = 80, then - 1
@@ -299,7 +403,7 @@ mod tests {
     fn stress_mtm_matches_direct_repricing_and_aggregates_exactly() {
         let b = book();
         let config = StressConfig::from_toml_str(CONFIG).unwrap();
-        let results = stress_mtm(&b, &config);
+        let results = stress_mtm(&b, &config).unwrap();
         assert_eq!(results.len(), 3);
         let crash = &results[0];
         assert_eq!(crash.trades.len(), 2);
@@ -325,7 +429,7 @@ mod tests {
     fn scenario_economics_move_the_right_trades() {
         let b = book();
         let config = StressConfig::from_toml_str(CONFIG).unwrap();
-        let results = stress_mtm(&b, &config);
+        let results = stress_mtm(&b, &config).unwrap();
         let crash = &results[0];
         // spot -20% + vol +10pts: the long call loses, the long put gains
         assert!(crash.trades[0].stress_pnl < 0.0, "call {:?}", crash.trades[0]);
@@ -335,6 +439,162 @@ mod tests {
         assert!(decay.stress_pnl < 0.0, "theta scenario {:?}", decay.stress_pnl);
         // the ACME-only rate shock hits every trade in this single-name book
         assert!(results[1].trades.iter().all(|t| t.stress_pnl != 0.0));
+    }
+
+    #[test]
+    #[cfg(feature = "stress-config")]
+    fn key_rate_shocks_parse_and_reprice_between_parallel_and_base() {
+        let config = StressConfig::from_toml_str(
+            r#"
+            [[scenarios]]
+            name = "front_end_up"
+            [[scenarios.shocks]]
+            factor = "rate"
+            mode = "absolute"
+            size = 0.01
+            tenors = [2.0]
+        "#,
+        )
+        .unwrap();
+        let shock = &config.scenarios[0].shocks[0];
+        assert_eq!(shock.tenors.as_deref(), Some(&[2.0][..]));
+        assert_eq!(shock.shifts, None);
+        assert_eq!(config.arbitrage.policy, ArbitragePolicy::Warn, "default policy");
+
+        // a 1.5y option sits between the 1y (unbumped) and 2y (bumped)
+        // pillars: the 2y key-rate bump must move it less than the
+        // same-size parallel bump, and more than not bumping at all
+        let mid_pillar_option = EquityOptionBuilder::new()
+            .symbol("ACME")
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.25)
+            .flat_rate(0.03)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 7, 1).unwrap())
+            .vanilla(PutOrCall::Call)
+            .engine(Engine::BlackScholes)
+            .build()
+            .expect("option must build");
+        let mut b = EquityPortfolio::new();
+        b.add(mid_pillar_option, 100.0);
+        let key_rate = stress_mtm(&b, &config).unwrap();
+        let parallel = StressConfig::from_toml_str(
+            r#"
+            [[scenarios]]
+            name = "all_up"
+            [[scenarios.shocks]]
+            factor = "rate"
+            mode = "absolute"
+            size = 0.01
+        "#,
+        )
+        .unwrap();
+        let parallel = stress_mtm(&b, &parallel).unwrap();
+        assert!(key_rate[0].stress_pnl.abs() > 1e-8, "key-rate shock must move the book");
+        assert!(
+            key_rate[0].stress_pnl.abs() < parallel[0].stress_pnl.abs(),
+            "key-rate {} vs parallel {}",
+            key_rate[0].stress_pnl,
+            parallel[0].stress_pnl
+        );
+
+        // malformed key-rate configs fail at parse time
+        for bad in [
+            // shifts without tenors
+            r#"
+            [[scenarios]]
+            name = "x"
+            [[scenarios.shocks]]
+            factor = "rate"
+            mode = "absolute"
+            size = 0.01
+            shifts = [0.01]
+            "#,
+            // tenors on a vol shock
+            r#"
+            [[scenarios]]
+            name = "x"
+            [[scenarios.shocks]]
+            factor = "vol"
+            mode = "absolute"
+            size = 0.01
+            tenors = [1.0]
+            "#,
+            // relative key-rate
+            r#"
+            [[scenarios]]
+            name = "x"
+            [[scenarios.shocks]]
+            factor = "rate"
+            mode = "relative"
+            size = 0.01
+            tenors = [1.0]
+            "#,
+            // length mismatch
+            r#"
+            [[scenarios]]
+            name = "x"
+            [[scenarios.shocks]]
+            factor = "rate"
+            mode = "absolute"
+            size = 0.01
+            tenors = [1.0, 2.0]
+            shifts = [0.01]
+            "#,
+            // non-increasing tenors
+            r#"
+            [[scenarios]]
+            name = "x"
+            [[scenarios.shocks]]
+            factor = "rate"
+            mode = "absolute"
+            size = 0.01
+            tenors = [2.0, 1.0]
+            "#,
+        ] {
+            assert!(StressConfig::from_toml_str(bad).is_err(), "must reject: {bad}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "stress-config")]
+    fn arbitrage_policy_rejects_curves_with_forwards_below_the_floor() {
+        // -200bp at the 10y pillar alone: the preceding forward goes to
+        // 3% - 2% * 10/3 < 0 (zero bumps amplify into forwards by t/dt)
+        let toml = |policy: &str| {
+            format!(
+                r#"
+                [[scenarios]]
+                name = "long_end_collapse"
+                [[scenarios.shocks]]
+                factor = "rate"
+                mode = "absolute"
+                size = -0.02
+                tenors = [10.0]
+
+                [arbitrage]
+                policy = "{policy}"
+            "#
+            )
+        };
+        let b = book();
+        let rejecting = StressConfig::from_toml_str(&toml("reject")).unwrap();
+        assert_eq!(rejecting.arbitrage.policy, ArbitragePolicy::Reject);
+        let err = stress_mtm(&b, &rejecting).unwrap_err();
+        assert!(err.to_string().contains("long_end_collapse"), "{err}");
+        // warn and allow both let the run complete
+        for policy in ["warn", "allow"] {
+            let config = StressConfig::from_toml_str(&toml(policy)).unwrap();
+            assert!(stress_mtm(&b, &config).is_ok(), "policy {policy} must not fail");
+        }
+        // a floor can also be relaxed instead of the policy
+        let relaxed = StressConfig::from_toml_str(
+            &(toml("reject") + "forward_floor = -0.10\n"),
+        )
+        .unwrap();
+        assert!((relaxed.arbitrage.forward_floor + 0.10).abs() < 1e-12);
+        assert!(stress_mtm(&b, &relaxed).is_ok());
     }
 
     #[test]

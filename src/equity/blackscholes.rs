@@ -15,7 +15,7 @@ impl BlackScholesPricer {
     pub fn npv(&self, bsd_option: &EquityOption) -> f64 {
         //assert!(bsd_option.volatility >= 0.0);
         assert!(bsd_option.time_to_maturity() >= 0.0, "Option is expired or negative time");
-        assert!(bsd_option.market.spot.value >= 0.0, "Negative underlying price not allowed");
+        assert!(bsd_option.market.spot.mid() >= 0.0, "Negative underlying price not allowed");
         if bsd_option.base.is_futures_option() {
             return self.npv_black76(bsd_option);
         }
@@ -32,7 +32,7 @@ impl BlackScholesPricer {
     pub fn delta(&self, bsd_option: &EquityOption) -> f64 {
         //assert!(bsd_option.volatility >= 0.0);
         assert!(bsd_option.time_to_maturity() >= 0.0, "Option is expired or negative time");
-        assert!(bsd_option.market.spot.value >= 0.0, "Negative underlying price not allowed");
+        assert!(bsd_option.market.spot.mid() >= 0.0, "Negative underlying price not allowed");
         if bsd_option.base.is_futures_option() {
             return self.delta_black76(bsd_option);
         }
@@ -1038,9 +1038,10 @@ mod tests {
             dividend_yield: 0.0,
             borrow_cost: 0.0,
             cash_dividends: vec![],
-            vol_surface: VolSurface::flat(0.3, valuation_date, DayCountConvention::Act365)
-                .unwrap(),
-            discount_curve: curve,
+            vol_surface: std::sync::Arc::new(
+                VolSurface::flat(0.3, valuation_date, DayCountConvention::Act365).unwrap(),
+            ),
+            discount_curve: std::sync::Arc::new(curve),
         };
         EquityOption {
             base,
@@ -1596,7 +1597,7 @@ mod tests {
     fn local_vol_option(surface: crate::core::vols::VolSurface, k: f64) -> EquityOption {
         let mut option = test_option(PutOrCall::Call, flat_5pct());
         option.base.strike_price = k;
-        option.market.vol_surface = surface;
+        option.market.vol_surface = std::sync::Arc::new(surface);
         option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
         option.model = crate::equity::utils::Model::LocalVol;
         option.mc_cfg_mut().paths = 20_000;
@@ -2611,7 +2612,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Autocallables price on the MonteCarlo engine only")]
+    #[should_panic(expected = "Autocallables and accumulators price on the MonteCarlo engine only")]
     fn analytic_engine_rejects_autocallables() {
         let mut note = autocall_note(105.0, 70.0, 5.0);
         note.engine = crate::equity::utils::PricingEngine::from_kind(Engine::BlackScholes);
@@ -2692,7 +2693,7 @@ mod tests {
         )
         .unwrap();
         let mut option = test_option(PutOrCall::Call, flat_5pct());
-        option.market.vol_surface = surface;
+        option.market.vol_surface = std::sync::Arc::new(surface);
         assert_approx_eq!(option.volatility(), 0.30, 1e-14);
         assert_approx_eq!(option.npv(), 14.2312547860, 1e-8);
         assert_approx_eq!(option.vega(), 37.9432933117, 1e-8);
@@ -2706,12 +2707,14 @@ mod tests {
         let mut option = test_option(PutOrCall::Call, flat_5pct());
         let target_price = option.npv(); // priced at 30% flat
         // start the solve from a different vol level
-        option.market.vol_surface = crate::core::vols::VolSurface::flat(
-            0.6,
-            option.market.valuation_date,
-            DayCountConvention::Act365,
-        )
-        .unwrap();
+        option.market.vol_surface = std::sync::Arc::new(
+            crate::core::vols::VolSurface::flat(
+                0.6,
+                option.market.valuation_date,
+                DayCountConvention::Act365,
+            )
+            .unwrap(),
+        );
         let iv = option.imp_vol(target_price);
         assert_approx_eq!(iv, 0.30, 1e-10);
     }

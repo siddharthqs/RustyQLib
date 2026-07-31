@@ -170,9 +170,11 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   difference isolates the Taylor error), EWMA / realized volatility,
   max drawdown, Sharpe / Sortino, the Kupiec VaR backtest, and
   **TOML-configured stress MtM**: named shock scenarios (relative / absolute
-  bumps on spot, vol, rates and time, with per-underlying filters) prepared
-  into bumped market data and fully revalued, reported per trade and
-  aggregated per scenario.
+  bumps on spot, vol, rates and time, with per-underlying filters and
+  key-rate `tenors` restricting a rate shock to part of the curve) prepared
+  into bumped market data, checked against a configurable no-arbitrage
+  guard (`allow` / `warn` / `reject` on the minimum implied forward) and
+  fully revalued, reported per trade and aggregated per scenario.
 - **Adjoint Algorithmic Differentiation** (`core::aad`): a tape-based
   reverse-mode differentiator with operator overloading — write a pricer over
   `Var` and one backward sweep returns every input sensitivity at a fixed

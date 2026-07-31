@@ -170,7 +170,7 @@ mod tests {
     }
 
     fn shock(factor: RiskFactor, mode: BumpMode, size: f64) -> Shock {
-        Shock { factor, mode, size, underlying: None }
+        Shock { factor, mode, size, underlying: None, tenors: None, shifts: None }
     }
 
     // ── snapshot / rebind parity ────────────────────────────────────
@@ -314,12 +314,16 @@ mod tests {
                 mode: BumpMode::Relative,
                 size: -0.10,
                 underlying: Some("ACME".to_string()),
+                tenors: None,
+                shifts: None,
             },
             Shock {
                 factor: RiskFactor::Spot,
                 mode: BumpMode::Absolute,
                 size: 2.0,
                 underlying: Some("ACME".to_string()),
+                tenors: None,
+                shifts: None,
             },
         ];
         let bumped = market.bumped(&shocks).unwrap();

@@ -1,6 +1,7 @@
 pub mod aad;
 pub mod calendar;
 pub mod curves;
+pub mod depth;
 pub mod errors;
 pub mod results;
 pub mod daycount;

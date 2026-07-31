@@ -40,7 +40,7 @@ fn main() {
     common::note(&format!("loaded {} scenarios from src/examples/stress_config.toml",
         config.scenarios.len()));
 
-    for result in stress_mtm(&book, &config) {
+    for result in stress_mtm(&book, &config).expect("stress run must price") {
         common::section(&format!("Scenario: {}", result.scenario));
         println!("  {:<34} {:>12} {:>12} {:>12}", "trade", "base MtM", "stressed", "stress P&L");
         for trade in &result.trades {

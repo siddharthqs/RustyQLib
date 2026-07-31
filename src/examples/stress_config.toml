@@ -3,6 +3,14 @@
 # factor: spot | vol | rate | time     (time size is in days, absolute)
 # mode:   relative | absolute
 # underlying: optional symbol filter ("*" or omitted = every underlying)
+# tenors: optional key-rate tenors (years) on a rate shock — bumps only
+#         that part of the curve; shifts gives per-tenor sizes (default:
+#         size at every tenor)
+
+# Guard on bumped curves: policy = allow | warn (default) | reject
+[arbitrage]
+policy = "warn"
+forward_floor = 0.0
 
 [[scenarios]]
 name = "equity_crash"
@@ -37,6 +45,15 @@ name = "rates_plus_100bp"
 factor = "rate"
 mode = "absolute"
 size = 0.01
+
+[[scenarios]]
+name = "front_end_plus_50bp"       # key-rate: only the 1y-2y sector moves
+
+[[scenarios.shocks]]
+factor = "rate"
+mode = "absolute"
+size = 0.005
+tenors = [1.0, 2.0]
 
 [[scenarios]]
 name = "one_month_decay"
