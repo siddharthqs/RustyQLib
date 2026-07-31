@@ -29,6 +29,7 @@ Release mode matters: the Monte Carlo examples run 50k–100k paths.
 | `cliquet_option` | Cliquet / ratchet / reverse / Napoleon | closed form vs MC; local cap sweep; global floor/cap coupling; **the Heston forward-smile discount on capped strips**; the floored Napoleon's vol-of-vol convexity |
 |  `stress_mtm` (needs `--features stress-config`) | Stress MtM from TOML scenarios | shock config (relative/absolute, per-underlying) -> bumped market -> full revaluation; trade-level table and portfolio aggregation per scenario |
 | `american_baw` | American vanillas, analytic approximations | Barone-Adesi-Whaley and Bjerksund-Stensland 2002 vs binomial / FD / LSMC; early-exercise premium and critical boundary; the BS2002 lower-bound property; the exact Merton perpetual as the T -> infinity limit; true American Greeks; ~cents of error for a huge speed-up |
+| `sample_paths` | Raw model paths (no pricer) | the public `sample_paths` API over the process traits; GBM Sobol paths vs the lognormal law; max-drawdown scenario statistics; Heston `(S, v)` paths under Andersen QE and the rho = -0.7 crash/vol signature |
 
 ## Reading the output
 

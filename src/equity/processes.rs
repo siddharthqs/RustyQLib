@@ -141,6 +141,55 @@ pub enum HestonScheme {
 /// variance samplers (any value in [1, 2] is valid; 1.5 is his choice).
 const QE_PSI_SWITCH: f64 = 1.5;
 
+/// Which QE sampler fired, with the parameters the martingale correction
+/// needs.
+enum QeBranch {
+    /// `v_next = a (b + Z)^2`.
+    Quadratic { a: f64, b2: f64 },
+    /// Mass at zero with probability `p`, exponential tail of rate `beta`.
+    Exponential { p: f64, beta: f64 },
+}
+
+/// One Andersen QE draw of the CIR variance transition, plus the branch
+/// bookkeeping.
+fn qe_variance_draw(hp: &HestonParams, v: f64, dt: f64, z_v: f64) -> (f64, QeBranch) {
+    let (kappa, theta, xi) = (hp.kappa, hp.theta, hp.vol_of_vol);
+    // conditional mean and variance of v_{t+dt} | v_t (exact CIR moments)
+    let e = (-kappa * dt).exp();
+    let m = theta + (v - theta) * e;
+    let s2 = v * xi * xi * e * (1.0 - e) / kappa
+        + theta * xi * xi * (1.0 - e) * (1.0 - e) / (2.0 * kappa);
+    let psi = s2 / (m * m);
+
+    if psi <= QE_PSI_SWITCH {
+        // squared-Gaussian branch: v_next = a (b + Z)^2 matching (m, s2)
+        let inv = 2.0 / psi;
+        let b2 = inv - 1.0 + inv.sqrt() * (inv - 1.0).sqrt();
+        let a = m / (1.0 + b2);
+        let bz = b2.sqrt() + z_v;
+        (a * bz * bz, QeBranch::Quadratic { a, b2 })
+    } else {
+        // mass-at-zero / exponential-tail branch, driven through the
+        // normal's uniform so the caller's draw pipeline is unchanged
+        let p = (psi - 1.0) / (psi + 1.0);
+        let beta = (1.0 - p) / m;
+        let u = crate::core::utils::norm_cdf(z_v);
+        let v_next = if u <= p { 0.0 } else { ((1.0 - p) / (1.0 - u)).ln() / beta };
+        (v_next, QeBranch::Exponential { p, beta })
+    }
+}
+
+/// One Andersen QE draw of the CIR variance transition
+/// `v_{t+dt} | v_t = v` from a standard normal `z_v` — the sampler
+/// matches the exact conditional mean and variance of the square-root
+/// process, switching between a squared-Gaussian and a
+/// mass-at-zero/exponential form. Public for consumers that step the
+/// variance leg on its own (the SLV engine pairs it with a
+/// leverage-adjusted spot step).
+pub fn qe_variance_step(hp: &HestonParams, v: f64, dt: f64, z_v: f64) -> f64 {
+    qe_variance_draw(hp, v.max(0.0), dt, z_v).0
+}
+
 /// Heston dynamics as a 2-state, 2-factor process, state `[S, v]`:
 ///
 /// ```text
@@ -218,12 +267,7 @@ impl HestonProcess {
         let z_s = dw[0] / sqrt_dt;
         let z_v = dw[1] / sqrt_dt;
 
-        // conditional mean and variance of v_{t+dt} | v_t (exact CIR moments)
-        let e = (-kappa * dt).exp();
-        let m = theta + (v - theta) * e;
-        let s2 = v * xi * xi * e * (1.0 - e) / kappa
-            + theta * xi * xi * (1.0 - e) * (1.0 - e) / (2.0 * kappa);
-        let psi = s2 / (m * m);
+        let (v_next, branch) = qe_variance_draw(hp, v, dt, z_v);
 
         // spot-step coefficients, central discretization (gamma1 = gamma2 = 1/2)
         let k1 = 0.5 * dt * (kappa * rho / xi - 0.5) - rho / xi;
@@ -236,34 +280,16 @@ impl HestonProcess {
         // moment-generating function does not exist
         let k0_plain = -rho * kappa * theta * dt / xi;
 
-        let (v_next, k0) = if psi <= QE_PSI_SWITCH {
-            // squared-Gaussian branch: v_next = a (b + Z)^2 matching (m, s2)
-            let inv = 2.0 / psi;
-            let b2 = inv - 1.0 + inv.sqrt() * (inv - 1.0).sqrt();
-            let a = m / (1.0 + b2);
-            let bz = b2.sqrt() + z_v;
-            let v_next = a * bz * bz;
-            let k0 = if 2.0 * a_mc * a < 1.0 {
+        let k0 = match branch {
+            QeBranch::Quadratic { a, b2 } if 2.0 * a_mc * a < 1.0 => {
                 -a_mc * b2 * a / (1.0 - 2.0 * a_mc * a)
                     + 0.5 * (1.0 - 2.0 * a_mc * a).ln()
                     - (k1 + 0.5 * k3) * v
-            } else {
-                k0_plain
-            };
-            (v_next, k0)
-        } else {
-            // mass-at-zero / exponential-tail branch
-            let p = (psi - 1.0) / (psi + 1.0);
-            let beta = (1.0 - p) / m;
-            let u = crate::core::utils::norm_cdf(z_v);
-            let v_next =
-                if u <= p { 0.0 } else { ((1.0 - p) / (1.0 - u)).ln() / beta };
-            let k0 = if a_mc < beta {
+            }
+            QeBranch::Exponential { p, beta } if a_mc < beta => {
                 -(p + beta * (1.0 - p) / (beta - a_mc)).ln() - (k1 + 0.5 * k3) * v
-            } else {
-                k0_plain
-            };
-            (v_next, k0)
+            }
+            _ => k0_plain,
         };
 
         out[0] = x[0]
@@ -273,6 +299,64 @@ impl HestonProcess {
                 + k2 * v_next
                 + (k3 * v + k4 * v_next).sqrt() * z_s);
         out[1] = v_next;
+    }
+}
+
+// ── Correlated multi-asset lognormal dynamics ───────────────────────────
+
+/// N correlated lognormal assets as one N-state, N-factor process:
+///
+/// ```text
+/// dS_i = (r - q_i) S_i dt + sigma_i S_i dW_i,   d<W_i, W_j> = rho_ij dt
+/// ```
+///
+/// The correlation enters through the rows of the lower-triangular
+/// Cholesky factor, so `dw` carries **independent** increments (the
+/// [`StochasticProcess`] contract). `evolve` overrides the generic Euler
+/// with the exact per-asset lognormal transition — under constant
+/// coefficients the joint law is exact at any step size, so coarse
+/// grids only cost monitoring resolution, never bias.
+pub struct MultiAssetGbmProcess {
+    /// Per-asset risk-neutral drift rates `r - q_i`.
+    pub drift_rates: Vec<f64>,
+    pub vols: Vec<f64>,
+    /// Lower-triangular Cholesky factor of the asset correlation matrix.
+    pub chol: Vec<Vec<f64>>,
+}
+
+impl StochasticProcess for MultiAssetGbmProcess {
+    fn dim(&self) -> usize {
+        self.vols.len()
+    }
+
+    fn factors(&self) -> usize {
+        self.vols.len()
+    }
+
+    fn drift(&self, _t: f64, x: &[f64], out: &mut [f64]) {
+        for i in 0..self.dim() {
+            out[i] = self.drift_rates[i] * x[i];
+        }
+    }
+
+    fn diffusion(&self, _t: f64, x: &[f64], out: &mut [f64]) {
+        let n = self.dim();
+        for i in 0..n {
+            for j in 0..n {
+                out[i * n + j] =
+                    if j <= i { self.vols[i] * x[i] * self.chol[i][j] } else { 0.0 };
+            }
+        }
+    }
+
+    fn evolve(&self, _t: f64, x: &[f64], dt: f64, dw: &[f64], out: &mut [f64]) {
+        for i in 0..self.dim() {
+            // correlated Brownian increment of asset i
+            let dwi: f64 = (0..=i).map(|j| self.chol[i][j] * dw[j]).sum();
+            let sigma = self.vols[i];
+            out[i] =
+                x[i] * exp((self.drift_rates[i] - 0.5 * sigma * sigma) * dt + sigma * dwi);
+        }
     }
 }
 
@@ -444,5 +528,68 @@ mod tests {
             assert!(out[1] >= 0.0, "z={z}: v_next={}", out[1]);
             assert!(out[0] > 0.0);
         }
+    }
+
+    // ── Multi-asset GBM ─────────────────────────────────────────────────
+
+    fn two_asset_gbm(rho: f64) -> MultiAssetGbmProcess {
+        MultiAssetGbmProcess {
+            drift_rates: vec![0.03, 0.01],
+            vols: vec![0.2, 0.3],
+            chol: vec![vec![1.0, 0.0], vec![rho, (1.0 - rho * rho).sqrt()]],
+        }
+    }
+
+    #[test]
+    fn multi_gbm_recovers_forwards_and_correlation() {
+        use crate::core::montecarlo::path_normals;
+        let rho = -0.6;
+        let p = two_asset_gbm(rho);
+        let (dt, n) = (0.02_f64, 200_000);
+        let mut z = [0.0; 2];
+        let mut out = [0.0; 2];
+        let (mut m0, mut m1) = (0.0, 0.0);
+        let (mut c00, mut c11, mut c01) = (0.0, 0.0, 0.0);
+        let sqrt_dt = dt.sqrt();
+        for i in 0..n {
+            path_normals(11, i as u64, &mut z);
+            let dw = [sqrt_dt * z[0], sqrt_dt * z[1]];
+            p.evolve(0.0, &[100.0, 50.0], dt, &dw, &mut out);
+            m0 += out[0];
+            m1 += out[1];
+            let (l0, l1) = ((out[0] / 100.0).ln(), (out[1] / 50.0).ln());
+            c00 += l0 * l0;
+            c11 += l1 * l1;
+            c01 += l0 * l1;
+        }
+        let nf = n as f64;
+        let (t0, t1) = (100.0 * (0.03_f64 * dt).exp(), 50.0 * (0.01_f64 * dt).exp());
+        assert!((m0 / nf - t0).abs() / t0 < 1e-3, "asset 0 forward {}", m0 / nf);
+        assert!((m1 / nf - t1).abs() / t1 < 1e-3, "asset 1 forward {}", m1 / nf);
+        // sample correlation of the log-returns (means are O(dt), ignorable)
+        let corr = c01 / (c00 * c11).sqrt();
+        assert!((corr - rho).abs() < 0.01, "log-return correlation {corr} vs {rho}");
+    }
+
+    #[test]
+    fn multi_gbm_diffusion_matrix_is_the_scaled_cholesky() {
+        let p = two_asset_gbm(0.5);
+        let mut b = [0.0; 4];
+        StochasticProcess::diffusion(&p, 0.0, &[100.0, 50.0], &mut b);
+        assert!((b[0] - 0.2 * 100.0).abs() < 1e-12 && b[1] == 0.0);
+        assert!((b[2] - 0.3 * 50.0 * 0.5).abs() < 1e-12);
+        assert!((b[3] - 0.3 * 50.0 * 0.75_f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn perfectly_correlated_identical_assets_move_in_lockstep() {
+        let p = MultiAssetGbmProcess {
+            drift_rates: vec![0.02, 0.02],
+            vols: vec![0.25, 0.25],
+            chol: vec![vec![1.0, 0.0], vec![1.0, 0.0]],
+        };
+        let mut out = [0.0; 2];
+        p.evolve(0.0, &[80.0, 80.0], 0.01, &[0.03, -0.4], &mut out);
+        assert!((out[0] - out[1]).abs() < 1e-12);
     }
 }

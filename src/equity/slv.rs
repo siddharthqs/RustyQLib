@@ -12,7 +12,11 @@
 //! the Dupire local vol. The conditional expectation is estimated by
 //! the standard particle / binning method: simulate forward, bin paths
 //! by spot at each step, average the variance per bin, and use the
-//! resulting leverage for the next step.
+//! resulting leverage for the next step. Both the calibration and the
+//! pricing simulations step the variance with the Andersen QE transition
+//! and the spot through the Broadie-Kaya decomposition (see
+//! [`SlvStepper`]), so the particle distribution carries no
+//! variance-truncation bias.
 //!
 //! SLV interpolates between the two pure models: `xi -> 0` recovers
 //! pure local vol (`E[v|S] -> v0`, `L -> sigma_LV / sqrt(v0)`), while a
@@ -25,9 +29,58 @@ use crate::core::interpolation::interp_pairs;
 use crate::core::montecarlo::path_rng;
 use crate::equity::heston::HestonParams;
 use crate::equity::local_vol::LocalVol;
+use crate::equity::processes::qe_variance_step;
 use crate::core::trade::PutOrCall;
 use rand::Rng;
 use rand_distr::StandardNormal;
+
+/// One SLV time step, shared by calibration and pricing: the variance
+/// leg is sampled with the Andersen QE transition (exact CIR conditional
+/// moments — no truncation bias), and the spot moves through the
+/// Broadie-Kaya decomposition of the integrated variance shock with the
+/// leverage frozen over the step,
+///
+/// ```text
+/// int sqrt(v) dW1 = (rho/xi)(v' - v - kappa theta dt + kappa vbar dt)
+///                 + sqrt(1 - rho^2) sqrt(vbar dt) Z_perp
+/// ln S += (r - q - 1/2 L^2 vbar) dt + L * int sqrt(v) dW1
+/// ```
+///
+/// with `vbar = (v + v')/2`. Spot-variance correlation enters through
+/// the sampled `v'`, so the two normals fed in are **independent**; at
+/// `L = 1` the scheme is exactly Andersen's K-coefficient QE spot step.
+struct SlvStepper {
+    hp: HestonParams,
+    rho_bar: f64,
+    drift: f64,
+    dt: f64,
+}
+
+impl SlvStepper {
+    fn new(hp: &HestonParams, r: f64, q: f64, dt: f64) -> Self {
+        SlvStepper {
+            hp: *hp,
+            rho_bar: (1.0 - hp.rho * hp.rho).sqrt(),
+            drift: r - q,
+            dt,
+        }
+    }
+
+    /// Advance `(s, v)` one step under leverage `lev` with independent
+    /// standard normals `z_perp` (spot) and `z_v` (variance).
+    fn step(&self, lev: f64, s: f64, v: f64, z_perp: f64, z_v: f64) -> (f64, f64) {
+        let hp = &self.hp;
+        let vp = v.max(0.0);
+        let v_next = qe_variance_step(hp, vp, self.dt, z_v);
+        let vbar = 0.5 * (vp + v_next);
+        let integrated = (hp.rho / hp.vol_of_vol)
+            * (v_next - vp - hp.kappa * hp.theta * self.dt + hp.kappa * vbar * self.dt)
+            + self.rho_bar * (vbar * self.dt).sqrt() * z_perp;
+        let s_next =
+            s * ((self.drift - 0.5 * lev * lev * vbar) * self.dt + lev * integrated).exp();
+        (s_next, v_next)
+    }
+}
 
 /// Simulation / calibration controls.
 #[derive(Debug, Clone, Copy)]
@@ -102,24 +155,18 @@ impl<'a> Slv<'a> {
     ) -> f64 {
         let steps = (t / self.dt).round().max(1.0) as usize;
         let dt = t / steps as f64;
-        let hp = &self.heston;
-        let rho_bar = (1.0 - hp.rho * hp.rho).sqrt();
+        let stepper = SlvStepper::new(&self.heston, self.r, self.q, dt);
         let mut sum = 0.0;
         for i in 0..paths {
             let mut rng = path_rng(seed, i as u64);
             let mut s = self.s0;
-            let mut v: f64 = hp.v0;
+            let mut v: f64 = self.heston.v0;
             for k in 0..steps {
                 let tk = k as f64 * dt;
                 let z1: f64 = rng.sample(StandardNormal);
                 let z2: f64 = rng.sample(StandardNormal);
-                let zv = hp.rho * z1 + rho_bar * z2;
                 let lev = self.leverage(s, tk);
-                let vp = v.max(0.0);
-                s *= ((self.r - self.q - 0.5 * lev * lev * vp) * dt
-                    + lev * (vp * dt).sqrt() * z1)
-                    .exp();
-                v += hp.kappa * (hp.theta - vp) * dt + hp.vol_of_vol * (vp * dt).sqrt() * zv;
+                (s, v) = stepper.step(lev, s, v, z1, z2);
             }
             sum += match put_or_call {
                 PutOrCall::Call => (s - strike).max(0.0),
@@ -146,7 +193,7 @@ pub fn calibrate<'a>(
     assert!(horizon > 0.0 && cfg.steps > 0 && cfg.bins >= 2 && cfg.paths >= cfg.bins * 10);
     let dt = horizon / cfg.steps as f64;
     let n = cfg.paths;
-    let rho_bar = (1.0 - heston.rho * heston.rho).sqrt();
+    let stepper = SlvStepper::new(heston, r, q, dt);
 
     let mut spots = vec![s0; n];
     let mut vars = vec![heston.v0; n];
@@ -186,13 +233,8 @@ pub fn calibrate<'a>(
             let mut rng = path_rng(cfg.seed.wrapping_add(0x51_1e * k as u64 + 1), i as u64);
             let z1: f64 = rng.sample(StandardNormal);
             let z2: f64 = rng.sample(StandardNormal);
-            let zv = heston.rho * z1 + rho_bar * z2;
-            let vp = vars[i].max(0.0);
             let lev = local_vol.vol(spots[i], t) / cond(spots[i]).max(1e-8).sqrt();
-            spots[i] *=
-                ((r - q - 0.5 * lev * lev * vp) * dt + lev * (vp * dt).sqrt() * z1).exp();
-            vars[i] += heston.kappa * (heston.theta - vp) * dt
-                + heston.vol_of_vol * (vp * dt).sqrt() * zv;
+            (spots[i], vars[i]) = stepper.step(lev, spots[i], vars[i], z1, z2);
         }
     }
 

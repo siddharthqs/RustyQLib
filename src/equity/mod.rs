@@ -32,5 +32,6 @@ pub mod bates;
 pub mod slv;
 pub mod cliquet;
 pub mod lookback;
+pub mod worst_of;
 pub mod accumulator;
 pub mod variance_swap;

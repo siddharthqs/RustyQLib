@@ -6,6 +6,9 @@
 //! so rates, FX, commodity or credit simulations plug in the same way
 //! equities do.
 //!
+//! - [`paths`]: the public `sample_paths` API — materialized path
+//!   matrices over any process, plus the per-path Brownian increment
+//!   source ([`PathDraws`]) the pricing engines share;
 //! - [`process`]: the generic Itô-process / SDE abstraction — drift and
 //!   diffusion coefficients live in the process, Euler / Milstein are
 //!   written once against them, closed-form transitions and
@@ -29,6 +32,7 @@
 
 pub mod brownian_bridge;
 pub mod halton;
+pub mod paths;
 pub mod process;
 pub mod rng;
 pub mod sampling;
@@ -38,6 +42,9 @@ pub mod variance_reduction;
 
 pub use brownian_bridge::BrownianBridge;
 pub use halton::QmcSequence;
+pub use paths::{
+    sample_paths, sample_paths_1d, MultiPaths, PathDraws, Paths, SampleConfig, Sampler,
+};
 pub use process::{DiscretizationScheme, StochasticProcess, StochasticProcess1D};
 pub use rng::{path_normals, path_rng, pseudo_normal_matrix, pseudo_normals, splitmix64};
 pub use sampling::{latin_hypercube, stratified_normals, stratified_uniforms};

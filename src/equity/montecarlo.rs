@@ -30,7 +30,6 @@
 //! plugs in by implementing the process trait; the per-path stream and
 //! stepping structure is factor-agnostic.
 
-use std::str::FromStr;
 use libm::exp;
 use rayon::prelude::*;
 
@@ -46,36 +45,16 @@ use super::vanilla_option::{AsianPayoff, BarrierPayoff, EquityOption, VanillaPay
 use super::utils::Model;
 use crate::core::montecarlo::process::{StochasticProcess, StochasticProcess1D};
 use crate::core::trade::PutOrCall;
-use crate::core::montecarlo::{
-    path_normals, pseudo_normals, sobol_normals, BrownianBridge, QmcSequence,
-};
+use crate::core::montecarlo::{path_normals, pseudo_normals, sobol_normals, PathDraws};
 use crate::core::data_models::EquityOptionData;
 
 /// Re-exported from the asset-agnostic process layer, where the schemes
 /// are defined once against any SDE's drift/diffusion coefficients.
 pub use crate::core::montecarlo::process::DiscretizationScheme;
 
-/// Draw sampler. `Sobol` selects the low-discrepancy family: true Sobol
-/// (van der Corput) in one dimension, a scrambled multi-dimensional
-/// sequence through a Brownian bridge for path-wise simulation.
-/// `PseudoRandom` uses seeded per-path PCG64 streams with antithetic
-/// pairing. Longstaff-Schwarz always uses pseudo-random streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sampler {
-    Sobol,
-    PseudoRandom,
-}
-
-impl FromStr for Sampler {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_lowercase().as_str() {
-            "sobol" | "quasi" => Ok(Sampler::Sobol),
-            "pseudo" | "pseudorandom" | "pseudo_random" => Ok(Sampler::PseudoRandom),
-            other => Err(format!("Invalid sampler '{other}'")),
-        }
-    }
-}
+/// Re-exported from the asset-agnostic path layer. Longstaff-Schwartz
+/// always uses pseudo-random streams.
+pub use crate::core::montecarlo::paths::Sampler;
 
 /// Dynamics used for path generation. `Gbm` diffuses at the option's own
 /// (constant) implied vol; `LocalVol` diffuses at the Dupire local
@@ -373,7 +352,7 @@ pub(crate) fn aad_greeks(option: &EquityOption) -> Option<AadGreeks> {
         option.payoff.path_payoff_var(&probe, p.strike)?;
     }
     let dt = p.t / steps as f64;
-    let draws = PathDraws::new(cfg, steps, dt);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let divs = dividends_per_step(option, p.t, steps);
     let chunks = cfg.paths.div_ceil(PATH_CHUNK);
     let partials: Vec<(f64, f64, f64)> = (0..chunks)
@@ -486,50 +465,6 @@ fn effective_steps(cfg: &MonteCarloConfig, model: &Model) -> usize {
     }
 }
 
-// ── Per-path Brownian increments ────────────────────────────────────────
-
-/// Deterministic per-path Brownian increment source. Pseudo-random paths
-/// come in antithetic pairs (2k, 2k+1) from independent per-pair streams;
-/// low-discrepancy paths are sequence points routed through the Brownian
-/// bridge.
-enum PathDraws {
-    Pseudo { seed: u64, sqrt_dt: f64 },
-    Qmc { seq: QmcSequence, bridge: BrownianBridge },
-}
-
-impl PathDraws {
-    fn new(cfg: &MonteCarloConfig, steps: usize, dt: f64) -> Self {
-        match cfg.sampler {
-            Sampler::Sobol => PathDraws::Qmc {
-                seq: QmcSequence::new(steps, cfg.seed),
-                bridge: BrownianBridge::new(steps, dt),
-            },
-            Sampler::PseudoRandom => PathDraws::Pseudo { seed: cfg.seed, sqrt_dt: dt.sqrt() },
-        }
-    }
-
-    fn pseudo(seed: u64, dt: f64) -> Self {
-        PathDraws::Pseudo { seed, sqrt_dt: dt.sqrt() }
-    }
-
-    /// Fill `dw` with the Brownian increments of path `index`.
-    fn fill(&self, index: usize, z: &mut [f64], w: &mut [f64], dw: &mut [f64]) {
-        match self {
-            PathDraws::Pseudo { seed, sqrt_dt } => {
-                path_normals(*seed, (index / 2) as u64, z);
-                let sign = if index % 2 == 0 { 1.0 } else { -1.0 };
-                for (d, zi) in dw.iter_mut().zip(z.iter()) {
-                    *d = sign * sqrt_dt * zi;
-                }
-            }
-            PathDraws::Qmc { seq, bridge } => {
-                seq.normals(index as u64 + 1, z);
-                bridge.increments(z, w, dw);
-            }
-        }
-    }
-}
-
 /// Paths per parallel work unit. Each chunk is summed serially in index
 /// order and chunk results are folded in order, so totals are bit-exact
 /// reproducible regardless of thread scheduling.
@@ -620,7 +555,7 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     }
     let dt = p.t / steps as f64;
     let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg, steps, dt);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let divs = dividends_per_step(option, p.t, steps);
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, _| {
         let mut s = p.s0;
@@ -643,7 +578,7 @@ fn generic_path_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let dt = p.t / steps as f64;
     let df = exp(-p.r * p.t);
     let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg, steps, dt);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let divs = dividends_per_step(option, p.t, steps);
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
         path.clear();
@@ -680,7 +615,7 @@ fn asian_npv(option: &EquityOption, asian: &AsianPayoff, p: &MarketParams) -> Mc
     let dt = p.t / steps as f64;
     let drift_dt = (p.r - p.q - 0.5 * p.sigma * p.sigma) * dt;
     let df = exp(-p.r * p.t);
-    let draws = PathDraws::new(cfg, steps, dt);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, _| {
         let mut s = p.s0;
         let mut sum_s = 0.0;
@@ -725,7 +660,7 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
     }
     let df = exp(-p.r * p.t);
     let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg, steps, dt);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let divs = dividends_per_step(option, p.t, steps);
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, _| {
         let mut s = p.s0;
@@ -818,7 +753,7 @@ fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketPara
         observation_grid(option, n_obs, auto.observation_times.as_ref(), p.t, p.r, steps);
     let divs = dividends_per_step(option, p.t, steps);
     let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg, steps, dt);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
         path.clear();
         let mut s = p.s0;
@@ -848,7 +783,7 @@ fn accumulator_npv(option: &EquityOption, accu: &AccumulatorPayoff, p: &MarketPa
     let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
     let divs = dividends_per_step(option, p.t, steps);
     let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg, steps, dt);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
         path.clear();
         let mut s = p.s0;
