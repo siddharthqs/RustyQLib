@@ -928,7 +928,7 @@ checksum = "7ffc183a10b4478d04cbbbfc96d0873219d962dd5accaff2ffbd4ceb7df837f4"
 
 [[package]]
 name = "rustyqlib"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "assert_approx_eq",
  "chrono",
