@@ -1,16 +1,15 @@
 use crate::rates;
 use crate::rates::deposits::Deposit;
-use chrono::{NaiveDate,Local,Weekday};
-use chrono::Datelike;
+use chrono::Local;
 use crate::rates::fra::FRA;
-use crate::core::traits::{Instrument,Rates};
-use crate::core::utils::{Contract, Contracts};
+use crate::core::traits::Rates;
+use crate::core::utils::Contract;
 use crate::rates::utils::TermStructure;
 
 pub fn build_ir_contracts(data: Contract) -> Box<dyn Rates> {
     let rate_data = data.rate_data.clone().unwrap();
-    let mut start_date_str = rate_data.start_date; // Only for 0M case
-    let mut maturity_date_str = rate_data.maturity_date;
+    let start_date_str = rate_data.start_date; // Only for 0M case
+    let maturity_date_str = rate_data.maturity_date;
     let current_date = Local::now().date_naive();
     let maturity_date = rates::utils::convert_mm_to_date(maturity_date_str);
     let start_date = rates::utils::convert_mm_to_date(start_date_str);
@@ -37,7 +36,7 @@ pub fn build_ir_contracts(data: Contract) -> Box<dyn Rates> {
             }
             _ => {}
         }
-        let mut ird:Box<dyn Rates> = Box::new(deposit);
+        let ird:Box<dyn Rates> = Box::new(deposit);
         return ird;
     }
     else if rate_data.instrument.as_str()=="FRA" {
@@ -88,12 +87,12 @@ pub fn build_ir_contracts_from_json(data: Vec<Contract>) -> Vec<Box<dyn Rates>> 
 pub fn build_term_structure(mut contracts:Vec<Box<dyn Rates>>) -> TermStructure {
     let mut ts:rates::utils::TermStructure = rates::utils::TermStructure::new(vec![],vec![],vec![],
                                                                               rates::utils::DayCountConvention::Act360);
-    let mut contract = contracts[0].as_mut();
+    let contract = contracts[0].as_mut();
     ts.discount_factor.push(contract.get_maturity_discount_factor());
     ts.date.push(contract.get_maturity_date());
     ts.rate.push(contract.get_rate());
     for i in 1..contracts.len(){
-        let mut contract = contracts[i].as_mut();
+        let contract = contracts[i].as_mut();
         contract.set_term_structure(ts.clone());
         ts.discount_factor.push(contract.get_maturity_discount_factor());
         ts.date.push(contract.get_maturity_date());

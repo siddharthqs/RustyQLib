@@ -275,8 +275,8 @@ impl BlackScholesPricer {
         // S e^{-qT} dN(d1) sqrt(T)
         let dn_d1 = norm_pdf(bsd_option.d1());
         let df_d = exp(-bsd_option.carry_yield() * bsd_option.time_to_maturity());
-        let df_S = bsd_option.effective_spot() * df_d;
-        let vega = df_S * dn_d1 * bsd_option.time_to_maturity().sqrt();
+        let df_s = bsd_option.effective_spot() * df_d;
+        let vega = df_s * dn_d1 * bsd_option.time_to_maturity().sqrt();
         vega
     }
     fn theta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
@@ -290,16 +290,16 @@ impl BlackScholesPricer {
         let n_d2 = norm_cdf(bsd_option.d2());
         let df_d = exp(-q * bsd_option.time_to_maturity());
         let df_r = bsd_option.maturity_discount_factor();
-        let df_S = bsd_option.effective_spot() * df_d;
-        let t1 = -df_S * dn_d1 * bsd_option.volatility()
+        let df_s = bsd_option.effective_spot() * df_d;
+        let t1 = -df_s * dn_d1 * bsd_option.volatility()
             / (2.0 * bsd_option.time_to_maturity().sqrt());
 
         match bsd_option.payoff.put_or_call() {
             PutOrCall::Call => {
-                t1 + q * df_S * n_d1 - r * k * df_r * n_d2
+                t1 + q * df_s * n_d1 - r * k * df_r * n_d2
             }
             PutOrCall::Put => {
-                t1 - q * df_S * norm_cdf(-bsd_option.d1()) + r * k * df_r * norm_cdf(-bsd_option.d2())
+                t1 - q * df_s * norm_cdf(-bsd_option.d1()) + r * k * df_r * norm_cdf(-bsd_option.d2())
             }
         }
     }
@@ -2675,9 +2675,105 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Heston model is supported on the Analytical and MonteCarlo")]
-    fn fd_engine_rejects_heston() {
+    fn adjoint_greeks_cover_the_approximate_schemes() {
+        // the AAD tape records Euler and Milstein stepping too: one
+        // simulation must reproduce the analytic delta and vega
+        let analytic = test_option(PutOrCall::Call, flat_5pct());
+        for scheme in [
+            crate::equity::montecarlo::DiscretizationScheme::Euler,
+            crate::equity::montecarlo::DiscretizationScheme::Milstein,
+        ] {
+            let mut mc = test_option(PutOrCall::Call, flat_5pct());
+            mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            mc.mc_cfg_mut().scheme = scheme;
+            mc.mc_cfg_mut().time_steps = 252;
+            mc.mc_cfg_mut().paths = 100_000;
+            let g = crate::equity::montecarlo::aad_greeks(&mc)
+                .expect("AAD must cover approximate schemes");
+            assert!(
+                (g.delta - analytic.delta()).abs() < 0.01,
+                "{scheme:?}: delta {} vs {}",
+                g.delta,
+                analytic.delta()
+            );
+            assert!(
+                (g.vega - analytic.vega()).abs() < 0.6,
+                "{scheme:?}: vega {} vs {}",
+                g.vega,
+                analytic.vega()
+            );
+        }
+    }
+
+    #[test]
+    fn heston_adjoint_greeks_match_the_characteristic_function() {
+        use crate::equity::heston::heston_price;
+        let mut mc = heston_vanilla(PutOrCall::Call);
+        mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        mc.mc_cfg_mut().paths = 100_000;
+        let g = crate::equity::montecarlo::aad_greeks(&mc)
+            .expect("Heston AAD must cover European vanillas");
+
+        // delta oracle: the exact probability-based CF delta
+        let delta_cf = crate::equity::heston::native_vanilla_delta(&heston_vanilla(
+            PutOrCall::Call,
+        ))
+        .unwrap();
+        assert!((g.delta - delta_cf).abs() < 0.01, "delta {} vs {delta_cf}", g.delta);
+
+        // vega and rho oracles: central CF bumps in the same conventions
+        let hp = crate::equity::heston::HestonParams {
+            v0: 0.09,
+            kappa: 2.0,
+            theta: 0.09,
+            vol_of_vol: 0.4,
+            rho: -0.7,
+        };
+        let (s, k, r, q, t) = (100.0, 100.0, 0.05, 0.02, 1.0);
+        let h = 0.005;
+        let vega_cf = (heston_price(s, k, r, q, t, &hp.with_vol_shift(h), PutOrCall::Call)
+            - heston_price(s, k, r, q, t, &hp.with_vol_shift(-h), PutOrCall::Call))
+            / (2.0 * h);
+        assert!(
+            (g.vega - vega_cf).abs() < 0.03 * vega_cf.abs() + 0.05,
+            "vega {} vs {vega_cf}",
+            g.vega
+        );
+        let hr = 1e-4;
+        let rho_cf = (heston_price(s, k, r + hr, q, t, &hp, PutOrCall::Call)
+            - heston_price(s, k, r - hr, q, t, &hp, PutOrCall::Call))
+            / (2.0 * hr);
+        assert!(
+            (g.rho - rho_cf).abs() < 0.03 * rho_cf.abs() + 0.05,
+            "rho {} vs {rho_cf}",
+            g.rho
+        );
+    }
+
+    #[test]
+    fn fd_engine_prices_heston_on_the_adi_grid() {
+        // the 2-D ADI grid must agree with the semi-analytic price
+        let analytic = heston_vanilla(PutOrCall::Call).npv();
         let mut option = heston_vanilla(PutOrCall::Call);
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
+        let fd = option.npv();
+        assert!((fd - analytic).abs() < 0.05, "adi {fd:.4} vs cf {analytic:.4}");
+    }
+
+    #[test]
+    #[should_panic(expected = "vanilla and binary payoffs")]
+    fn fd_engine_rejects_heston_barriers() {
+        use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+        let mut option = heston_option(Box::new(BarrierPayoff {
+            put_or_call: PutOrCall::Call,
+            exercise_style: ContractStyle::European,
+            direction: Down,
+            knock: Out,
+            barrier: 90.0,
+            barrier2: None,
+            rebate: 0.0,
+            rebate_at_hit: false,
+        }));
         option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         option.npv();
     }

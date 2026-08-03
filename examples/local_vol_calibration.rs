@@ -10,7 +10,6 @@ use rustyqlib::core::curves::{Compounding, Tenor, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::core::quotes::Quote;
 use rustyqlib::core::trade::PutOrCall;
-use rustyqlib::core::traits::Instrument;
 use rustyqlib::core::vols::VolSurface;
 use rustyqlib::equity::blackscholes::bs_price;
 use rustyqlib::equity::builder::EquityOptionBuilder;

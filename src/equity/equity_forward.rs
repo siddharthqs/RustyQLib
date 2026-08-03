@@ -1,10 +1,8 @@
 use crate::core::errors::RustyQLibError;
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
 use crate::core::data_models::EquityForwardData;
 use crate::core::quotes::Quote;
 use crate::core::traits::Instrument;
-use crate::core::utils::Contract;
-use crate::equity::equity_future::EquityFuture;
 use crate::equity::utils::LongShort;
 ///A forward contract is an agreement between two parties to buy or sell, as the case may be,
 /// a commodity (or financial instrument or currency or any other underlying)
@@ -81,9 +79,6 @@ impl EquityForward  {
     fn time_to_maturity(&self) -> f64 {
         let days = (self.maturity_date - self.valuation_date).num_days();
         (days as f64) / 365.0
-    }
-    fn premiun(&self)->f64{
-        self.forward()-self.underlying_price.value()
     }
     fn forward(&self)->f64{
         let discount_df = 1.0/(self.risk_free_rate*self.time_to_maturity()).exp();

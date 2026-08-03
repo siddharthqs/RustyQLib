@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use crate::equity::vanilla_option::EquityOptionBase;
 use std::str::FromStr;
 use std::error::Error;
 use crate::core::trade::{PutOrCall};

@@ -47,6 +47,7 @@ use crate::core::montecarlo::process::{StochasticProcess, StochasticProcess1D};
 use crate::core::trade::PutOrCall;
 use crate::core::montecarlo::{path_normals, pseudo_normals, sobol_normals, PathDraws};
 use crate::core::data_models::EquityOptionData;
+use crate::core::errors::RustyQLibError;
 
 /// Re-exported from the asset-agnostic process layer, where the schemes
 /// are defined once against any SDE's drift/diffusion coefficients.
@@ -96,29 +97,53 @@ impl Default for MonteCarloConfig {
 }
 
 impl MonteCarloConfig {
-    pub fn from_data(data: &EquityOptionData) -> Self {
+    /// Read the sampling configuration from contract data, reporting bad
+    /// `mc_scheme` / `mc_sampler` strings as typed errors naming the field.
+    pub fn from_data(data: &EquityOptionData) -> Result<Self, RustyQLibError> {
         let defaults = MonteCarloConfig::default();
-        let scheme = data
-            .mc_scheme
-            .as_deref()
-            .map(|s| s.parse::<DiscretizationScheme>().expect("Invalid mc_scheme"))
-            .unwrap_or(defaults.scheme);
+        let scheme = match data.mc_scheme.as_deref() {
+            Some(s) => s
+                .parse::<DiscretizationScheme>()
+                .map_err(|e| RustyQLibError::invalid_input("mc_scheme", e))?,
+            None => defaults.scheme,
+        };
         // approximate schemes need real time-stepping to mean anything
         let default_steps = match scheme {
             DiscretizationScheme::Exact => 1,
             _ => 252,
         };
-        MonteCarloConfig {
+        let sampler = match data.mc_sampler.as_deref() {
+            Some(s) => s
+                .parse::<Sampler>()
+                .map_err(|e| RustyQLibError::invalid_input("mc_sampler", e))?,
+            None => defaults.sampler,
+        };
+        Ok(MonteCarloConfig {
             paths: data.simulation.unwrap_or(defaults.paths as u64) as usize,
             time_steps: data.mc_time_steps.unwrap_or(default_steps),
             scheme,
-            sampler: data
-                .mc_sampler
-                .as_deref()
-                .map(|s| s.parse::<Sampler>().expect("Invalid mc_sampler"))
-                .unwrap_or(defaults.sampler),
+            sampler,
             seed: data.mc_seed.unwrap_or(defaults.seed),
+        })
+    }
+
+    /// Domain checks on the sampling parameters; field names match the
+    /// [`EquityOptionBuilder`](crate::equity::builder::EquityOptionBuilder)
+    /// setters.
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
+        if self.paths == 0 {
+            return Err(RustyQLibError::invalid_input(
+                "paths",
+                "Monte Carlo needs at least one path",
+            ));
         }
+        if self.time_steps == 0 {
+            return Err(RustyQLibError::invalid_input(
+                "mc_time_steps",
+                "Monte Carlo needs at least one time step",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -310,35 +335,42 @@ pub(crate) struct AadGreeks {
     pub rho: f64,
 }
 
-/// Delta, vega and rho from a backward adjoint sweep per path: the GBM
+/// Delta, vega and rho from a backward adjoint sweep per path: the path
 /// stepping and the payoff (via [`Payoff::path_payoff_var`]) are recorded
-/// on an AAD tape with `(S0, sigma, r)` as inputs, and one reverse pass
+/// on an AAD tape with the market inputs as roots, and one reverse pass
 /// per path yields all three sensitivities — the cost does not grow with
 /// the number of Greeks. Holding the draws fixed these are the classical
-/// pathwise estimators: unbiased for continuous payoffs, using exactly
-/// the draws the price uses.
+/// pathwise estimators: unbiased for continuous payoffs.
 ///
 /// Theta is deliberately absent: differentiating with the Brownian path
 /// held fixed while the time grid moves is not well-defined, so theta
 /// stays with the bump stencils.
 ///
-/// Scope: European exercise, GBM dynamics, exact stepping, and a payoff
-/// that opts into AAD (vanilla, Asian, lookback, forward-start — the
-/// continuous ones). Returns `None` otherwise; discontinuous payoffs
+/// Scope: European exercise, a payoff that opts into AAD (vanilla,
+/// Asian, lookback, forward-start — the continuous ones), and dynamics
+/// with a tape-safe stepping recursion: GBM under any scheme
+/// ([`gbm_aad_greeks`]), Heston through the full-truncation recursion
+/// ([`heston_aad_greeks`]). Local vol stays with the bump stencils (its
+/// surface interpolation is not on the tape), and discontinuous payoffs
 /// (barrier, binary, autocallable) never opt in because the
 /// almost-everywhere derivative of their indicator is zero.
 pub(crate) fn aad_greeks(option: &EquityOption) -> Option<AadGreeks> {
-    use crate::core::aad::{Tape, Var};
     if !matches!(option.payoff.exercise_style(), ContractStyle::European) {
         return None;
     }
-    if option.model != Model::Gbm {
-        return None;
+    match option.model {
+        Model::Gbm => gbm_aad_greeks(option),
+        Model::Heston(_) => heston_aad_greeks(option),
+        Model::LocalVol => None,
     }
+}
+
+/// GBM adjoint sweep with `(S0, sigma, r)` as tape roots. All three
+/// schemes are taped — exact log-normal, Euler, Milstein — so switching
+/// the discretization keeps one-simulation Greeks.
+fn gbm_aad_greeks(option: &EquityOption) -> Option<AadGreeks> {
+    use crate::core::aad::{Tape, Var};
     let cfg = option.mc_cfg();
-    if cfg.scheme != DiscretizationScheme::Exact {
-        return None;
-    }
     let p = market_params(option);
     let steps = if option.payoff.is_path_dependent() {
         effective_steps(cfg, &option.model).max(PATH_DEPENDENT_MIN_STEPS)
@@ -373,10 +405,23 @@ pub(crate) fn aad_greeks(option: &EquityOption) -> Option<AadGreeks> {
                 let r = tape.var(p.r);
                 let mut s = s0;
                 for (step_idx, dwi) in dw.iter().enumerate() {
-                    // exact GBM step: s * exp((r - q - sigma^2/2) dt + sigma dW)
-                    let exponent =
-                        (r - p.q) * dt - sigma * sigma * (0.5 * dt) + sigma * *dwi;
-                    s = s * exponent.exp();
+                    s = match cfg.scheme {
+                        // exact: s * exp((r - q - sigma^2/2) dt + sigma dW)
+                        DiscretizationScheme::Exact => {
+                            let exponent =
+                                (r - p.q) * dt - sigma * sigma * (0.5 * dt) + sigma * *dwi;
+                            s * exponent.exp()
+                        }
+                        DiscretizationScheme::Euler => {
+                            (s * ((r - p.q) * dt + sigma * *dwi + 1.0)).maxf(0.0)
+                        }
+                        DiscretizationScheme::Milstein => {
+                            let correction =
+                                sigma * sigma * (0.5 * (dwi * dwi - dt));
+                            (s * ((r - p.q) * dt + sigma * *dwi + correction + 1.0))
+                                .maxf(0.0)
+                        }
+                    };
                     if let Some(divs) = &divs {
                         if divs[step_idx] != 0.0 {
                             s = (s - divs[step_idx]).maxf(1e-8);
@@ -392,6 +437,93 @@ pub(crate) fn aad_greeks(option: &EquityOption) -> Option<AadGreeks> {
                 let g = discounted.grad();
                 delta_sum += g.wrt(s0);
                 vega_sum += g.wrt(sigma);
+                rho_sum += g.wrt(r);
+            }
+            (delta_sum, vega_sum, rho_sum)
+        })
+        .collect();
+    let (delta_sum, vega_sum, rho_sum) = partials
+        .into_iter()
+        .fold((0.0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+    let n = cfg.paths as f64;
+    Some(AadGreeks { delta: delta_sum / n, vega: vega_sum / n, rho: rho_sum / n })
+}
+
+/// Heston adjoint sweep: the **full-truncation Euler** recursion is
+/// recorded on the tape with `(S0, vol-shift, r)` as roots, where the
+/// vol-shift root enters through the library's Heston vega convention —
+/// `v0 = (sqrt(v0) + shift)^2`, `theta = (sqrt(theta) + shift)^2` — so
+/// `d/d shift` at zero is exactly the vega the bump engine estimates.
+///
+/// Full truncation rather than QE because the tape needs a smooth
+/// recursion: QE's branch switch and its mass at zero have no useful
+/// pathwise derivative, while the FT step is differentiable wherever
+/// `v != 0` (the truncation kink has measure zero away from the origin;
+/// the variance floor is nudged to `1e-12` so `sqrt` stays finite).
+/// The price itself still comes from the QE engine — both estimate the
+/// same Greeks, FT merely needs its fine step floor here.
+fn heston_aad_greeks(option: &EquityOption) -> Option<AadGreeks> {
+    use crate::core::aad::{Tape, Var};
+    let hp = *option.heston_params();
+    let cfg = option.mc_cfg();
+    let p = market_params(option);
+    let steps = cfg.time_steps.max(HESTON_MIN_STEPS);
+    // capability probe before spinning up the parallel loop
+    {
+        let tape = Tape::new();
+        let probe: Vec<Var> = (0..steps.max(2)).map(|_| tape.var(p.s0)).collect();
+        option.payoff.path_payoff_var(&probe, p.strike)?;
+    }
+    let dt = p.t / steps as f64;
+    let sqrt_dt = dt.sqrt();
+    let rho_perp = (1.0 - hp.rho * hp.rho).sqrt();
+    let divs = dividends_per_step(option, p.t, steps);
+    let chunks = cfg.paths.div_ceil(PATH_CHUNK);
+    let partials: Vec<(f64, f64, f64)> = (0..chunks)
+        .into_par_iter()
+        .map(|chunk| {
+            let mut z = vec![0.0; 2 * steps];
+            let tape = Tape::new();
+            let mut path_vars: Vec<Var> = Vec::with_capacity(steps);
+            let (mut delta_sum, mut vega_sum, mut rho_sum) = (0.0, 0.0, 0.0);
+            for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
+                path_normals(cfg.seed, (i / 2) as u64, &mut z);
+                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                tape.clear();
+                path_vars.clear();
+                let s0 = tape.var(p.s0);
+                let vol_shift = tape.var(0.0);
+                let r = tape.var(p.r);
+                let sqrt_v0 = vol_shift + hp.v0.sqrt();
+                let sqrt_theta = vol_shift + hp.theta.sqrt();
+                let theta_var = sqrt_theta * sqrt_theta;
+                let mut s = s0;
+                let mut v = sqrt_v0 * sqrt_v0;
+                for j in 0..steps {
+                    let dw_s = sqrt_dt * sign * z[2 * j];
+                    let dw_v =
+                        hp.rho * dw_s + rho_perp * sqrt_dt * sign * z[2 * j + 1];
+                    // floor nudged off zero so sqrt' stays finite on tape
+                    let v_pos = v.maxf(1e-12);
+                    let sqrt_v = v_pos.sqrt();
+                    s = s * ((r - p.q) * dt - v_pos * (0.5 * dt) + sqrt_v * dw_s).exp();
+                    if let Some(divs) = &divs {
+                        if divs[j] != 0.0 {
+                            s = (s - divs[j]).maxf(1e-8);
+                        }
+                    }
+                    v = v + (theta_var - v_pos) * (hp.kappa * dt)
+                        + sqrt_v * (hp.vol_of_vol * dw_v);
+                    path_vars.push(s);
+                }
+                let payoff = option
+                    .payoff
+                    .path_payoff_var(&path_vars, p.strike)
+                    .expect("the probe above guaranteed AAD support");
+                let discounted = payoff * (-(r * p.t)).exp();
+                let g = discounted.grad();
+                delta_sum += g.wrt(s0);
+                vega_sum += g.wrt(vol_shift);
                 rho_sum += g.wrt(r);
             }
             (delta_sum, vega_sum, rho_sum)
@@ -1049,7 +1181,6 @@ fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
             .iter()
             .map(|&i| {
                 let s = spots[i][step_idx];
-                let pay = option.payoff.payoff(s, p.strike);
                 (lsmc_basis(s / p.s0), cashflow[i])
             })
             .collect();

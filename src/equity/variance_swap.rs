@@ -21,7 +21,7 @@
 //! chi-distribution mean `sigma * sqrt(2/n) * Gamma((n+1)/2) /
 //! Gamma(n/2)` — below `sigma` for finite sampling by Jensen.
 
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::core::traits::Instrument;

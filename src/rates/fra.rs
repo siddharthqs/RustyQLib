@@ -1,5 +1,5 @@
 use chrono::{Local, NaiveDate};
-use crate::core::traits::{Instrument,Rates};
+use crate::core::traits::Rates;
 use crate::rates::utils::{DayCountConvention,TermStructure};
 
 /*

@@ -26,7 +26,7 @@
 //! cliquet has zero spot delta; the output reports Monte Carlo
 //! standard errors instead of spot Greeks.
 
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::core::montecarlo::{mean_std_err, path_rng};

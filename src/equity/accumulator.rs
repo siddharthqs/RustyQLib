@@ -25,7 +25,7 @@
 //!   product; the tests assert exact agreement in the barrier-free
 //!   degenerate cases and closeness with dense observations.
 
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::core::montecarlo::{mean_std_err, path_rng};
@@ -134,7 +134,6 @@ impl Accumulator {
     /// monitoring). Each observation contributes a knock-out pair
     /// maturing on its date.
     pub fn analytic_npv(&self) -> f64 {
-        self.validate();
         let dt = self.t / self.observations as f64;
         let mut value = 0.0;
         for i in 1..=self.observations {
@@ -171,7 +170,6 @@ impl Accumulator {
     /// observation (the contractual daily-close convention), accrual up
     /// to but excluding the knock-out day. Deterministic per seed.
     pub fn mc_npv(&self) -> (f64, f64) {
-        self.validate();
         let dt = self.t / self.observations as f64;
         let drift = (self.r - self.q - 0.5 * self.sigma * self.sigma) * dt;
         let vol = self.sigma * dt.sqrt();
@@ -365,6 +363,9 @@ impl Instrument for Accumulator {
     }
 
     fn price(&self) -> Result<crate::core::results::PricingResult, RustyQLibError> {
+        // typed rejection for directly constructed accumulators;
+        // try_from_json validates at construction
+        self.validate()?;
         let (pv, std_err) = match self.pricer {
             AccumulatorPricer::Analytical => (self.analytic_npv(), None),
             AccumulatorPricer::MonteCarlo => {

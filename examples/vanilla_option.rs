@@ -6,11 +6,7 @@ mod common;
 
 use chrono::NaiveDate;
 use rustyqlib::core::trade::PutOrCall;
-use rustyqlib::core::traits::Instrument;
-use rustyqlib::equity::blackscholes::bs_price;
 use rustyqlib::equity::builder::EquityOptionBuilder;
-use rustyqlib::equity::montecarlo::Sampler;
-use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
 use rustyqlib::equity::vanilla_option::EquityOption;
 

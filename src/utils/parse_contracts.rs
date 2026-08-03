@@ -60,7 +60,7 @@ pub fn build_curve(file: &mut File, output_filename: &str) -> () {
         panic!("Commodity contracts not supported");
     }
     else if list_contracts.asset=="IR"{
-        let mut contracts:Vec<Box<dyn Rates>> = build_ir_contracts_from_json(list_contracts.contracts);
+        let contracts:Vec<Box<dyn Rates>> = build_ir_contracts_from_json(list_contracts.contracts);
         let ts = build_term_structure(contracts);
         let mut output: String = String::new();
         for i in 0..ts.date.len(){
@@ -114,8 +114,8 @@ pub fn process_contract(data: &Contract) -> serde_json::Value {
     }
     else if data.action=="PV" && data.asset=="IR"{
         let rate_data = data.rate_data.clone().unwrap();
-        let mut start_date_str = rate_data.start_date; // Only for 0M case
-        let mut maturity_date_str = rate_data.maturity_date;
+        let start_date_str = rate_data.start_date; // Only for 0M case
+        let maturity_date_str = rate_data.maturity_date;
         let current_date = Local::now().date_naive();
         let maturity_date = rates::utils::convert_mm_to_date(maturity_date_str);
         let start_date = rates::utils::convert_mm_to_date(start_date_str);
@@ -149,6 +149,4 @@ pub fn process_contract(data: &Contract) -> serde_json::Value {
     else{
         panic!("Invalid action");
     }
-    return serde_json::Value::String("Invalid Action".to_string());
-
 }

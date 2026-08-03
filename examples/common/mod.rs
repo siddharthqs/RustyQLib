@@ -5,6 +5,10 @@
 //! refuse a combination (by design) are caught and reported rather than
 //! aborting the run, so these files double as a support matrix.
 
+// each example compiles this module separately and uses a different
+// subset of the helpers, so per-example dead-code warnings are noise
+#![allow(dead_code)]
+
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use rustyqlib::core::traits::Instrument;
@@ -54,11 +58,10 @@ pub fn row(label: &str, option: &EquityOption) {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let (pv, std_err) = if option.engine.kind() == Engine::MonteCarlo {
-            let s = montecarlo::npv_with_stats(option);
-            (s.pv, Some(s.std_err))
+        let std_err = if option.engine.kind() == Engine::MonteCarlo {
+            Some(montecarlo::npv_with_stats(option).std_err)
         } else {
-            (option.npv(), None)
+            None
         };
         let result = option.price().unwrap();
         (result.pv, result.greeks.delta, result.greeks.gamma, result.greeks.vega, result.greeks.theta,

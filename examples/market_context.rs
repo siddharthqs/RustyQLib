@@ -22,7 +22,6 @@
 mod common;
 
 use chrono::NaiveDate;
-use rustyqlib::core::quotes::Quote;
 use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::builder::EquityOptionBuilder;
@@ -30,7 +29,7 @@ use rustyqlib::equity::heston::HestonParams;
 use rustyqlib::equity::utils::{Engine, Model};
 use rustyqlib::equity::vanilla_option::EquityOption;
 // everything market-related is re-exported at the crate root
-use rustyqlib::{BumpMode, Compounding, Discount, Market, MarketKey, RiskFactor, Shock, Spot, Vol};
+use rustyqlib::{BumpMode, Compounding, Discount, MarketKey, RiskFactor, Shock, Spot, Vol};
 
 fn option(symbol: &str, strike: f64, engine: Engine) -> EquityOption {
     EquityOptionBuilder::new()

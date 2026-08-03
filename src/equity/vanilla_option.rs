@@ -1,21 +1,18 @@
-use std::error::Error;
 use std::sync::Arc;
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::NaiveDate;
 use crate::equity::{baw,bjerksund_stensland,binomial,finite_difference,greeks,montecarlo};
 use crate::core::curves::{Compounding, YieldCurve};
-use crate::core::daycount::DayCountConvention;
 use crate::core::vols::VolSurface;
 use crate::equity::asian::{AsianStrikeType, AveragingType};
 use crate::equity::barrier::{BarrierDirection, KnockType};
+use crate::equity::builder::EquityOptionBuilder;
 use crate::equity::heston;
 use super::super::core::quotes::Quote;
 use super::super::core::traits::Instrument;
 use super::blackscholes;
 use crate::equity::utils::{Engine, Model, Payoff, PayoffType, PricingEngine, LongShort};
-use crate::core::trade::{PutOrCall,Transection};
-use crate::core::utils::{Contract,ContractStyle};
-use crate::core::trade;
-use serde::Deserialize;
+use crate::core::trade::PutOrCall;
+use crate::core::utils::ContractStyle;
 use blackscholes::BlackScholesPricer;
 use crate::core::data_models::EquityOptionData;
 use crate::core::errors::RustyQLibError;
@@ -470,6 +467,9 @@ impl EquityOption {
         }
     }
 
+    /// Test-only shortcuts for tweaking engine configuration in place;
+    /// production code configures engines through the builder.
+    #[cfg(test)]
     pub(crate) fn mc_cfg_mut(&mut self) -> &mut montecarlo::MonteCarloConfig {
         match &mut self.engine {
             PricingEngine::MonteCarlo(cfg) => cfg,
@@ -477,17 +477,11 @@ impl EquityOption {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn fd_cfg_mut(&mut self) -> &mut finite_difference::FdConfig {
         match &mut self.engine {
             PricingEngine::FiniteDifference(cfg) => cfg,
             _ => unreachable!("finite-difference code path reached on a non-FD engine"),
-        }
-    }
-
-    pub(crate) fn lattice_cfg_mut(&mut self) -> &mut crate::core::lattice::LatticeConfig {
-        match &mut self.engine {
-            PricingEngine::Binomial(cfg) => cfg,
-            _ => unreachable!("lattice code path reached on a non-Binomial engine"),
         }
     }
 }
@@ -502,41 +496,19 @@ impl EquityOption {
 
     /// Build an option from contract data, reporting the offending field in
     /// the error instead of panicking.
+    ///
+    /// This is a thin translation layer: it parses JSON-level fields
+    /// (dates, enum strings) into typed values and feeds them through
+    /// [`EquityOptionBuilder`], which owns all domain validation and
+    /// assembly — both construction paths share one set of checks.
     pub fn try_from_json(data: &EquityOptionData) -> Result<Box<EquityOption>, RustyQLibError> {
         let valuation_date =
             crate::core::data_models::parse_valuation_date(data.base.valuation_date.as_deref())?;
-        let discount_curve = match &data.discount_curve {
-            Some(input) => YieldCurve::from_input(input, valuation_date)?,
-            None => YieldCurve::flat(
-                data.base.risk_free_rate.unwrap_or(0.0),
-                valuation_date,
-                DayCountConvention::Act365,
-                Compounding::Continuous,
-            )?,
-        };
-        let vol_surface = match &data.vol_surface {
-            Some(input) => VolSurface::from_input(input, valuation_date)?,
-            None => VolSurface::flat(
-                data.volatility
-                    .ok_or_else(|| RustyQLibError::invalid_input(
-                        "volatility",
-                        "either volatility or vol_surface must be provided",
-                    ))?,
-                valuation_date,
-                DayCountConvention::Act365,
-            )?,
-        };
         let maturity_date = NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d")
             .map_err(|_| RustyQLibError::invalid_input(
                 "maturity",
                 format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
             ))?;
-        if maturity_date <= valuation_date {
-            return Err(RustyQLibError::invalid_input(
-                "maturity",
-                format!("maturity {maturity_date} must be after the valuation date {valuation_date}"),
-            ));
-        }
         let payoff_type = data.payoff_type.parse::<PayoffType>()
             .map_err(|_| RustyQLibError::invalid_input(
                 "payoff_type",
@@ -552,79 +524,51 @@ impl EquityOption {
                 "strike_price is required for this payoff",
             ))?,
         };
-        let cash_dividends: Vec<(NaiveDate, f64)> = data
-            .cash_dividends
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|d| {
-                NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")
-                    .map(|date| (date, d.amount))
-                    .map_err(|_| RustyQLibError::invalid_input(
-                        "cash_dividends",
-                        format!("invalid dividend date '{}' (expected YYYY-MM-DD)", d.date),
-                    ))
-            })
-            .collect::<Result<_, _>>()?;
-        let futures_settlement = data
-            .futures_settlement
-            .as_deref()
-            .map(|s| {
-                s.parse::<crate::equity::black76::FuturesSettlement>().map_err(|_| RustyQLibError::invalid_input(
+
+        let mut builder = EquityOptionBuilder::new()
+            .symbol(&data.base.symbol)
+            .spot(data.base.underlying_price)
+            .strike(strike_price)
+            .valuation_date(valuation_date)
+            .maturity_date(maturity_date)
+            .dividend_yield(data.dividend.unwrap_or(0.0))
+            .borrow_cost(data.base.borrow_cost.unwrap_or(0.0));
+
+        // ── market objects ──────────────────────────────────────────────
+        builder = match &data.discount_curve {
+            Some(input) => builder.discount_curve(YieldCurve::from_input(input, valuation_date)?),
+            None => builder.flat_rate(data.base.risk_free_rate.unwrap_or(0.0)),
+        };
+        builder = match &data.vol_surface {
+            Some(input) => builder.vol_surface(VolSurface::from_input(input, valuation_date)?),
+            None => builder.flat_vol(data.volatility.ok_or_else(|| {
+                RustyQLibError::invalid_input(
+                    "volatility",
+                    "either volatility or vol_surface must be provided",
+                )
+            })?),
+        };
+        for d in data.cash_dividends.as_deref().unwrap_or(&[]) {
+            let date = NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")
+                .map_err(|_| RustyQLibError::invalid_input(
+                    "cash_dividends",
+                    format!("invalid dividend date '{}' (expected YYYY-MM-DD)", d.date),
+                ))?;
+            builder = builder.cash_dividend(date, d.amount);
+        }
+        if let Some(s) = data.futures_settlement.as_deref() {
+            let settlement = s
+                .parse::<crate::equity::black76::FuturesSettlement>()
+                .map_err(|_| RustyQLibError::invalid_input(
                     "futures_settlement",
                     format!("invalid futures_settlement '{s}' (use 'discounted' or 'margined')"),
-                ))
-            })
-            .transpose()?;
-        if futures_settlement.is_some() && !matches!(payoff_type, PayoffType::Vanilla) {
-            return Err(RustyQLibError::UnsupportedEngine(
-                "options on futures (Black-76) support the vanilla payoff only".to_string(),
-            ));
-        }
-        let base_option = EquityOptionBase {
-            symbol:data.base.symbol.clone(),
-            currency: data.base.currency.clone(),
-            exchange:data.base.exchange.clone(),
-            name: data.base.name.clone(),
-            cusip: data.base.cusip.clone(),
-            isin: data.base.isin.clone(),
-            settlement_type: data.base.settlement_type.clone(),
-            strike_price,
-            maturity_date,
-            futures_settlement,
-            multiplier: data.multiplier.unwrap_or(1.0),
-            current_price: Quote::new(data.current_price.unwrap_or(0.0)),
-            entry_price: data.entry_price.unwrap_or(0.0),
-            long_short: LongShort::LONG,
-        };
-        let market_data = EquityMarketData {
-            valuation_date,
-            spot: Quote::new(data.base.underlying_price),
-            dividend_yield: data.dividend.unwrap_or(0.0),
-            borrow_cost: data.base.borrow_cost.unwrap_or(0.0),
-            cash_dividends,
-            vol_surface: Arc::new(vol_surface),
-            discount_curve: Arc::new(discount_curve),
-        };
-        let payoff_type = &payoff_type;
-        let side: PutOrCall;
-        let put_or_call = data.put_or_call.clone();
-        match put_or_call.trim() {
-            "C" | "c" | "Call" | "call" => side = PutOrCall::Call,
-            "P" | "p" | "Put" | "put" => side = PutOrCall::Put,
-            other => return Err(RustyQLibError::invalid_input(
-                "put_or_call",
-                format!("invalid side '{other}' (use 'C' or 'P')"),
-            )),
+                ))?;
+            builder = builder.on_future(settlement);
         }
 
-        let style = match data.exercise_style.as_ref().unwrap_or(&"European".to_string()).trim() {
-            "European" | "european" => {
-                ContractStyle::European
-            }
-            "American" | "american" => {
-                ContractStyle::American
-            }
+        // ── exercise style ──────────────────────────────────────────────
+        builder = match data.exercise_style.as_deref().unwrap_or("European").trim() {
+            "American" | "american" => builder.american(),
             "Bermudan" | "bermudan" => {
                 let dates = data.exercise_dates.as_deref().ok_or_else(|| {
                     RustyQLibError::invalid_input(
@@ -632,19 +576,23 @@ impl EquityOption {
                         "exercise_dates is required when exercise_style is Bermudan",
                     )
                 })?;
-                ContractStyle::Bermudan(date_list_to_times(
-                    "exercise_dates",
-                    dates,
-                    valuation_date,
-                    maturity_date,
-                )?)
+                builder.bermudan(parse_date_list("exercise_dates", dates)?)
             }
-            _ => {
-                ContractStyle::European
-            }
+            // unknown styles fall back to European, as before
+            _ => builder,
         };
 
-        let payoff:Box<dyn Payoff> = match &payoff_type {
+        let side = match data.put_or_call.trim() {
+            "C" | "c" | "Call" | "call" => PutOrCall::Call,
+            "P" | "p" | "Put" | "put" => PutOrCall::Put,
+            other => return Err(RustyQLibError::invalid_input(
+                "put_or_call",
+                format!("invalid side '{other}' (use 'C' or 'P')"),
+            )),
+        };
+
+        // ── payoff ──────────────────────────────────────────────────────
+        builder = match payoff_type {
             // not reachable from JSON yet: PayoffType::from_str does not
             // produce Accumulator; build through EquityOptionBuilder
             PayoffType::Accumulator => {
@@ -654,9 +602,7 @@ impl EquityOption {
                      not JSON contract data",
                 ));
             }
-            PayoffType::Vanilla => Box::new(VanillaPayoff{
-                put_or_call:side,
-                exercise_style:style}),
+            PayoffType::Vanilla => builder.vanilla(side),
             PayoffType::Binary => {
                 let binary_type = match data
                     .binary_type
@@ -673,12 +619,7 @@ impl EquityOption {
                         format!("invalid binary_type '{other}' (use 'cash' or 'asset')"),
                     )),
                 };
-                Box::new(BinaryPayoff {
-                    put_or_call: side,
-                    exercise_style: style,
-                    binary_type,
-                    cash: data.cash_amount.unwrap_or(1.0),
-                })
+                builder.binary(side, binary_type, data.cash_amount.unwrap_or(1.0))
             }
             PayoffType::Lookback => {
                 let lookback_type = match data
@@ -696,7 +637,7 @@ impl EquityOption {
                         format!("invalid lookback_type '{other}' (use 'floating' or 'fixed')"),
                     )),
                 };
-                Box::new(LookbackPayoff { put_or_call: side, exercise_style: style, lookback_type })
+                builder.lookback(side, lookback_type)
             }
             PayoffType::Barrier => {
                 let barrier = data
@@ -722,16 +663,21 @@ impl EquityOption {
                         format!("barrier_type must be up_in/up_out/down_in/down_out, got '{other}'"),
                     )),
                 };
-                Box::new(BarrierPayoff {
-                    put_or_call: side,
-                    exercise_style: style,
-                    direction,
-                    knock,
-                    barrier,
-                    barrier2: data.barrier_level2,
-                    rebate: data.rebate.unwrap_or(0.0),
-                    rebate_at_hit: data.rebate_at_hit.unwrap_or(false),
-                })
+                // a second level makes it a double barrier: the corridor
+                // between the two levels (direction is then ignored)
+                let b = match data.barrier_level2 {
+                    Some(b2) => builder.double_barrier(
+                        side,
+                        knock,
+                        barrier.min(b2),
+                        barrier.max(b2),
+                    ),
+                    None => builder.barrier(side, direction, knock, barrier),
+                };
+                b.barrier_rebate(
+                    data.rebate.unwrap_or(0.0),
+                    data.rebate_at_hit.unwrap_or(false),
+                )
             }
             PayoffType::Asian => {
                 let averaging = match data
@@ -764,12 +710,7 @@ impl EquityOption {
                         format!("asian_strike_type must be fixed or floating, got '{other}'"),
                     )),
                 };
-                Box::new(AsianPayoff {
-                    put_or_call: side,
-                    exercise_style: style,
-                    averaging,
-                    strike_type,
-                })
+                builder.asian(side, averaging, strike_type)
             }
             PayoffType::ForwardStart => {
                 let start_date_str = data
@@ -792,48 +733,59 @@ impl EquityOption {
                 }
                 let start_fraction = (start_date - valuation_date).num_days() as f64
                     / (maturity_date - valuation_date).num_days() as f64;
-                Box::new(crate::equity::forward_start_option::ForwardStartPayoff {
-                    put_or_call: side,
-                    exercise_style: style,
-                    strike_fraction: data.strike_fraction.unwrap_or(1.0),
+                builder.forward_start(
+                    side,
+                    data.strike_fraction.unwrap_or(1.0),
                     start_fraction,
-                })
+                )
             }
             PayoffType::Autocallable => {
-                let observation_times = autocall_times_from_dates(
-                    data.autocall_observation_dates.as_deref(),
-                    valuation_date,
-                    maturity_date,
-                )?;
-                let observations = match &observation_times {
-                    Some(times) => times.len(),
-                    None => data.autocall_observations.unwrap_or(4).max(1),
+                let autocall_barrier = data
+                    .autocall_barrier
+                    .ok_or_else(|| RustyQLibError::invalid_input(
+                        "autocall_barrier",
+                        "autocall_barrier is required for autocallables",
+                    ))?;
+                let protection_barrier = data
+                    .protection_barrier
+                    .ok_or_else(|| RustyQLibError::invalid_input(
+                        "protection_barrier",
+                        "protection_barrier is required for autocallables",
+                    ))?;
+                let coupon = data.autocall_coupon.unwrap_or(0.0);
+                let observations = data.autocall_observations.unwrap_or(4).max(1);
+                let notional = data.notional.unwrap_or(100.0);
+                // a coupon barrier makes it a phoenix; memory is inert
+                // without one
+                let mut b = match data.coupon_barrier {
+                    Some(coupon_barrier) => builder.phoenix(
+                        autocall_barrier,
+                        coupon_barrier,
+                        protection_barrier,
+                        coupon,
+                        observations,
+                        notional,
+                        data.coupon_memory.unwrap_or(false),
+                    ),
+                    None => builder.autocallable(
+                        autocall_barrier,
+                        protection_barrier,
+                        coupon,
+                        observations,
+                        notional,
+                    ),
                 };
-                Box::new(crate::equity::autocallable::AutocallablePayoff {
-                    exercise_style: style,
-                    autocall_barrier: data
-                        .autocall_barrier
-                        .ok_or_else(|| RustyQLibError::invalid_input(
-                            "autocall_barrier",
-                            "autocall_barrier is required for autocallables",
-                        ))?,
-                    protection_barrier: data
-                        .protection_barrier
-                        .ok_or_else(|| RustyQLibError::invalid_input(
-                            "protection_barrier",
-                            "protection_barrier is required for autocallables",
-                        ))?,
-                    coupon: data.autocall_coupon.unwrap_or(0.0),
-                    coupon_barrier: data.coupon_barrier,
-                    memory: data.coupon_memory.unwrap_or(false),
-                    observations,
-                    observation_times,
-                    notional: data.notional.unwrap_or(100.0),
-                    initial_fixing: data.base.underlying_price,
-                })
+                if let Some(dates) = data.autocall_observation_dates.as_deref() {
+                    b = b.autocall_observation_dates(parse_date_list(
+                        "autocall_observation_dates",
+                        dates,
+                    )?);
+                }
+                b
             }
         };
 
+        // ── engine (it carries only its own configuration) ──────────────
         let engine_kind = match data.pricer.as_ref().map_or("Analytical", |v| v).trim() {
             "Analytical" | "analytical" | "bs" => Engine::BlackScholes,
             "MonteCarlo" | "montecarlo" | "MC" | "mc" => Engine::MonteCarlo,
@@ -853,17 +805,16 @@ impl EquityOption {
                 ));
             }
         };
-        // the engine carries only its own configuration
-        let engine = match engine_kind {
+        builder = match &engine_kind {
             Engine::MonteCarlo => {
-                PricingEngine::MonteCarlo(montecarlo::MonteCarloConfig::from_data(data))
+                builder.mc_config(montecarlo::MonteCarloConfig::from_data(data)?)
             }
             Engine::FiniteDifference => {
-                PricingEngine::FiniteDifference(finite_difference::FdConfig::from_data(data))
+                builder.fd_config(finite_difference::FdConfig::from_data(data))
             }
             Engine::Binomial => {
                 let defaults = crate::core::lattice::LatticeConfig::default();
-                PricingEngine::Binomial(crate::core::lattice::LatticeConfig {
+                builder.lattice_config(crate::core::lattice::LatticeConfig {
                     tree_type: match data.tree_type.as_deref() {
                         Some(s) => s.parse()?,
                         None => defaults.tree_type,
@@ -872,70 +823,43 @@ impl EquityOption {
                     term_structure: data.tree_term_structure.unwrap_or(false),
                 })
             }
-            other => PricingEngine::from_kind(other),
+            _ => builder,
         };
-        let model = Model::from_contract(data.mc_model.as_deref(), data.heston)?;
-        let equityoption =
-            EquityOption { base: base_option, market: market_data, payoff, engine, model };
-        Ok(Box::new(equityoption))
+        builder = builder
+            .engine(engine_kind)
+            .model(Model::from_contract(data.mc_model.as_deref(), data.heston)?);
+
+        let mut option = builder.build()?;
+
+        // trade and reporting metadata the builder does not model
+        option.base.currency = data.base.currency.clone();
+        option.base.exchange = data.base.exchange.clone();
+        option.base.name = data.base.name.clone();
+        option.base.cusip = data.base.cusip.clone();
+        option.base.isin = data.base.isin.clone();
+        option.base.settlement_type = data.base.settlement_type.clone();
+        option.base.multiplier = data.multiplier.unwrap_or(1.0);
+        option.base.current_price = Quote::new(data.current_price.unwrap_or(0.0));
+        option.base.entry_price = data.entry_price.unwrap_or(0.0);
+        Ok(Box::new(option))
     }
 }
 
-/// Parse a strictly increasing date list into Act/365 year fractions
-/// from the valuation date, validating every date lies in
-/// `(valuation, maturity]`. Errors name `field`.
-fn date_list_to_times(
-    field: &str,
-    dates: &[String],
-    valuation_date: NaiveDate,
-    maturity_date: NaiveDate,
-) -> Result<Vec<f64>, RustyQLibError> {
-    if dates.is_empty() {
-        return Err(RustyQLibError::invalid_input(field, "the date list must not be empty"));
-    }
-    let mut times = Vec::with_capacity(dates.len());
-    let mut prev = valuation_date;
-    for s in dates {
-        let date = NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
-            RustyQLibError::invalid_input(
-                field,
-                format!("invalid date '{s}' (expected YYYY-MM-DD)"),
-            )
-        })?;
-        if date <= prev {
-            return Err(RustyQLibError::invalid_input(
-                field,
-                format!("dates must be strictly increasing and after valuation; '{s}' is not"),
-            ));
-        }
-        if date > maturity_date {
-            return Err(RustyQLibError::invalid_input(
-                field,
-                format!("date '{s}' lies after the maturity {maturity_date}"),
-            ));
-        }
-        prev = date;
-        times.push((date - valuation_date).num_days() as f64 / 365.0);
-    }
-    Ok(times)
-}
-
-/// Optional-list wrapper of [`date_list_to_times`] for autocall
-/// observation dates.
-fn autocall_times_from_dates(
-    dates: Option<&[String]>,
-    valuation_date: NaiveDate,
-    maturity_date: NaiveDate,
-) -> Result<Option<Vec<f64>>, RustyQLibError> {
-    match dates {
-        Some(d) => Ok(Some(date_list_to_times(
-            "autocall_observation_dates",
-            d,
-            valuation_date,
-            maturity_date,
-        )?)),
-        None => Ok(None),
-    }
+/// Parse a JSON date-string list into `NaiveDate`s. Ordering and range
+/// validation happens in [`EquityOptionBuilder::build`]; this only
+/// handles the string format, naming `field` in errors.
+fn parse_date_list(field: &str, dates: &[String]) -> Result<Vec<NaiveDate>, RustyQLibError> {
+    dates
+        .iter()
+        .map(|s| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+                RustyQLibError::invalid_input(
+                    field,
+                    format!("invalid date '{s}' (expected YYYY-MM-DD)"),
+                )
+            })
+        })
+        .collect()
 }
 
 impl EquityOptionBase {
@@ -1042,7 +966,7 @@ impl EquityOption {
 impl EquityOption {
     pub fn get_premium_at_risk(&self) -> f64 {
         let value = self.npv();
-        let mut pay_off =
+        let pay_off =
             self.payoff.payoff_amount(self.market.spot.value(), self.base.strike_price);
         if pay_off > 0.0 {
             return value - pay_off;
@@ -1139,10 +1063,19 @@ impl EquityOption {
             }
         }
         let heston = self.model.is_heston();
-        if heston && matches!(self.engine, PricingEngine::Binomial(_) | PricingEngine::FiniteDifference(_)) {
+        if heston && matches!(self.engine, PricingEngine::Binomial(_)) {
             return unsupported(
-                "The Heston model is supported on the Analytical and MonteCarlo \
-                 engines only (a 2-D ADI FD solver is future work)",
+                "The Heston model is supported on the Analytical, MonteCarlo and \
+                 FiniteDifference (2-D ADI) engines, not Binomial",
+            );
+        }
+        if heston
+            && matches!(self.engine, PricingEngine::FiniteDifference(_))
+            && !matches!(self.payoff.payoff_kind(), PayoffType::Vanilla | PayoffType::Binary)
+        {
+            return unsupported(
+                "The Heston ADI engine prices vanilla and binary payoffs; \
+                 use MonteCarlo for path-dependent payoffs",
             );
         }
         match self.engine {

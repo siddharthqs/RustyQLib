@@ -296,6 +296,7 @@ mod tests {
     use crate::equity::utils::Engine;
     use chrono::NaiveDate;
 
+    #[cfg(feature = "stress-config")]
     const CONFIG: &str = r#"
         [[scenarios]]
         name = "equity_crash"
@@ -338,6 +339,7 @@ mod tests {
             .build().expect("option must build")
     }
 
+    #[cfg(feature = "stress-config")]
     fn book() -> EquityPortfolio {
         let mut b = EquityPortfolio::new();
         b.add(option("ACME", PutOrCall::Call, 100.0), 100.0);

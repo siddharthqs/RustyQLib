@@ -46,7 +46,8 @@ fn main() {
                 //("Finite difference", Engine::FiniteDifference),
                 ("Monte Carlo (Sobol, 100k)", Engine::MonteCarlo),
             ] {
-                common::row(label, &base().binary(pc, binary_type, cash).engine(engine).build().expect("option must build"));
+                let o = base().binary(pc,binary_type,cash).engine(engine).build().unwrap();
+                common::row(label, &o);
             }
         }
     }

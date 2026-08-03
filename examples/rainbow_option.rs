@@ -10,7 +10,6 @@ use chrono::{Duration, Local};
 use rustyqlib::equity::blackscholes::bs_price;
 use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::equity::rainbow::{RainbowAssetData, RainbowOption, RainbowOptionData};
-use rustyqlib::equity::utils::Engine;
 
 const SPOT_A: f64 = 100.0;
 const SPOT_B: f64 = 95.0;

@@ -213,7 +213,7 @@ fn bump_charm(r: &mut Repricer, p: &BumpPolicy) -> f64 {
 
 fn bump_zomma(r: &mut Repricer, p: &BumpPolicy) -> f64 {
     let (hs, hv) = (p.hs2, p.hv);
-    let mut gamma_at = |r: &mut Repricer, dv: f64| {
+    let gamma_at = |r: &mut Repricer, dv: f64| {
         (r.v(hs, dv, 0.0, 0.0) - 2.0 * r.v(0.0, dv, 0.0, 0.0) + r.v(-hs, dv, 0.0, 0.0))
             / (hs * hs)
     };

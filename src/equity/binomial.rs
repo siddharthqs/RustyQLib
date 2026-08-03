@@ -340,7 +340,6 @@ pub fn npv_with_diagnostics(option: &EquityOption) -> LatticeDiagnostics {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::core::trade::PutOrCall;
     use crate::core::traits::Instrument;
     use crate::equity::builder::EquityOptionBuilder;

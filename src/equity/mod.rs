@@ -6,6 +6,7 @@ pub mod blackscholes;
 pub mod builder;
 pub mod greeks;
 pub mod heston;
+pub mod heston_adi;
 pub mod local_vol;
 pub mod market;
 pub mod cos;

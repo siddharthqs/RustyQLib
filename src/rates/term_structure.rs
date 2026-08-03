@@ -467,20 +467,19 @@ fn interp_linear(xs: &[f64], ys: &[f64], x: f64) -> f64 {
 /// Compute second derivatives for a natural cubic spline (tridiagonal solve).
 fn compute_natural_spline(xs: &[f64], ys: &[f64]) -> Vec<f64> {
     let n = xs.len();
-    let mut m = vec![0.0_f64; n]; // second derivatives (moments)
+    let m = vec![0.0_f64; n]; // second derivatives (moments)
     if n < 3 {
         return m;
     }
 
     // Thomas algorithm for tridiagonal system
-    let mut h: Vec<f64> = (0..n - 1).map(|i| xs[i + 1] - xs[i]).collect();
+    let h: Vec<f64> = (0..n - 1).map(|i| xs[i + 1] - xs[i]).collect();
     let mut alpha: Vec<f64> = vec![0.0; n];
     for i in 1..n - 1 {
         alpha[i] = 3.0 / h[i] * (ys[i + 1] - ys[i]) - 3.0 / h[i - 1] * (ys[i] - ys[i - 1]);
     }
 
     let mut c = vec![0.0_f64; n];
-    let mut d = vec![0.0_f64; n];
     let mut l = vec![1.0_f64; n];
     let mut mu = vec![0.0_f64; n];
     let mut z = vec![0.0_f64; n];
@@ -506,7 +505,6 @@ fn interp_cubic(xs: &[f64], ys: &[f64], m: &[f64], x: f64) -> f64 {
 
     let i = search_sorted(xs, x);
     let h = xs[i + 1] - xs[i];
-    let t = (x - xs[i]) / h;
     let a = ys[i];
     let b = (ys[i + 1] - ys[i]) / h - h * (2.0 * m[i] + m[i + 1]) / 6.0;
     let c = m[i] / 2.0;

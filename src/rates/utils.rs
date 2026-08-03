@@ -35,10 +35,9 @@ fn is_holiday(date: NaiveDate) -> bool {
 }
 
 fn adjust_for_weekend(mut date: NaiveDate) -> NaiveDate {
-    // Increment the date until it's not a weekend
-    while is_holiday(date) || is_holiday(date) {
-        date = date.succ();
-
+    // Increment the date until it's not a weekend or holiday
+    while is_weekend(date) || is_holiday(date) {
+        date += chrono::Duration::days(1);
     }
     date
 }
@@ -131,7 +130,7 @@ impl TermStructure {
         }
         return rates;
     }
-    pub fn build_term_structure(&self,valuation_date:NaiveDate,deposits:Vec<Deposit>) -> TermStructure {
+    pub fn build_term_structure(&self,_valuation_date:NaiveDate,deposits:Vec<Deposit>) -> TermStructure {
         let mut discount_factor:Vec<f64> = Vec::new();
         let mut rate:Vec<f64> = Vec::new();
         let mut dates:Vec<NaiveDate> = Vec::new();
@@ -141,7 +140,7 @@ impl TermStructure {
             rate.push(deposit.get_rate());
         }
         let day_count = deposits[0].day_count.clone();
-        let mut term_structure = TermStructure::new(dates,discount_factor,rate,day_count);
+        let term_structure = TermStructure::new(dates,discount_factor,rate,day_count);
         return term_structure;
     }
 }

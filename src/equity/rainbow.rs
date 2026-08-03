@@ -14,7 +14,7 @@
 //! scalar theta and rho. Each asset carries a flat vol; per-asset smiles
 //! for multi-asset payoffs are future work.
 
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
 use libm::exp;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ use crate::core::linalg::{cholesky, nearest_correlation};
 use crate::core::trade::PutOrCall;
 use crate::core::utils::norm_cdf;
 use crate::equity::montecarlo::{McStats, MonteCarloConfig, Sampler};
-use crate::equity::utils::{Engine, PricingEngine};
+use crate::equity::utils::PricingEngine;
 use crate::core::montecarlo::{path_normals, QmcSequence};
 use crate::core::errors::RustyQLibError;
 use crate::core::results::{Greeks, PricingResult};
@@ -560,7 +560,9 @@ impl RainbowOption {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Local;
     use crate::equity::blackscholes::bs_price;
+    use crate::equity::utils::Engine;
 
     fn two_asset(rainbow_type: &str, pc: &str, strike: Option<f64>, rho: f64) -> Box<RainbowOption> {
         RainbowOption::from_json(&RainbowOptionData {

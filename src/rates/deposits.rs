@@ -1,5 +1,5 @@
 use chrono::{Local, NaiveDate};
-use crate::core::traits::{Instrument,Rates};
+use crate::core::traits::Rates;
 use crate::rates::utils::{DayCountConvention,TermStructure};
 /*
 "" An deposit is an agreement to borrow money interbank at the Ibor fixing rate starting on the start
@@ -31,7 +31,7 @@ impl Deposit {
             term_structure: None,
         }
     }
-    pub fn builder(start_date: String,maturity_date:String,notional: f64, fix_rate: f64,day_count: String) ->Deposit{
+    pub fn builder(start_date: String,maturity_date:String,_notional: f64, _fix_rate: f64,day_count: String) ->Deposit{
 
         let today = Local::now().date_naive();
         let start_date = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d").expect("Invalid date format");

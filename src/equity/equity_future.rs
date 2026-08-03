@@ -1,9 +1,8 @@
 // An equity
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::NaiveDate;
 use crate::core::data_models::EquityFutureData;
 use crate::core::quotes::Quote;
 use crate::core::traits::Instrument;
-use crate::core::utils::{Contract,ContractStyle};
 use crate::equity::utils::LongShort;
 use crate::core::errors::RustyQLibError;
 //use crate::equity::vanilla_option::EquityOption;
@@ -78,29 +77,12 @@ impl EquityFuture {
             long_short:position
         }))
     }
-    fn notional(&self) -> f64 {
-        self.multiplier * self.current_price.value()
-    }
-    fn time_to_maturity(&self) -> f64 {
-        let days = (self.maturity_date - self.valuation_date).num_days();
-        (days as f64) / 365.0
-    }
-    fn premiun(&self)->f64{
-        self.current_price.value()-self.underlying_price.value()
-    }
     fn pnl(&self)->f64{
         let pnl = (self.current_price.value()-self.entry_price)*self.multiplier;
         match self.long_short {
             LongShort::LONG => pnl,
             LongShort::SHORT => -pnl,
-            _=>0.0,
         }
-    }
-    fn forward_price(&self)->f64{
-        let discount_df = 1.0/(self.risk_free_rate*self.time_to_maturity()).exp();
-        let dividend_df = 1.0/((self.dividend_yield + self.borrow_cost)*self.time_to_maturity()).exp();
-        let forward = self.underlying_price.value()*dividend_df/discount_df;
-        forward
     }
 }
 impl Instrument for EquityFuture {

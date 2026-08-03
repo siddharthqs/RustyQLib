@@ -105,6 +105,318 @@ enum PayoffSpec {
     Custom(Box<dyn Payoff>),
 }
 
+/// The builder inputs a payoff needs beyond its own parameters, shared by
+/// [`PayoffSpec::validate`] and [`PayoffSpec::materialize`].
+struct BuildContext {
+    spot: f64,
+    strike: f64,
+    valuation_date: NaiveDate,
+    maturity_date: NaiveDate,
+}
+
+/// Check that a date list is non-empty, strictly increasing after the
+/// valuation date and not past maturity; convert to Act/365 year fractions.
+fn date_list_to_times(
+    field: &str,
+    dates: &[NaiveDate],
+    valuation_date: NaiveDate,
+    maturity_date: NaiveDate,
+) -> Result<Vec<f64>, RustyQLibError> {
+    if dates.is_empty() {
+        return Err(RustyQLibError::invalid_input(
+            field,
+            "the date list must not be empty",
+        ));
+    }
+    let mut prev = valuation_date;
+    let mut times = Vec::with_capacity(dates.len());
+    for date in dates {
+        if *date <= prev {
+            return Err(RustyQLibError::invalid_input(
+                field,
+                format!("dates must be strictly increasing after valuation; {date} is not"),
+            ));
+        }
+        if *date > maturity_date {
+            return Err(RustyQLibError::invalid_input(
+                field,
+                format!("date {date} lies after the maturity {maturity_date}"),
+            ));
+        }
+        prev = *date;
+        times.push((*date - valuation_date).num_days() as f64 / 365.0);
+    }
+    Ok(times)
+}
+
+impl PayoffSpec {
+    /// Payoffs whose value reads the built strike; the rest set their
+    /// strike through the contract mechanics.
+    fn requires_strike(&self) -> bool {
+        matches!(
+            self,
+            PayoffSpec::Vanilla { .. }
+                | PayoffSpec::Binary { .. }
+                | PayoffSpec::Barrier { .. }
+                | PayoffSpec::Asian { .. }
+                | PayoffSpec::Lookback { .. }
+        )
+    }
+
+    /// Domain checks for this payoff's own parameters — one-dimensional
+    /// checks only; engine/model/payoff combination rules stay centralized
+    /// in `EquityOption::check_engine_support`.
+    fn validate(&self, ctx: &BuildContext) -> Result<(), RustyQLibError> {
+        let invalid = |field: &str, reason: String| {
+            Err(RustyQLibError::InvalidInput { field: field.to_string(), reason })
+        };
+        if self.requires_strike() && !(ctx.strike.is_finite() && ctx.strike > 0.0) {
+            return invalid(
+                "strike",
+                format!("strike must be positive and finite, got {}", ctx.strike),
+            );
+        }
+        match self {
+            PayoffSpec::Vanilla { .. }
+            | PayoffSpec::Asian { .. }
+            | PayoffSpec::Lookback { .. }
+            | PayoffSpec::Custom(_) => Ok(()),
+            PayoffSpec::Binary { cash, .. } => {
+                if !(cash.is_finite() && *cash >= 0.0) {
+                    return invalid(
+                        "cash",
+                        format!("binary cash amount must be non-negative and finite, got {cash}"),
+                    );
+                }
+                Ok(())
+            }
+            PayoffSpec::Barrier { barrier, barrier2, rebate, .. } => {
+                if !(barrier.is_finite() && *barrier > 0.0) {
+                    return invalid(
+                        "barrier",
+                        format!("barrier level must be positive and finite, got {barrier}"),
+                    );
+                }
+                if let Some(upper) = barrier2 {
+                    if !(upper.is_finite() && upper > barrier) {
+                        return invalid(
+                            "double_barrier",
+                            format!(
+                                "the upper barrier ({upper}) must exceed the lower ({barrier})"
+                            ),
+                        );
+                    }
+                }
+                if !(rebate.is_finite() && *rebate >= 0.0) {
+                    return invalid(
+                        "rebate",
+                        format!("rebate must be non-negative and finite, got {rebate}"),
+                    );
+                }
+                Ok(())
+            }
+            PayoffSpec::ForwardStart { strike_fraction, start_fraction, .. } => {
+                if !(strike_fraction.is_finite() && *strike_fraction > 0.0) {
+                    return invalid(
+                        "strike_fraction",
+                        format!("strike_fraction must be positive and finite, got {strike_fraction}"),
+                    );
+                }
+                if !(*start_fraction > 0.0 && *start_fraction < 1.0) {
+                    return invalid(
+                        "start_fraction",
+                        format!("start_fraction must lie in (0, 1), got {start_fraction}"),
+                    );
+                }
+                Ok(())
+            }
+            PayoffSpec::Autocallable {
+                autocall_barrier,
+                protection_barrier,
+                coupon,
+                observations,
+                notional,
+                coupon_barrier,
+                observation_dates,
+                ..
+            } => {
+                for (name, x) in [
+                    ("autocall_barrier", *autocall_barrier),
+                    ("protection_barrier", *protection_barrier),
+                    ("notional", *notional),
+                ] {
+                    if !(x.is_finite() && x > 0.0) {
+                        return invalid(name, format!("{name} must be positive and finite, got {x}"));
+                    }
+                }
+                if let Some(cb) = coupon_barrier {
+                    if !(cb.is_finite() && *cb > 0.0) {
+                        return invalid(
+                            "coupon_barrier",
+                            format!("coupon_barrier must be positive and finite, got {cb}"),
+                        );
+                    }
+                }
+                if !(coupon.is_finite() && *coupon >= 0.0) {
+                    return invalid(
+                        "coupon",
+                        format!("coupon must be non-negative and finite, got {coupon}"),
+                    );
+                }
+                if *observations < 1 {
+                    return invalid("observations", "need at least one observation".to_string());
+                }
+                if let Some(dates) = observation_dates {
+                    date_list_to_times(
+                        "autocall_observation_dates",
+                        dates,
+                        ctx.valuation_date,
+                        ctx.maturity_date,
+                    )?;
+                }
+                Ok(())
+            }
+            PayoffSpec::Accumulator { side, barrier, observations, shares_per_day, gearing } => {
+                if !(barrier.is_finite() && *barrier > 0.0) {
+                    return invalid(
+                        "barrier",
+                        format!("barrier must be positive and finite, got {barrier}"),
+                    );
+                }
+                match side {
+                    AccumulatorSide::Accumulator if *barrier <= ctx.spot => {
+                        return invalid(
+                            "barrier",
+                            "accumulator knock-out must be above the spot".to_string(),
+                        );
+                    }
+                    AccumulatorSide::Decumulator if *barrier >= ctx.spot => {
+                        return invalid(
+                            "barrier",
+                            "decumulator knock-out must be below the spot".to_string(),
+                        );
+                    }
+                    _ => {}
+                }
+                if *observations < 1 {
+                    return invalid("observations", "need at least one observation".to_string());
+                }
+                if !(shares_per_day.is_finite() && *shares_per_day > 0.0) {
+                    return invalid(
+                        "shares_per_day",
+                        format!("shares_per_day must be positive and finite, got {shares_per_day}"),
+                    );
+                }
+                if !(gearing.is_finite() && *gearing >= 0.0) {
+                    return invalid(
+                        "gearing",
+                        format!("gearing must be non-negative and finite, got {gearing}"),
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Construct the runtime payoff with the final exercise style; assumes
+    /// [`validate`](Self::validate) has passed.
+    fn materialize(self, style: ContractStyle, ctx: &BuildContext) -> Box<dyn Payoff> {
+        match self {
+            PayoffSpec::Vanilla { put_or_call } => {
+                Box::new(VanillaPayoff { put_or_call, exercise_style: style })
+            }
+            PayoffSpec::Binary { put_or_call, binary_type, cash } => Box::new(BinaryPayoff {
+                put_or_call,
+                exercise_style: style,
+                binary_type,
+                cash,
+            }),
+            PayoffSpec::Barrier {
+                put_or_call,
+                direction,
+                knock,
+                barrier,
+                barrier2,
+                rebate,
+                rebate_at_hit,
+            } => Box::new(BarrierPayoff {
+                put_or_call,
+                exercise_style: style,
+                direction,
+                knock,
+                barrier,
+                barrier2,
+                rebate,
+                rebate_at_hit,
+            }),
+            PayoffSpec::Asian { put_or_call, averaging, strike_type } => Box::new(AsianPayoff {
+                put_or_call,
+                exercise_style: style,
+                averaging,
+                strike_type,
+            }),
+            PayoffSpec::Lookback { put_or_call, lookback_type } => {
+                Box::new(crate::equity::vanilla_option::LookbackPayoff {
+                    put_or_call,
+                    exercise_style: style,
+                    lookback_type,
+                })
+            }
+            PayoffSpec::ForwardStart { put_or_call, strike_fraction, start_fraction } => {
+                Box::new(ForwardStartPayoff {
+                    put_or_call,
+                    exercise_style: style,
+                    strike_fraction,
+                    start_fraction,
+                })
+            }
+            PayoffSpec::Autocallable {
+                autocall_barrier,
+                protection_barrier,
+                coupon,
+                observations,
+                notional,
+                coupon_barrier,
+                memory,
+                observation_dates,
+            } => {
+                let observation_times = observation_dates.as_ref().map(|dates| {
+                    dates
+                        .iter()
+                        .map(|d| (*d - ctx.valuation_date).num_days() as f64 / 365.0)
+                        .collect::<Vec<f64>>()
+                });
+                let observations = observation_dates
+                    .as_ref()
+                    .map_or(observations, |dates| dates.len());
+                Box::new(AutocallablePayoff {
+                    exercise_style: style,
+                    autocall_barrier,
+                    protection_barrier,
+                    coupon,
+                    observations,
+                    notional,
+                    initial_fixing: ctx.spot,
+                    coupon_barrier,
+                    memory,
+                    observation_times,
+                })
+            }
+            PayoffSpec::Accumulator { side, barrier, observations, shares_per_day, gearing } => {
+                Box::new(AccumulatorPayoff {
+                    exercise_style: style,
+                    side,
+                    barrier,
+                    observations,
+                    shares_per_day,
+                    gearing,
+                })
+            }
+            PayoffSpec::Custom(p) => p,
+        }
+    }
+}
+
 pub struct EquityOptionBuilder {
     symbol: String,
     spot: f64,
@@ -539,6 +851,10 @@ impl EquityOptionBuilder {
         self.fd.time_steps = time_steps;
         self
     }
+    pub fn lattice_config(mut self, cfg: crate::core::lattice::LatticeConfig) -> Self {
+        self.lattice = cfg;
+        self
+    }
     /// Binomial tree parameterization (default Leisen-Reimer).
     pub fn tree_type(mut self, tree_type: crate::core::lattice::BinomialTreeType) -> Self {
         self.lattice.tree_type = tree_type;
@@ -564,15 +880,207 @@ impl EquityOptionBuilder {
     /// checked, and the engine/model/payoff combination is verified, so
     /// [`Instrument::price`](crate::core::traits::Instrument::price) on
     /// the result cannot fail with `InvalidInput` or `UnsupportedEngine`.
-    pub fn build(self) -> Result<EquityOption, RustyQLibError> {
-        if let Some(e) = self.setter_error {
+    ///
+    /// Only the configuration of the *selected* engine is validated: an
+    /// out-of-domain Monte Carlo or grid setting is ignored when that
+    /// engine is not the one pricing the option.
+    pub fn build(mut self) -> Result<EquityOption, RustyQLibError> {
+        if let Some(e) = self.setter_error.take() {
             return Err(e);
         }
         let invalid = |field: &str, reason: String| {
             Err(RustyQLibError::InvalidInput { field: field.to_string(), reason })
         };
 
-        // ── market data domains ─────────────────────────────────────────
+        // ── market data domains (shared by every payoff) ────────────────
+        self.validate_market_data()?;
+
+        // ── dates ───────────────────────────────────────────────────────
+        let maturity_date = match self.maturity_date {
+            Some(d) => d,
+            None => {
+                return invalid(
+                    "maturity_date",
+                    "set maturity_date() or years_to_maturity() before build()".to_string(),
+                )
+            }
+        };
+        if maturity_date <= self.valuation_date {
+            return invalid(
+                "maturity_date",
+                format!(
+                    "maturity {maturity_date} must be after the valuation date {}",
+                    self.valuation_date
+                ),
+            );
+        }
+
+        // ── payoff spec: resolve schedules, then check its own domains ──
+        let mut spec = match self.payoff.take() {
+            Some(spec) => spec,
+            None => {
+                return invalid(
+                    "payoff",
+                    "set a payoff (vanilla(), barrier(), ...) before build()".to_string(),
+                )
+            }
+        };
+        if let Some((months, calendar)) = &self.autocall_schedule {
+            match &mut spec {
+                PayoffSpec::Autocallable { observation_dates, .. } => {
+                    let schedule = crate::core::calendar::Schedule::generate(
+                        self.valuation_date,
+                        maturity_date,
+                        *months,
+                        calendar,
+                        crate::core::calendar::BusinessDayConvention::ModifiedFollowing,
+                        crate::core::calendar::DateGeneration::Backward,
+                    )?;
+                    *observation_dates = Some(schedule.dates);
+                }
+                _ => {
+                    return invalid(
+                        "autocall_schedule",
+                        "autocall_schedule set but the payoff is not an autocallable".to_string(),
+                    )
+                }
+            }
+        }
+        let ctx = BuildContext {
+            spot: self.spot,
+            strike: self.strike,
+            valuation_date: self.valuation_date,
+            maturity_date,
+        };
+        spec.validate(&ctx)?;
+
+        // ── exercise style (Bermudan dates → year fractions) ────────────
+        let mut bermudan_dates = self.bermudan_dates.take();
+        if let Some((months, calendar)) = &self.bermudan_schedule {
+            let schedule = crate::core::calendar::Schedule::generate(
+                self.valuation_date,
+                maturity_date,
+                *months,
+                calendar,
+                crate::core::calendar::BusinessDayConvention::ModifiedFollowing,
+                crate::core::calendar::DateGeneration::Backward,
+            )?;
+            bermudan_dates = Some(schedule.dates);
+        }
+        let style = match &bermudan_dates {
+            Some(dates) => {
+                if matches!(spec, PayoffSpec::Custom(_)) {
+                    return invalid(
+                        "bermudan",
+                        "bermudan dates apply to built-in payoffs; embed the exercise style \
+                         in the custom payoff instead"
+                            .to_string(),
+                    );
+                }
+                ContractStyle::Bermudan(date_list_to_times(
+                    "bermudan",
+                    dates,
+                    self.valuation_date,
+                    maturity_date,
+                )?)
+            }
+            None => self.exercise_style.clone(),
+        };
+        if self.futures_settlement.is_some() {
+            if !matches!(spec, PayoffSpec::Vanilla { .. }) {
+                return invalid(
+                    "on_future",
+                    "options on futures (Black-76) support the vanilla payoff only".to_string(),
+                );
+            }
+            if matches!(self.exercise_style, ContractStyle::American) {
+                return invalid(
+                    "on_future",
+                    "Black-76 supports European exercise only".to_string(),
+                );
+            }
+        }
+
+        // ── model configuration ─────────────────────────────────────────
+        if let Model::Heston(params) = &self.model {
+            params.validate()?;
+        }
+
+        // ── market objects (curve/surface errors convert via From) ──────
+        let discount_curve = match self.discount_curve {
+            Some(c) => c,
+            None => YieldCurve::flat(
+                self.flat_rate,
+                self.valuation_date,
+                DayCountConvention::Act365,
+                Compounding::Continuous,
+            )?,
+        };
+        let vol_surface = match self.vol_surface {
+            Some(s) => s,
+            None => {
+                VolSurface::flat(self.flat_vol, self.valuation_date, DayCountConvention::Act365)?
+            }
+        };
+
+        // ── materialize the payoff with the final exercise style ────────
+        let payoff: Box<dyn Payoff> = spec.materialize(style, &ctx);
+        let base = EquityOptionBase {
+            symbol: self.symbol,
+            currency: None,
+            exchange: None,
+            name: None,
+            cusip: None,
+            isin: None,
+            settlement_type: None,
+            strike_price: self.strike,
+            maturity_date,
+            futures_settlement: self.futures_settlement,
+            multiplier: 1.0,
+            current_price: Quote::new(0.0),
+            entry_price: 0.0,
+            long_short: LongShort::LONG,
+        };
+        let market = crate::equity::vanilla_option::EquityMarketData {
+            valuation_date: self.valuation_date,
+            spot: Quote::new(self.spot),
+            dividend_yield: self.dividend_yield,
+            borrow_cost: self.borrow_cost,
+            cash_dividends: self.cash_dividends,
+            vol_surface: std::sync::Arc::new(vol_surface),
+            discount_curve: std::sync::Arc::new(discount_curve),
+        };
+        // only the selected engine's configuration is validated: the
+        // others never influence the built option
+        let engine = match self.engine {
+            Engine::BlackScholes => PricingEngine::BlackScholes,
+            Engine::MonteCarlo => {
+                self.mc.validate()?;
+                PricingEngine::MonteCarlo(self.mc)
+            }
+            Engine::Binomial => {
+                self.lattice.validate()?;
+                PricingEngine::Binomial(self.lattice)
+            }
+            Engine::FiniteDifference => {
+                self.fd.validate()?;
+                PricingEngine::FiniteDifference(self.fd)
+            }
+            Engine::BaroneAdesiWhaley => PricingEngine::BaroneAdesiWhaley,
+            Engine::BjerksundStensland => PricingEngine::BjerksundStensland,
+        };
+        let option = EquityOption { base, market, payoff, engine, model: self.model };
+        // "builds => prices": refuse engine/model/payoff combinations here
+        // rather than at pricing time
+        option.check_engine_support()?;
+        Ok(option)
+    }
+
+    /// Domain checks on the market data fields shared by every payoff.
+    fn validate_market_data(&self) -> Result<(), RustyQLibError> {
+        let invalid = |field: &str, reason: String| {
+            Err(RustyQLibError::InvalidInput { field: field.to_string(), reason })
+        };
         if !(self.spot.is_finite() && self.spot > 0.0) {
             return invalid("spot", format!("spot must be positive and finite, got {}", self.spot));
         }
@@ -599,462 +1107,7 @@ impl EquityOptionBuilder {
                 );
             }
         }
-
-        // ── dates ───────────────────────────────────────────────────────
-        let maturity_date = match self.maturity_date {
-            Some(d) => d,
-            None => {
-                return invalid(
-                    "maturity_date",
-                    "set maturity_date() or years_to_maturity() before build()".to_string(),
-                )
-            }
-        };
-        if maturity_date <= self.valuation_date {
-            return invalid(
-                "maturity_date",
-                format!(
-                    "maturity {maturity_date} must be after the valuation date {}",
-                    self.valuation_date
-                ),
-            );
-        }
-
-        // ── payoff-specific domains ─────────────────────────────────────
-        let spec = match self.payoff {
-            Some(spec) => spec,
-            None => {
-                return invalid(
-                    "payoff",
-                    "set a payoff (vanilla(), barrier(), ...) before build()".to_string(),
-                )
-            }
-        };
-        let mut spec = spec;
-        if let Some((months, calendar)) = &self.autocall_schedule {
-            match &mut spec {
-                PayoffSpec::Autocallable { observation_dates, .. } => {
-                    let schedule = crate::core::calendar::Schedule::generate(
-                        self.valuation_date,
-                        maturity_date,
-                        *months,
-                        calendar,
-                        crate::core::calendar::BusinessDayConvention::ModifiedFollowing,
-                        crate::core::calendar::DateGeneration::Backward,
-                    )?;
-                    *observation_dates = Some(schedule.dates);
-                }
-                _ => {
-                    return invalid(
-                        "autocall_schedule",
-                        "autocall_schedule set but the payoff is not an autocallable".to_string(),
-                    )
-                }
-            }
-        }
-        let mut bermudan_dates = self.bermudan_dates.clone();
-        if let Some((months, calendar)) = &self.bermudan_schedule {
-            let schedule = crate::core::calendar::Schedule::generate(
-                self.valuation_date,
-                maturity_date,
-                *months,
-                calendar,
-                crate::core::calendar::BusinessDayConvention::ModifiedFollowing,
-                crate::core::calendar::DateGeneration::Backward,
-            )?;
-            bermudan_dates = Some(schedule.dates);
-        }
-        let bermudan_times: Option<Vec<f64>> = match &bermudan_dates {
-            Some(dates) => {
-                if matches!(spec, PayoffSpec::Custom(_)) {
-                    return invalid(
-                        "bermudan",
-                        "bermudan dates apply to built-in payoffs; embed the exercise style \
-                         in the custom payoff instead"
-                            .to_string(),
-                    );
-                }
-                if dates.is_empty() {
-                    return invalid("bermudan", "the exercise date list must not be empty".to_string());
-                }
-                let mut prev = self.valuation_date;
-                let mut times = Vec::with_capacity(dates.len());
-                for date in dates {
-                    if *date <= prev {
-                        return invalid(
-                            "bermudan",
-                            format!("exercise dates must be strictly increasing after valuation; {date} is not"),
-                        );
-                    }
-                    if *date > maturity_date {
-                        return invalid(
-                            "bermudan",
-                            format!("exercise date {date} lies after the maturity {maturity_date}"),
-                        );
-                    }
-                    prev = *date;
-                    times.push((*date - self.valuation_date).num_days() as f64 / 365.0);
-                }
-                Some(times)
-            }
-            None => None,
-        };
-        let strike_based = matches!(
-            spec,
-            PayoffSpec::Vanilla { .. }
-                | PayoffSpec::Binary { .. }
-                | PayoffSpec::Barrier { .. }
-                | PayoffSpec::Asian { .. }
-                | PayoffSpec::Lookback { .. }
-        );
-        if strike_based && !(self.strike.is_finite() && self.strike > 0.0) {
-            return invalid(
-                "strike",
-                format!("strike must be positive and finite, got {}", self.strike),
-            );
-        }
-        match &spec {
-            PayoffSpec::Binary { cash, .. } => {
-                if !(cash.is_finite() && *cash >= 0.0) {
-                    return invalid(
-                        "cash",
-                        format!("binary cash amount must be non-negative and finite, got {cash}"),
-                    );
-                }
-            }
-            PayoffSpec::Barrier { barrier, barrier2, rebate, .. } => {
-                if !(barrier.is_finite() && *barrier > 0.0) {
-                    return invalid(
-                        "barrier",
-                        format!("barrier level must be positive and finite, got {barrier}"),
-                    );
-                }
-                if let Some(upper) = barrier2 {
-                    if !(upper.is_finite() && upper > barrier) {
-                        return invalid(
-                            "double_barrier",
-                            format!(
-                                "the upper barrier ({upper}) must exceed the lower ({barrier})"
-                            ),
-                        );
-                    }
-                }
-                if !(rebate.is_finite() && *rebate >= 0.0) {
-                    return invalid(
-                        "rebate",
-                        format!("rebate must be non-negative and finite, got {rebate}"),
-                    );
-                }
-            }
-            PayoffSpec::ForwardStart { strike_fraction, start_fraction, .. } => {
-                if !(strike_fraction.is_finite() && *strike_fraction > 0.0) {
-                    return invalid(
-                        "strike_fraction",
-                        format!("strike_fraction must be positive and finite, got {strike_fraction}"),
-                    );
-                }
-                if !(*start_fraction > 0.0 && *start_fraction < 1.0) {
-                    return invalid(
-                        "start_fraction",
-                        format!("start_fraction must lie in (0, 1), got {start_fraction}"),
-                    );
-                }
-            }
-            PayoffSpec::Autocallable {
-                autocall_barrier,
-                protection_barrier,
-                coupon,
-                observations,
-                notional,
-                coupon_barrier,
-                observation_dates,
-                ..
-            } => {
-                for (name, x) in [
-                    ("autocall_barrier", *autocall_barrier),
-                    ("protection_barrier", *protection_barrier),
-                    ("notional", *notional),
-                ] {
-                    if !(x.is_finite() && x > 0.0) {
-                        return invalid(name, format!("{name} must be positive and finite, got {x}"));
-                    }
-                }
-                if let Some(cb) = coupon_barrier {
-                    if !(cb.is_finite() && *cb > 0.0) {
-                        return invalid(
-                            "coupon_barrier",
-                            format!("coupon_barrier must be positive and finite, got {cb}"),
-                        );
-                    }
-                }
-                if !(coupon.is_finite() && *coupon >= 0.0) {
-                    return invalid(
-                        "coupon",
-                        format!("coupon must be non-negative and finite, got {coupon}"),
-                    );
-                }
-                if *observations < 1 {
-                    return invalid("observations", "need at least one observation".to_string());
-                }
-                if let Some(dates) = observation_dates {
-                    if dates.is_empty() {
-                        return invalid(
-                            "autocall_observation_dates",
-                            "the observation date list must not be empty".to_string(),
-                        );
-                    }
-                    let mut prev = self.valuation_date;
-                    for date in dates {
-                        if *date <= prev {
-                            return invalid(
-                                "autocall_observation_dates",
-                                format!("dates must be strictly increasing after valuation; {date} is not"),
-                            );
-                        }
-                        if *date > maturity_date {
-                            return invalid(
-                                "autocall_observation_dates",
-                                format!("observation {date} lies after the maturity {maturity_date}"),
-                            );
-                        }
-                        prev = *date;
-                    }
-                }
-            }
-            PayoffSpec::Accumulator { side, barrier, observations, shares_per_day, gearing } => {
-                if !(barrier.is_finite() && *barrier > 0.0) {
-                    return invalid(
-                        "barrier",
-                        format!("barrier must be positive and finite, got {barrier}"),
-                    );
-                }
-                match side {
-                    AccumulatorSide::Accumulator if *barrier <= self.spot => {
-                        return invalid(
-                            "barrier",
-                            "accumulator knock-out must be above the spot".to_string(),
-                        );
-                    }
-                    AccumulatorSide::Decumulator if *barrier >= self.spot => {
-                        return invalid(
-                            "barrier",
-                            "decumulator knock-out must be below the spot".to_string(),
-                        );
-                    }
-                    _ => {}
-                }
-                if *observations < 1 {
-                    return invalid("observations", "need at least one observation".to_string());
-                }
-                if !(shares_per_day.is_finite() && *shares_per_day > 0.0) {
-                    return invalid(
-                        "shares_per_day",
-                        format!("shares_per_day must be positive and finite, got {shares_per_day}"),
-                    );
-                }
-                if !(gearing.is_finite() && *gearing >= 0.0) {
-                    return invalid(
-                        "gearing",
-                        format!("gearing must be non-negative and finite, got {gearing}"),
-                    );
-                }
-            }
-            _ => {}
-        }
-        if self.futures_settlement.is_some() {
-            if !matches!(spec, PayoffSpec::Vanilla { .. }) {
-                return invalid(
-                    "on_future",
-                    "options on futures (Black-76) support the vanilla payoff only".to_string(),
-                );
-            }
-            if matches!(self.exercise_style, ContractStyle::American) {
-                return invalid(
-                    "on_future",
-                    "Black-76 supports European exercise only".to_string(),
-                );
-            }
-        }
-
-        // ── model configuration ─────────────────────────────────────────
-        if let Model::Heston(params) = &self.model {
-            params.validate()?;
-        }
-        if self.mc.paths == 0 {
-            return invalid("paths", "Monte Carlo needs at least one path".to_string());
-        }
-        if self.mc.time_steps == 0 {
-            return invalid("mc_time_steps", "Monte Carlo needs at least one time step".to_string());
-        }
-        if self.lattice.steps < 2 {
-            return invalid(
-                "tree_steps",
-                format!("the binomial tree needs at least 2 steps, got {}", self.lattice.steps),
-            );
-        }
-        if self.fd.spot_steps < 3 || self.fd.time_steps < 1 {
-            return invalid(
-                "fd_grid",
-                format!(
-                    "the FD grid needs at least 3 spot steps and 1 time step, got {} x {}",
-                    self.fd.spot_steps, self.fd.time_steps
-                ),
-            );
-        }
-
-        // ── market objects (curve/surface errors convert via From) ──────
-        let discount_curve = match self.discount_curve {
-            Some(c) => c,
-            None => YieldCurve::flat(
-                self.flat_rate,
-                self.valuation_date,
-                DayCountConvention::Act365,
-                Compounding::Continuous,
-            )?,
-        };
-        let vol_surface = match self.vol_surface {
-            Some(s) => s,
-            None => {
-                VolSurface::flat(self.flat_vol, self.valuation_date, DayCountConvention::Act365)?
-            }
-        };
-
-        // ── materialize the payoff with the final exercise style ────────
-        let style = match bermudan_times {
-            Some(times) => ContractStyle::Bermudan(times),
-            None => self.exercise_style.clone(),
-        };
-        let payoff: Box<dyn Payoff> = match spec {
-            PayoffSpec::Vanilla { put_or_call } => {
-                Box::new(VanillaPayoff { put_or_call, exercise_style: style })
-            }
-            PayoffSpec::Binary { put_or_call, binary_type, cash } => Box::new(BinaryPayoff {
-                put_or_call,
-                exercise_style: style,
-                binary_type,
-                cash,
-            }),
-            PayoffSpec::Barrier {
-                put_or_call,
-                direction,
-                knock,
-                barrier,
-                barrier2,
-                rebate,
-                rebate_at_hit,
-            } => Box::new(BarrierPayoff {
-                put_or_call,
-                exercise_style: style,
-                direction,
-                knock,
-                barrier,
-                barrier2,
-                rebate,
-                rebate_at_hit,
-            }),
-            PayoffSpec::Asian { put_or_call, averaging, strike_type } => Box::new(AsianPayoff {
-                put_or_call,
-                exercise_style: style,
-                averaging,
-                strike_type,
-            }),
-            PayoffSpec::Lookback { put_or_call, lookback_type } => {
-                Box::new(crate::equity::vanilla_option::LookbackPayoff {
-                    put_or_call,
-                    exercise_style: style,
-                    lookback_type,
-                })
-            }
-            PayoffSpec::ForwardStart { put_or_call, strike_fraction, start_fraction } => {
-                Box::new(ForwardStartPayoff {
-                    put_or_call,
-                    exercise_style: style,
-                    strike_fraction,
-                    start_fraction,
-                })
-            }
-            PayoffSpec::Autocallable {
-                autocall_barrier,
-                protection_barrier,
-                coupon,
-                observations,
-                notional,
-                coupon_barrier,
-                memory,
-                observation_dates,
-            } => {
-                let observation_times = observation_dates.as_ref().map(|dates| {
-                    dates
-                        .iter()
-                        .map(|d| (*d - self.valuation_date).num_days() as f64 / 365.0)
-                        .collect::<Vec<f64>>()
-                });
-                let observations = observation_dates
-                    .as_ref()
-                    .map_or(observations, |dates| dates.len());
-                Box::new(AutocallablePayoff {
-                    exercise_style: style,
-                    autocall_barrier,
-                    protection_barrier,
-                    coupon,
-                    observations,
-                    notional,
-                    initial_fixing: self.spot,
-                    coupon_barrier,
-                    memory,
-                    observation_times,
-                })
-            }
-            PayoffSpec::Accumulator { side, barrier, observations, shares_per_day, gearing } => {
-                Box::new(AccumulatorPayoff {
-                    exercise_style: style,
-                    side,
-                    barrier,
-                    observations,
-                    shares_per_day,
-                    gearing,
-                })
-            }
-            PayoffSpec::Custom(p) => p,
-        };
-        let base = EquityOptionBase {
-            symbol: self.symbol,
-            currency: None,
-            exchange: None,
-            name: None,
-            cusip: None,
-            isin: None,
-            settlement_type: None,
-            strike_price: self.strike,
-            maturity_date,
-            futures_settlement: self.futures_settlement,
-            multiplier: 1.0,
-            current_price: Quote::new(0.0),
-            entry_price: 0.0,
-            long_short: LongShort::LONG,
-        };
-        let market = crate::equity::vanilla_option::EquityMarketData {
-            valuation_date: self.valuation_date,
-            spot: Quote::new(self.spot),
-            dividend_yield: self.dividend_yield,
-            borrow_cost: self.borrow_cost,
-            cash_dividends: self.cash_dividends,
-            vol_surface: std::sync::Arc::new(vol_surface),
-            discount_curve: std::sync::Arc::new(discount_curve),
-        };
-        let engine = match self.engine {
-            Engine::BlackScholes => PricingEngine::BlackScholes,
-            Engine::MonteCarlo => PricingEngine::MonteCarlo(self.mc),
-            Engine::Binomial => PricingEngine::Binomial(self.lattice),
-            Engine::FiniteDifference => PricingEngine::FiniteDifference(self.fd),
-            Engine::BaroneAdesiWhaley => PricingEngine::BaroneAdesiWhaley,
-            Engine::BjerksundStensland => PricingEngine::BjerksundStensland,
-        };
-        let option = EquityOption { base, market, payoff, engine, model: self.model };
-        // "builds => prices": refuse engine/model/payoff combinations here
-        // rather than at pricing time
-        option.check_engine_support()?;
-        Ok(option)
+        Ok(())
     }
 }
 

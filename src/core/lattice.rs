@@ -108,6 +108,19 @@ impl Default for LatticeConfig {
     }
 }
 
+impl LatticeConfig {
+    /// Domain checks on the tree dimensions.
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
+        if self.steps < 2 {
+            return Err(RustyQLibError::invalid_input(
+                "tree_steps",
+                format!("the binomial tree needs at least 2 steps, got {}", self.steps),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The general recombining step: `S(i, j) = S0 e^{j lu + (i-j) ld}`,
 /// up with probability `p_up`.
 #[derive(Debug, Clone, Copy, PartialEq)]

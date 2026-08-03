@@ -12,7 +12,6 @@ use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::forward_start_option::forward_start_price;
 use rustyqlib::equity::heston::HestonParams;
-use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
 
 const SPOT: f64 = 100.0;

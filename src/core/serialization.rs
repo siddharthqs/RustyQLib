@@ -25,6 +25,7 @@
 //!   parsing as a number becomes a number, an empty element becomes null,
 //!   everything else stays a string (so `2027-07-17` and `C` are safe).
 
+#[cfg(feature = "xml")]
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -32,7 +33,9 @@ use std::path::Path;
 use quick_xml::events::Event;
 #[cfg(feature = "xml")]
 use quick_xml::Reader;
-use serde_json::{Map, Value};
+#[cfg(feature = "xml")]
+use serde_json::Map;
+use serde_json::Value;
 use crate::core::errors::RustyQLibError;
 
 /// Element name that marks array members in XML.
@@ -182,7 +185,7 @@ impl Node {
             let key = String::from_utf8(attr.key.as_ref().to_vec())
                 .map_err(|err| RustyQLibError::ParseError(format!("invalid attribute name: {err}")))?;
             let raw = attr
-                .unescape_value()
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                 .map_err(|err| RustyQLibError::ParseError(format!("invalid attribute value in <{name}>: {err}")))?;
             attrs.push((key, infer_scalar(raw.as_ref())));
         }
@@ -315,6 +318,7 @@ pub fn render_results(results: &[Value], format: Format) -> String {
 }
 
 /// Render a single value in the requested format.
+#[cfg_attr(not(feature = "xml"), allow(unused_variables))]
 pub fn render_value(value: &Value, format: Format, root: &str) -> String {
     let mut value = value.clone();
     strip_nulls(&mut value);

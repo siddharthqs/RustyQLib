@@ -23,6 +23,7 @@
 
 use crate::core::curves::Compounding;
 use crate::core::data_models::EquityOptionData;
+use crate::core::errors::RustyQLibError;
 // linear kernels live in core::fd_solvers; thomas_algorithm is re-exported
 // because it was previously public from this module
 use crate::core::fd_solvers::brennan_schwartz;
@@ -59,6 +60,20 @@ impl FdConfig {
             time_steps: data.fd_time_steps.unwrap_or(defaults.time_steps).max(10),
             grid_stdevs: defaults.grid_stdevs,
         }
+    }
+
+    /// Domain checks on the grid dimensions.
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
+        if self.spot_steps < 3 || self.time_steps < 1 {
+            return Err(RustyQLibError::invalid_input(
+                "fd_grid",
+                format!(
+                    "the FD grid needs at least 3 spot steps and 1 time step, got {} x {}",
+                    self.spot_steps, self.time_steps
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -217,6 +232,10 @@ fn solve_dispatch(
         return sol;
     }
 
+    if option.model.is_heston() {
+        return super::heston_adi::solve(option, sigma_bump, r_bump, spot_bump);
+    }
+
     if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
         assert!(
             barrier.barrier2.is_none() && barrier.rebate == 0.0,
@@ -306,10 +325,8 @@ fn solve(
             q,
             sigma_bump,
         )),
-        Model::Heston(_) => panic!(
-            "The Heston model needs a 2-D (ADI) FD solver, which is future \
-             work; use the Analytical or MonteCarlo engines"
-        ),
+        // routed to the 2-D ADI solver in solve_dispatch
+        Model::Heston(_) => unreachable!("Heston is dispatched to heston_adi::solve"),
     };
 
     // ── Grid geometry (log-spot). A knock-out barrier becomes the exact
