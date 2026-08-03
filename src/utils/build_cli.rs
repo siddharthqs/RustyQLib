@@ -9,7 +9,7 @@ use std::io::Write;
 use crate::utils::interactive;
 pub fn build_cli() -> Command {
     Command::new("RustyQLib Quant Library for Option Pricing")
-        .version("0.0.2")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Siddharth Singh <siddharth_qs@outlook.com>")
         .about("Pricing and risk management of financial derivatives")
         .subcommand(

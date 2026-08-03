@@ -1,6 +1,6 @@
 [package]
 name = "rustyqlib"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 authors = ["Siddharth Singh"]
 description = "RustyQLib is a lightweight yet robust quantitative finance library designed to price derivatives and perform risk analysis"
