@@ -3,6 +3,33 @@
 version = 4
 
 [[package]]
+name = "RustyQLib"
+version = "0.0.3"
+dependencies = [
+ "assert_approx_eq",
+ "chrono",
+ "clap",
+ "criterion",
+ "csv",
+ "env_logger",
+ "libm",
+ "log",
+ "ndarray",
+ "quick-xml",
+ "rand",
+ "rand_chacha",
+ "rand_distr",
+ "rand_pcg",
+ "rayon",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "thiserror 1.0.69",
+ "toml",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -925,33 +952,6 @@ name = "rustversion"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ffc183a10b4478d04cbbbfc96d0873219d962dd5accaff2ffbd4ceb7df837f4"
-
-[[package]]
-name = "rustyqlib"
-version = "0.0.3"
-dependencies = [
- "assert_approx_eq",
- "chrono",
- "clap",
- "criterion",
- "csv",
- "env_logger",
- "libm",
- "log",
- "ndarray",
- "quick-xml",
- "rand",
- "rand_chacha",
- "rand_distr",
- "rand_pcg",
- "rayon",
- "serde",
- "serde_json",
- "strum",
- "strum_macros",
- "thiserror 1.0.69",
- "toml",
-]
 
 [[package]]
 name = "ryu"

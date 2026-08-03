@@ -1,5 +1,8 @@
 [package]
-name = "rustyqlib"
+# crates.io permanently binds the crate to its first-published spelling
+# ("RustyQLib"); the [lib]/[[bin]] names below keep the import path and
+# binary lowercase (use rustyqlib::...).
+name = "RustyQLib"
 version = "0.0.3"
 edition = "2021"
 authors = ["Siddharth Singh"]
