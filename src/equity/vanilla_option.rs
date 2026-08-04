@@ -1061,6 +1061,16 @@ impl EquityOption {
                     "Autocallables and accumulators price on the MonteCarlo engine only",
                 );
             }
+            if matches!(self.engine, PricingEngine::MonteCarlo(_)) {
+                if let Some(barrier) = self.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+                    if barrier.rebate != 0.0 && barrier.rebate_at_hit {
+                        return unsupported(
+                            "at-hit rebates need the touch time: price on the Analytical \
+                             engine (Monte Carlo supports the at-expiry rebate convention)",
+                        );
+                    }
+                }
+            }
         }
         let heston = self.model.is_heston();
         if heston && matches!(self.engine, PricingEngine::Binomial(_)) {
@@ -1226,48 +1236,4 @@ impl EquityOption {
         }
     }
 }
-// #[cfg(test)]
-// mod tests {
-//     //write a unit test for from_json
-//     use super::*;
-//     use crate::core::utils::{Contract,MarketData};
-//     use crate::core::trade::OptionType;
-//     use crate::core::trade::Transection;
-//     use crate::core::utils::ContractStyle;
-//     use crate::core::termstructure::YieldTermStructure;
-//     use crate::core::quotes::Quote;
-//     use chrono::{Datelike, Local, NaiveDate};
-//     #[test]
-//     fn test_from_json() {
-//         let data = Contract {
-//             action: "PV".to_string(),
-//             market_data: Some(MarketData {
-//                 underlying_price: 100.0,
-//                 strike_price: 100.0,
-//                 volatility: None,
-//                 option_price: Some(10.0),
-//                 risk_free_rate: Some(0.05),
-//                 dividend: Some(0.0),
-//                 maturity: "2024-01-01".to_string(),
-//                 option_type: "C".to_string(),
-//                 simulation: None
-//             }),
-//             pricer: "Analytical".to_string(),
-//             asset: "".to_string(),
-//             style: Some("European".to_string()),
-//             rate_data: None
-//         };
-//         let option = EquityOption::from_json(&data);
-//         assert_eq!(option.option_type, OptionType::Call);
-//         assert_eq!(option.transection, Transection::Buy);
-//         assert_eq!(option.underlying_price.value, 100.0);
-//         assert_eq!(option.strike_price, 100.0);
-//         assert_eq!(option.current_price.value, 10.0);
-//         assert_eq!(option.dividend_yield, 0.0);
-//         assert_eq!(option.volatility, 0.2);
-//         assert_eq!(option.maturity_date, NaiveDate::from_ymd(2024, 1, 1));
-//         assert_eq!(option.valuation_date, Local::today().naive_utc());
-//         assert_eq!(option.engine, Engine::BlackScholes);
-//         assert_eq!(option.style, ContractStyle::European);
-//     }
-// }
+

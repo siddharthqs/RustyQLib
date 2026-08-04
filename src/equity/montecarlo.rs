@@ -233,16 +233,12 @@ pub fn npv(option: &EquityOption) -> f64 {
 }
 
 /// Price with standard error and simulation diagnostics.
+///
+/// Input domains (positive spot and vol, unexpired maturity) and
+/// engine/payoff support (e.g. no at-hit rebates on this engine) are
+/// enforced at construction by the builder / `check_engine_support`,
+/// not re-checked here.
 pub fn npv_with_stats(option: &EquityOption) -> McStats {
-    assert!(option.volatility() >= 0.0);
-    assert!(option.time_to_maturity() >= 0.0);
-    assert!(option.market.spot.mid() >= 0.0);
-    if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
-        assert!(
-            !(barrier.rebate != 0.0 && barrier.rebate_at_hit),
-            "at-hit rebates need the touch time: price on the Analytical engine              (Monte Carlo supports the at-expiry rebate convention)"
-        );
-    }
     price(option, &market_params(option))
 }
 

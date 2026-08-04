@@ -1230,6 +1230,20 @@ mod tests {
             matches!(result, Err(RustyQLibError::UnsupportedEngine(_))),
             "American exercise on the analytic engine must be refused at build()"
         );
+
+        // at-hit rebates need the touch time, which the Monte Carlo path
+        // grid does not carry; formerly a pricing-time panic
+        let result = EquityOptionBuilder::new()
+            .spot(100.0)
+            .years_to_maturity(1.0)
+            .barrier(PutOrCall::Call, BarrierDirection::Up, KnockType::Out, 120.0)
+            .barrier_rebate(5.0, true)
+            .engine(Engine::MonteCarlo)
+            .build();
+        assert!(
+            matches!(result, Err(RustyQLibError::UnsupportedEngine(_))),
+            "at-hit rebate on Monte Carlo must be refused at build()"
+        );
     }
 
     #[test]

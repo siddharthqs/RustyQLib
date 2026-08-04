@@ -58,14 +58,14 @@ pub fn row(label: &str, option: &EquityOption) {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let std_err = if option.engine.kind() == Engine::MonteCarlo {
-            Some(montecarlo::npv_with_stats(option).std_err)
-        } else {
-            None
-        };
+        // let std_err = if option.engine.kind() == Engine::MonteCarlo {
+        //     Some(montecarlo::npv_with_stats(option).std_err)
+        // } else {
+        //     None
+        // };
         let result = option.price().unwrap();
         (result.pv, result.greeks.delta, result.greeks.gamma, result.greeks.vega, result.greeks.theta,
-         option.rho(), std_err)
+         option.rho(), result.std_err)
     }));
     std::panic::set_hook(hook);
     match result {

@@ -55,18 +55,18 @@ use crate::equity::{baw, binomial, finite_difference, heston, montecarlo};
 #[derive(Debug, Clone, Copy)]
 struct BumpPolicy {
     /// Spot bump for delta, vanna and charm.
-    hs1: f64,
+    spot_bump: f64,
     /// Spot bump for gamma and the zomma inner stencil (second
     /// differences want a larger step).
-    hs2: f64,
+    spot_bump_gamma: f64,
     /// Vol bump for vega, vanna and the zomma outer stencil.
-    hv: f64,
+    vol_bump: f64,
     /// Vol bump for volga.
-    hv_volga: f64,
+    vol_bump_volga: f64,
     /// Rate bump for rho.
-    hr: f64,
+    rate_bump: f64,
     /// Maturity bump for theta and charm.
-    ht: f64,
+    time_bump: f64,
 }
 
 fn maturity_bump(option: &EquityOption) -> f64 {
@@ -86,12 +86,12 @@ fn route(option: &EquityOption) -> Route {
         PricingEngine::MonteCarlo(_) => {
             let s = option.market.spot.value();
             Route::Bump(BumpPolicy {
-                hs1: s * 0.01,
-                hs2: s * 0.01,
-                hv: 0.01,
-                hv_volga: 0.01,
-                hr: 1e-4,
-                ht: maturity_bump(option),
+                spot_bump: s * 0.01,
+                spot_bump_gamma: s * 0.01,
+                vol_bump: 0.01,
+                vol_bump_volga: 0.01,
+                rate_bump: 1e-4,
+                time_bump: maturity_bump(option),
             })
         }
         PricingEngine::FiniteDifference(_) => Route::Grid,
@@ -99,23 +99,23 @@ fn route(option: &EquityOption) -> Route {
             // the American approximations are smooth in the escrowed spot
             let s = option.effective_spot();
             Route::Bump(BumpPolicy {
-                hs1: s * 1e-4,
-                hs2: s * 1e-4,
-                hv: 1e-4,
-                hv_volga: 1e-3,
-                hr: 1e-4,
-                ht: maturity_bump(option),
+                spot_bump: s * 1e-4,
+                spot_bump_gamma: s * 1e-4,
+                vol_bump: 1e-4,
+                vol_bump_volga: 1e-3,
+                rate_bump: 1e-4,
+                time_bump: maturity_bump(option),
             })
         }
         _ if option.analytic_heston() => {
             let s = option.market.spot.value();
             Route::Bump(BumpPolicy {
-                hs1: s * 1e-4,
-                hs2: s * 1e-3,
-                hv: 1e-4,
-                hv_volga: 1e-2,
-                hr: 1e-5,
-                ht: maturity_bump(option),
+                spot_bump: s * 1e-4,
+                spot_bump_gamma: s * 1e-3,
+                vol_bump: 1e-4,
+                vol_bump_volga: 1e-2,
+                rate_bump: 1e-5,
+                time_bump: maturity_bump(option),
             })
         }
         PricingEngine::Binomial(_) => Route::Tree,
@@ -126,7 +126,7 @@ fn route(option: &EquityOption) -> Route {
 // ── The cached repricer ─────────────────────────────────────────────────
 
 /// Memoized shifted reprices of one option, in the **maturity-shift**
-/// convention: `v(ds, dv, dr, dt)` values the option with maturity
+/// convention: `reprice(ds, dv, dr, dt)` values the option with maturity
 /// extended by `dt` (the stencils below read like the textbook formulas).
 /// [`EquityOption::price_with`] takes elapsed calendar time, hence the
 /// sign flip.
@@ -149,7 +149,7 @@ impl<'a> Repricer<'a> {
         Repricer { option, cache: HashMap::new(), baw_kernels }
     }
 
-    fn v(&mut self, ds: f64, dv: f64, dr: f64, dt: f64) -> f64 {
+    fn reprice(&mut self, ds: f64, dv: f64, dr: f64, dt: f64) -> f64 {
         let key = [ds.to_bits(), dv.to_bits(), dr.to_bits(), dt.to_bits()];
         if let Some(&cached) = self.cache.get(&key) {
             return cached;
@@ -170,59 +170,66 @@ impl<'a> Repricer<'a> {
 
 // ── The stencils (written once) ─────────────────────────────────────────
 
-fn bump_delta(r: &mut Repricer, p: &BumpPolicy) -> f64 {
-    let h = p.hs1;
-    (r.v(h, 0.0, 0.0, 0.0) - r.v(-h, 0.0, 0.0, 0.0)) / (2.0 * h)
+fn bump_delta(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
+    let h = bumps.spot_bump;
+    (repricer.reprice(h, 0.0, 0.0, 0.0) - repricer.reprice(-h, 0.0, 0.0, 0.0)) / (2.0 * h)
 }
 
-fn bump_gamma(r: &mut Repricer, p: &BumpPolicy) -> f64 {
-    let h = p.hs2;
-    (r.v(h, 0.0, 0.0, 0.0) - 2.0 * r.v(0.0, 0.0, 0.0, 0.0) + r.v(-h, 0.0, 0.0, 0.0)) / (h * h)
+fn bump_gamma(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
+    let h = bumps.spot_bump_gamma;
+    (repricer.reprice(h, 0.0, 0.0, 0.0) - 2.0 * repricer.reprice(0.0, 0.0, 0.0, 0.0)
+        + repricer.reprice(-h, 0.0, 0.0, 0.0))
+        / (h * h)
 }
 
-fn bump_vega(r: &mut Repricer, p: &BumpPolicy) -> f64 {
-    let h = p.hv;
-    (r.v(0.0, h, 0.0, 0.0) - r.v(0.0, -h, 0.0, 0.0)) / (2.0 * h)
+fn bump_vega(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
+    let h = bumps.vol_bump;
+    (repricer.reprice(0.0, h, 0.0, 0.0) - repricer.reprice(0.0, -h, 0.0, 0.0)) / (2.0 * h)
 }
 
-fn bump_theta(r: &mut Repricer, p: &BumpPolicy) -> f64 {
+fn bump_theta(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
     // calendar theta = dV/dt = -dV/dT
-    let h = p.ht;
-    -(r.v(0.0, 0.0, 0.0, h) - r.v(0.0, 0.0, 0.0, -h)) / (2.0 * h)
+    let h = bumps.time_bump;
+    -(repricer.reprice(0.0, 0.0, 0.0, h) - repricer.reprice(0.0, 0.0, 0.0, -h)) / (2.0 * h)
 }
 
-fn bump_rho(r: &mut Repricer, p: &BumpPolicy) -> f64 {
-    let h = p.hr;
-    (r.v(0.0, 0.0, h, 0.0) - r.v(0.0, 0.0, -h, 0.0)) / (2.0 * h)
+fn bump_rho(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
+    let h = bumps.rate_bump;
+    (repricer.reprice(0.0, 0.0, h, 0.0) - repricer.reprice(0.0, 0.0, -h, 0.0)) / (2.0 * h)
 }
 
-fn bump_vanna(r: &mut Repricer, p: &BumpPolicy) -> f64 {
-    let (hs, hv) = (p.hs1, p.hv);
-    (r.v(hs, hv, 0.0, 0.0) - r.v(-hs, hv, 0.0, 0.0) - r.v(hs, -hv, 0.0, 0.0)
-        + r.v(-hs, -hv, 0.0, 0.0))
+fn bump_vanna(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
+    let (hs, hv) = (bumps.spot_bump, bumps.vol_bump);
+    (repricer.reprice(hs, hv, 0.0, 0.0) - repricer.reprice(-hs, hv, 0.0, 0.0)
+        - repricer.reprice(hs, -hv, 0.0, 0.0)
+        + repricer.reprice(-hs, -hv, 0.0, 0.0))
         / (4.0 * hs * hv)
 }
 
-fn bump_charm(r: &mut Repricer, p: &BumpPolicy) -> f64 {
+fn bump_charm(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
     // charm = d(delta)/dt = -d(delta)/dT
-    let (hs, ht) = (p.hs1, p.ht);
-    -(r.v(hs, 0.0, 0.0, ht) - r.v(-hs, 0.0, 0.0, ht) - r.v(hs, 0.0, 0.0, -ht)
-        + r.v(-hs, 0.0, 0.0, -ht))
+    let (hs, ht) = (bumps.spot_bump, bumps.time_bump);
+    -(repricer.reprice(hs, 0.0, 0.0, ht) - repricer.reprice(-hs, 0.0, 0.0, ht)
+        - repricer.reprice(hs, 0.0, 0.0, -ht)
+        + repricer.reprice(-hs, 0.0, 0.0, -ht))
         / (4.0 * hs * ht)
 }
 
-fn bump_zomma(r: &mut Repricer, p: &BumpPolicy) -> f64 {
-    let (hs, hv) = (p.hs2, p.hv);
-    let gamma_at = |r: &mut Repricer, dv: f64| {
-        (r.v(hs, dv, 0.0, 0.0) - 2.0 * r.v(0.0, dv, 0.0, 0.0) + r.v(-hs, dv, 0.0, 0.0))
+fn bump_zomma(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
+    let (hs, hv) = (bumps.spot_bump_gamma, bumps.vol_bump);
+    let gamma_at = |repricer: &mut Repricer, dv: f64| {
+        (repricer.reprice(hs, dv, 0.0, 0.0) - 2.0 * repricer.reprice(0.0, dv, 0.0, 0.0)
+            + repricer.reprice(-hs, dv, 0.0, 0.0))
             / (hs * hs)
     };
-    (gamma_at(r, hv) - gamma_at(r, -hv)) / (2.0 * hv)
+    (gamma_at(repricer, hv) - gamma_at(repricer, -hv)) / (2.0 * hv)
 }
 
-fn bump_volga(r: &mut Repricer, p: &BumpPolicy) -> f64 {
-    let h = p.hv_volga;
-    (r.v(0.0, h, 0.0, 0.0) - 2.0 * r.v(0.0, 0.0, 0.0, 0.0) + r.v(0.0, -h, 0.0, 0.0)) / (h * h)
+fn bump_volga(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
+    let h = bumps.vol_bump_volga;
+    (repricer.reprice(0.0, h, 0.0, 0.0) - 2.0 * repricer.reprice(0.0, 0.0, 0.0, 0.0)
+        + repricer.reprice(0.0, -h, 0.0, 0.0))
+        / (h * h)
 }
 
 // ── Single-Greek entry points (the accessors' backend) ──────────────────
@@ -234,7 +241,7 @@ macro_rules! greek {
                 Route::Grid => $grid(option),
                 Route::Tree => $tree(option),
                 Route::Analytic => BlackScholesPricer::new().$analytic(option),
-                Route::Bump(p) => $stencil(&mut Repricer::new(option), &p),
+                Route::Bump(bumps) => $stencil(&mut Repricer::new(option), &bumps),
             }
         }
     };
@@ -289,8 +296,8 @@ pub fn delta(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::delta(option),
         Route::Tree => binomial::delta(option),
         Route::Analytic => BlackScholesPricer::new().delta(option),
-        Route::Bump(p) => native_delta(option)
-            .unwrap_or_else(|| bump_delta(&mut Repricer::new(option), &p)),
+        Route::Bump(bumps) => native_delta(option)
+            .unwrap_or_else(|| bump_delta(&mut Repricer::new(option), &bumps)),
     }
 }
 
@@ -299,8 +306,8 @@ pub fn vega(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::vega(option),
         Route::Tree => binomial::vega(option),
         Route::Analytic => BlackScholesPricer::new().vega(option),
-        Route::Bump(p) => native_vega(option)
-            .unwrap_or_else(|| bump_vega(&mut Repricer::new(option), &p)),
+        Route::Bump(bumps) => native_vega(option)
+            .unwrap_or_else(|| bump_vega(&mut Repricer::new(option), &bumps)),
     }
 }
 
@@ -309,8 +316,8 @@ pub fn rho(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::rho(option),
         Route::Tree => binomial::rho(option),
         Route::Analytic => BlackScholesPricer::new().rho(option),
-        Route::Bump(p) => native_rho(option)
-            .unwrap_or_else(|| bump_rho(&mut Repricer::new(option), &p)),
+        Route::Bump(bumps) => native_rho(option)
+            .unwrap_or_else(|| bump_rho(&mut Repricer::new(option), &bumps)),
     }
 }
 greek!(charm, bump_charm, finite_difference::charm, binomial::charm, charm);
@@ -355,7 +362,7 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
                 std_err: None,
             }
         }
-        Route::Bump(p) => {
+        Route::Bump(bumps) => {
             let (pv, std_err) = match option.engine {
                 PricingEngine::MonteCarlo(_) => {
                     let stats = montecarlo::npv_with_stats(option);
@@ -375,20 +382,20 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
                 }
                 _ => None,
             };
-            let r = &mut Repricer::new(option);
+            let repricer = &mut Repricer::new(option);
             let delta = pathwise
                 .map(|(delta, _)| delta)
                 .or(adjoint.map(|g| g.delta))
                 .or_else(|| {
                     option.analytic_heston().then(|| heston::native_vanilla_delta(option)).flatten()
                 })
-                .unwrap_or_else(|| bump_delta(r, &p));
+                .unwrap_or_else(|| bump_delta(repricer, &bumps));
             let vega = pathwise
                 .map(|(_, vega)| vega)
                 .or(adjoint.map(|g| g.vega))
-                .unwrap_or_else(|| bump_vega(r, &p));
-            let rho = adjoint.map(|g| g.rho).unwrap_or_else(|| bump_rho(r, &p));
-            let gamma = bump_gamma(r, &p);
+                .unwrap_or_else(|| bump_vega(repricer, &bumps));
+            let rho = adjoint.map(|g| g.rho).unwrap_or_else(|| bump_rho(repricer, &bumps));
+            let gamma = bump_gamma(repricer, &bumps);
             let gamma_p = if delta == 0.0 {
                 f64::NAN
             } else {
@@ -400,12 +407,12 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
                     delta,
                     gamma,
                     vega,
-                    theta: bump_theta(r, &p),
+                    theta: bump_theta(repricer, &bumps),
                     rho,
-                    vanna: bump_vanna(r, &p),
-                    charm: bump_charm(r, &p),
+                    vanna: bump_vanna(repricer, &bumps),
+                    charm: bump_charm(repricer, &bumps),
                     gamma_p,
-                    zomma: bump_zomma(r, &p),
+                    zomma: bump_zomma(repricer, &bumps),
                 },
                 std_err,
             }
