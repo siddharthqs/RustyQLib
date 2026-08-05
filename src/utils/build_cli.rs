@@ -1,12 +1,12 @@
-use std::time::Instant;
-use clap::{Arg, ArgMatches, Command};
-use std::fs::File;
+use crate::utils::interactive;
 use crate::utils::parse_contracts;
+use clap::{Arg, ArgMatches, Command};
 use std::fs;
-use std::path::Path;
+use std::fs::File;
 use std::io;
 use std::io::Write;
-use crate::utils::interactive;
+use std::path::Path;
+use std::time::Instant;
 pub fn build_cli() -> Command {
     Command::new("RustyQLib Quant Library for Option Pricing")
         .version(env!("CARGO_PKG_VERSION"))
@@ -72,9 +72,7 @@ pub fn build_cli() -> Command {
                         .required(true),
                 ),
         )
-        .subcommand(
-            Command::new("interactive").about("Interactive mode"),
-        )
+        .subcommand(Command::new("interactive").about("Interactive mode"))
 }
 
 /// Handle the "build" subcommand.
@@ -118,16 +116,18 @@ pub fn handle_dir(matches: &ArgMatches) {
 
             let is_contract_file = path.is_file()
                 && matches!(
-                    path.extension().and_then(|s| s.to_str()).map(|e| e.to_lowercase()).as_deref(),
+                    path.extension()
+                        .and_then(|s| s.to_str())
+                        .map(|e| e.to_lowercase())
+                        .as_deref(),
                     Some("json") | Some("xml")
                 );
             if is_contract_file {
                 let mut file = File::open(&path).expect("Failed to open contract file");
 
                 // Construct the corresponding output file path
-                let output_file_path = output_path.join(
-                    path.file_name().expect("Failed to get file name"),
-                );
+                let output_file_path =
+                    output_path.join(path.file_name().expect("Failed to get file name"));
 
                 parse_contracts::parse_contract(&mut file, output_file_path.to_str().unwrap());
                 log::debug!("priced contracts {:?} -> {:?}", path, output_file_path);
@@ -140,7 +140,9 @@ pub fn handle_dir(matches: &ArgMatches) {
 pub fn handle_interactive() {
     println!("Welcome to Option pricing CLI");
     loop {
-        println!("Do you want to price an option (1), calculate implied volatility (2), or exit (3)?");
+        println!(
+            "Do you want to price an option (1), calculate implied volatility (2), or exit (3)?"
+        );
 
         // Prompt user
         print!("> ");

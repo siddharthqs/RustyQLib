@@ -43,8 +43,11 @@ impl EquityOption {
     /// the unmodified snapshot reproduces `npv()` exactly.
     pub fn snapshot_market(&self) -> Market {
         Market::new(self.market.valuation_date)
-            .with(Spot(self.base.symbol.clone()), self.market.spot.clone())
-            .with(Vol(self.base.symbol.clone()), self.market.vol_surface.clone())
+            .with(Spot(self.base.symbol.clone()), self.market.spot)
+            .with(
+                Vol(self.base.symbol.clone()),
+                self.market.vol_surface.clone(),
+            )
             .with(
                 Discount(self.base.currency_code().to_string()),
                 self.market.discount_curve.clone(),
@@ -71,7 +74,7 @@ impl EquityOption {
         let vol = market.get(&Vol(self.base.symbol.clone()))?;
         let curve = market.get(&Discount(self.base.currency_code().to_string()))?;
         let mut option = self.clone();
-        option.market.spot = spot.clone();
+        option.market.spot = *spot;
         option.market.vol_surface = vol.clone();
         option.market.discount_curve = curve.clone();
         option.market.valuation_date = market.valuation_date();
@@ -82,8 +85,8 @@ impl EquityOption {
                 // (strike, spot-as-forward-proxy, maturity)
                 let k = option.base.strike_price;
                 let f = option.market.spot.value();
-                let shift = option.market.vol_surface.vol(k, f, t)
-                    - self.market.vol_surface.vol(k, f, t);
+                let shift =
+                    option.market.vol_surface.vol(k, f, t) - self.market.vol_surface.vol(k, f, t);
                 if shift != 0.0 {
                     option.model = option.model.with_vol_shift(shift);
                 }
@@ -110,8 +113,7 @@ impl EquityPortfolio {
                 for position in &self.positions[1..] {
                     let option = &position.option;
                     if !market.contains(&Spot(option.base.symbol.clone())) {
-                        market
-                            .insert(Spot(option.base.symbol.clone()), option.market.spot.clone());
+                        market.insert(Spot(option.base.symbol.clone()), option.market.spot);
                         market.insert(
                             Vol(option.base.symbol.clone()),
                             option.market.vol_surface.clone(),
@@ -134,10 +136,7 @@ impl EquityPortfolio {
     }
 
     /// Per-position values under a typed market snapshot, in book order.
-    pub fn position_values_in(
-        &self,
-        market: &Market,
-    ) -> Result<Vec<f64>, RustyQLibError> {
+    pub fn position_values_in(&self, market: &Market) -> Result<Vec<f64>, RustyQLibError> {
         self.positions
             .iter()
             .map(|p| p.option.npv_in(market).map(|v| p.quantity * v))
@@ -151,6 +150,7 @@ mod tests {
     use crate::core::market::{BumpMode, RiskFactor, Shock};
     use crate::core::trade::PutOrCall;
     use crate::equity::builder::EquityOptionBuilder;
+    use crate::equity::bump::{Bump, BumpedMarket};
     use crate::equity::utils::{Engine, Model};
     use chrono::NaiveDate;
 
@@ -170,7 +170,14 @@ mod tests {
     }
 
     fn shock(factor: RiskFactor, mode: BumpMode, size: f64) -> Shock {
-        Shock { factor, mode, size, underlying: None, tenors: None, shifts: None }
+        Shock {
+            factor,
+            mode,
+            size,
+            underlying: None,
+            tenors: None,
+            shifts: None,
+        }
     }
 
     // ── snapshot / rebind parity ────────────────────────────────────
@@ -199,7 +206,10 @@ mod tests {
     fn rebinding_to_a_moved_market_prices_the_new_levels() {
         let opt = option("ACME", 100.0, Engine::BlackScholes);
         let mut market = opt.snapshot_market();
-        market.insert(Spot("ACME".to_string()), crate::core::quotes::Quote::new(110.0));
+        market.insert(
+            Spot("ACME".to_string()),
+            crate::core::quotes::Quote::new(110.0),
+        );
         let moved = opt.npv_in(&market).unwrap();
         // reference: the same contract built directly at the new spot
         let rebuilt = EquityOptionBuilder::new()
@@ -214,7 +224,11 @@ mod tests {
             .engine(Engine::BlackScholes)
             .build()
             .unwrap();
-        assert!((moved - rebuilt.npv()).abs() < 1e-12, "moved {moved} rebuilt {}", rebuilt.npv());
+        assert!(
+            (moved - rebuilt.npv()).abs() < 1e-12,
+            "moved {moved} rebuilt {}",
+            rebuilt.npv()
+        );
         // the original instrument is untouched
         assert_eq!(opt.market.spot.value(), 100.0);
     }
@@ -225,21 +239,29 @@ mod tests {
         let empty = Market::new(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap());
         match opt.npv_in(&empty) {
             Err(RustyQLibError::MissingMarketData { key }) => {
-                assert!(key.contains("Spot") && key.contains("ACME"), "got key `{key}`");
+                assert!(
+                    key.contains("Spot") && key.contains("ACME"),
+                    "got key `{key}`"
+                );
             }
             other => panic!("expected MissingMarketData, got {other:?}"),
         }
     }
 
-    // ── bumped markets against the price_with reference ────────────
+    // ── bumped markets against the scalar-bump reference ───────────
     //
-    // While the per-engine `price_with` scalar path still exists, it is
+    // The scalar fast path (`price_bumped` over a `BumpedMarket` view) is
     // the independent reference implementation for these parities: a
-    // bumped market repriced through `npv_in` must agree with the same
-    // shifts applied as scalar deltas.
+    // bumped object-level market repriced through `npv_in` must agree
+    // with the same shifts applied as scalar deltas.
+
+    /// Scalar-path reference reprice.
+    fn scalar_bumped(option: &EquityOption, bump: Bump) -> f64 {
+        option.price_bumped(&BumpedMarket::new(&option.market, bump))
+    }
 
     #[test]
-    fn spot_vol_and_rate_bumps_match_price_with_on_every_engine() {
+    fn spot_vol_and_rate_bumps_match_the_scalar_path_on_every_engine() {
         for engine in [
             Engine::BlackScholes,
             Engine::Binomial,
@@ -274,7 +296,15 @@ mod tests {
             for (name, s, [ds, dv, dr, dt]) in cases {
                 let bumped = market.bumped(std::slice::from_ref(&s)).unwrap();
                 let via_market = opt.npv_in(&bumped).unwrap();
-                let via_deltas = opt.price_with(ds, dv, dr, dt);
+                let via_deltas = scalar_bumped(
+                    &opt,
+                    Bump {
+                        d_spot: ds,
+                        d_vol: dv,
+                        d_rate: dr,
+                        d_time: dt,
+                    },
+                );
                 assert!(
                     (via_market - via_deltas).abs() < 1e-10,
                     "{label} {name}: market {via_market} deltas {via_deltas}"
@@ -289,10 +319,16 @@ mod tests {
         let market = opt.snapshot_market();
         let month = shock(RiskFactor::Time, BumpMode::Absolute, 30.0);
         let later = market.bumped(std::slice::from_ref(&month)).unwrap();
-        assert_eq!(later.valuation_date(), NaiveDate::from_ymd_opt(2026, 2, 4).unwrap());
+        assert_eq!(
+            later.valuation_date(),
+            NaiveDate::from_ymd_opt(2026, 2, 4).unwrap()
+        );
         let aged = opt.npv_in(&later).unwrap();
-        let expected = opt.price_with(0.0, 0.0, 0.0, 30.0 / 365.0);
-        assert!((aged - expected).abs() < 1e-10, "aged {aged} expected {expected}");
+        let expected = scalar_bumped(&opt, Bump::elapsed(30.0 / 365.0));
+        assert!(
+            (aged - expected).abs() < 1e-10,
+            "aged {aged} expected {expected}"
+        );
         assert!(aged < opt.npv(), "a long option must decay");
         // relative time shocks are rejected
         let bad = shock(RiskFactor::Time, BumpMode::Relative, 0.1);
@@ -305,7 +341,7 @@ mod tests {
         let zeno = option("ZENO", 100.0, Engine::FiniteDifference);
         let market = acme
             .snapshot_market()
-            .with(Spot("ZENO".to_string()), zeno.market.spot.clone())
+            .with(Spot("ZENO".to_string()), zeno.market.spot)
             .with(Vol("ZENO".to_string()), zeno.market.vol_surface.clone());
         // -10% then +2 absolute, ACME only: 100 * 0.9 + 2 = 92
         let shocks = [
@@ -330,7 +366,9 @@ mod tests {
         assert!((bumped.get(&Spot("ACME".to_string())).unwrap().value() - 92.0).abs() < 1e-12);
         // ZENO untouched under the same bumped market
         assert!((zeno.npv_in(&bumped).unwrap() - zeno.npv()).abs() < 1e-10);
-        assert!((acme.npv_in(&bumped).unwrap() - acme.price_with(-8.0, 0.0, 0.0, 0.0)).abs() < 1e-10);
+        assert!(
+            (acme.npv_in(&bumped).unwrap() - scalar_bumped(&acme, Bump::spot(-8.0))).abs() < 1e-10
+        );
     }
 
     #[test]
@@ -353,12 +391,15 @@ mod tests {
             .bumped(&[shock(RiskFactor::Vol, BumpMode::Absolute, 0.02)])
             .unwrap();
         let via_market = opt.npv_in(&bumped).unwrap();
-        let via_deltas = opt.price_with(0.0, 0.02, 0.0, 0.0);
+        let via_deltas = scalar_bumped(&opt, Bump::vol(0.02));
         assert!(
             (via_market - via_deltas).abs() < 1e-10,
             "market {via_market} deltas {via_deltas}"
         );
-        assert!(via_market > opt.npv(), "long vega: higher vol must raise the value");
+        assert!(
+            via_market > opt.npv(),
+            "long vega: higher vol must raise the value"
+        );
     }
 
     // ── portfolio-level ─────────────────────────────────────────────
@@ -374,9 +415,16 @@ mod tests {
         let market = book.snapshot_market();
         assert!(market.contains(&Spot("ACME".to_string())));
         assert!(market.contains(&Vol("ACME".to_string())));
-        let direct: f64 = book.positions.iter().map(|p| p.quantity * p.option.npv()).sum();
+        let direct: f64 = book
+            .positions
+            .iter()
+            .map(|p| p.quantity * p.option.npv())
+            .sum();
         let under = book.npv_in(&market).unwrap();
-        assert!((under - direct).abs() < 1e-10, "under {under} direct {direct}");
+        assert!(
+            (under - direct).abs() < 1e-10,
+            "under {under} direct {direct}"
+        );
         // per-position values sum to the book value
         let values = book.position_values_in(&market).unwrap();
         let sum: f64 = values.iter().sum();

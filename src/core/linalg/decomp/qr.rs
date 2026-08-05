@@ -2,10 +2,16 @@
 //! squares (no `A^T A` squaring of the condition number).
 use crate::core::errors::RustyQLibError;
 
+/// A dense row-major matrix.
+type Matrix = Vec<Vec<f64>>;
+
 /// Thin QR of an `m x n` matrix with `m >= n`: returns `(Q, R)` with `Q`
 /// an `m x n` orthonormal-column matrix and `R` upper triangular `n x n`
 /// such that `A = Q R`.
-pub fn qr(a: &[Vec<f64>]) -> Result<(Vec<Vec<f64>>, Vec<Vec<f64>>), RustyQLibError> {
+// the Householder updates run over `r[i][j]` submatrix subscripts;
+// iterator forms would obscure the math
+#[allow(clippy::needless_range_loop)]
+pub fn qr(a: &[Vec<f64>]) -> Result<(Matrix, Matrix), RustyQLibError> {
     let m = a.len();
     if m == 0 {
         return Err(RustyQLibError::NumericalError("empty matrix".to_string()));
@@ -15,7 +21,9 @@ pub fn qr(a: &[Vec<f64>]) -> Result<(Vec<Vec<f64>>, Vec<Vec<f64>>), RustyQLibErr
         return Err(RustyQLibError::NumericalError("ragged matrix".to_string()));
     }
     if m < n {
-        return Err(RustyQLibError::NumericalError("QR needs at least as many rows as columns".to_string()));
+        return Err(RustyQLibError::NumericalError(
+            "QR needs at least as many rows as columns".to_string(),
+        ));
     }
     let mut r = a.to_vec();
     // householder vectors, v[k] has zeros above row k
@@ -80,15 +88,21 @@ pub fn least_squares(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, RustyQLibErr
     let m = a.len();
     let n = r.len();
     if b.len() != m {
-        return Err(RustyQLibError::NumericalError("dimension mismatch".to_string()));
+        return Err(RustyQLibError::NumericalError(
+            "dimension mismatch".to_string(),
+        ));
     }
     // Q^T b
-    let qtb: Vec<f64> = (0..n).map(|j| (0..m).map(|i| q[i][j] * b[i]).sum()).collect();
+    let qtb: Vec<f64> = (0..n)
+        .map(|j| (0..m).map(|i| q[i][j] * b[i]).sum())
+        .collect();
     // back-substitute R x = Q^T b
     let mut x = vec![0.0; n];
     for i in (0..n).rev() {
         if r[i][i].abs() < 1e-12 {
-            return Err(RustyQLibError::NumericalError("matrix is rank deficient".to_string()));
+            return Err(RustyQLibError::NumericalError(
+                "matrix is rank deficient".to_string(),
+            ));
         }
         let s: f64 = (i + 1..n).map(|k| r[i][k] * x[k]).sum();
         x[i] = (qtb[i] - s) / r[i][i];
@@ -103,7 +117,11 @@ mod tests {
     fn fixture() -> Vec<Vec<f64>> {
         // deterministic 5 x 3 full-rank matrix
         (0..5)
-            .map(|i| (0..3).map(|j| ((i * 3 + j) as f64).sin() + if i == j { 2.0 } else { 0.0 }).collect())
+            .map(|i| {
+                (0..3)
+                    .map(|j| ((i * 3 + j) as f64).sin() + if i == j { 2.0 } else { 0.0 })
+                    .collect()
+            })
             .collect()
     }
 
@@ -134,13 +152,18 @@ mod tests {
         let ys = [1.1, 1.9, 3.2, 3.8, 5.1];
         let a: Vec<Vec<f64>> = ts.iter().map(|&t| vec![1.0, t]).collect();
         let x = least_squares(&a, &ys).unwrap();
-        assert!((x[0] - 1.04).abs() < 1e-12 && (x[1] - 0.99).abs() < 1e-12, "{x:?}");
+        assert!(
+            (x[0] - 1.04).abs() < 1e-12 && (x[1] - 0.99).abs() < 1e-12,
+            "{x:?}"
+        );
     }
 
     #[test]
     fn rank_deficiency_is_reported() {
         // second column is twice the first
-        let a: Vec<Vec<f64>> = (0..4).map(|i| vec![i as f64 + 1.0, 2.0 * (i as f64 + 1.0)]).collect();
+        let a: Vec<Vec<f64>> = (0..4)
+            .map(|i| vec![i as f64 + 1.0, 2.0 * (i as f64 + 1.0)])
+            .collect();
         assert!(least_squares(&a, &[1.0, 2.0, 3.0, 4.0]).is_err());
     }
 }

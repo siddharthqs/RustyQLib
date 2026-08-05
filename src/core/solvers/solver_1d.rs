@@ -31,7 +31,10 @@ pub struct Solver1d {
 
 impl Default for Solver1d {
     fn default() -> Self {
-        Self { tol: 1e-12, max_iter: 100 }
+        Self {
+            tol: 1e-12,
+            max_iter: 100,
+        }
     }
 }
 
@@ -43,18 +46,18 @@ impl Solver1d {
     // ── direct calls (method fixed at the call site) ────────────────────
 
     /// [Bisection](bisection::bisection) on a sign-changing bracket.
-    pub fn bisection(&self, f: impl Fn(f64) -> f64, lo: f64, hi: f64) -> Result<Root, RustyQLibError> {
+    pub fn bisection(
+        &self,
+        f: impl Fn(f64) -> f64,
+        lo: f64,
+        hi: f64,
+    ) -> Result<Root, RustyQLibError> {
         bisection::bisection(self, f, lo, hi)
     }
 
     /// [Newton-Raphson](newton_raphson::newton_raphson) with an analytic
     /// derivative.
-    pub fn newton_raphson(
-        &self,
-        f: impl Fn(f64) -> f64,
-        df: impl Fn(f64) -> f64,
-        x0: f64,
-    ) -> Root {
+    pub fn newton_raphson(&self, f: impl Fn(f64) -> f64, df: impl Fn(f64) -> f64, x0: f64) -> Root {
         newton_raphson::newton_raphson(self, f, df, x0)
     }
 
@@ -105,9 +108,11 @@ impl Solver1d {
             None => numeric_second_derivative(problem.f, x),
         };
         let bracket = |name: &str| {
-            problem
-                .bracket
-                .ok_or_else(|| RustyQLibError::NumericalError(format!("{name} needs a bracket: use Problem::with_bracket")))
+            problem.bracket.ok_or_else(|| {
+                RustyQLibError::NumericalError(format!(
+                    "{name} needs a bracket: use Problem::with_bracket"
+                ))
+            })
         };
         match method {
             Method::Bisection => {
@@ -120,7 +125,11 @@ impl Solver1d {
                 // otherwise a small relative step from x0
                 let x1 = match problem.bracket {
                     Some((lo, hi)) => {
-                        if (problem.x0 - lo).abs() > (problem.x0 - hi).abs() { lo } else { hi }
+                        if (problem.x0 - lo).abs() > (problem.x0 - hi).abs() {
+                            lo
+                        } else {
+                            hi
+                        }
                     }
                     None => problem.x0 + 1e-4 * (1.0 + problem.x0.abs()),
                 };
@@ -157,7 +166,13 @@ pub struct Problem<'a> {
 
 impl<'a> Problem<'a> {
     pub fn new(f: &'a dyn Fn(f64) -> f64, x0: f64) -> Self {
-        Self { f, df: None, d2f: None, x0, bracket: None }
+        Self {
+            f,
+            df: None,
+            d2f: None,
+            x0,
+            bracket: None,
+        }
     }
 
     pub fn with_derivative(mut self, df: &'a dyn Fn(f64) -> f64) -> Self {

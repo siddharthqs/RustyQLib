@@ -40,54 +40,83 @@ fn main() {
     common::row(
         "Geometric, analytic (exact)",
         &base()
-            .asian(PutOrCall::Call, AveragingType::Geometric, AsianStrikeType::FixedStrike)
+            .asian(
+                PutOrCall::Call,
+                AveragingType::Geometric,
+                AsianStrikeType::FixedStrike,
+            )
             .engine(Engine::BlackScholes)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row(
         "Geometric, Monte Carlo",
         &base()
-            .asian(PutOrCall::Call, AveragingType::Geometric, AsianStrikeType::FixedStrike)
+            .asian(
+                PutOrCall::Call,
+                AveragingType::Geometric,
+                AsianStrikeType::FixedStrike,
+            )
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row(
         "Arithmetic, Turnbull-Wakeman",
         &base()
-            .asian(PutOrCall::Call, AveragingType::Arithmetic, AsianStrikeType::FixedStrike)
+            .asian(
+                PutOrCall::Call,
+                AveragingType::Arithmetic,
+                AsianStrikeType::FixedStrike,
+            )
             .engine(Engine::BlackScholes)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row(
         "Arithmetic, MC + geometric CV",
         &base()
-            .asian(PutOrCall::Call, AveragingType::Arithmetic, AsianStrikeType::FixedStrike)
+            .asian(
+                PutOrCall::Call,
+                AveragingType::Arithmetic,
+                AsianStrikeType::FixedStrike,
+            )
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
 
     common::section("Control variate effect (same path count)");
     common::table_header();
     let with_cv = base()
-        .asian(PutOrCall::Call, AveragingType::Arithmetic, AsianStrikeType::FixedStrike)
+        .asian(
+            PutOrCall::Call,
+            AveragingType::Arithmetic,
+            AsianStrikeType::FixedStrike,
+        )
         .engine(Engine::MonteCarlo)
         .paths(20_000)
-        .build().expect("option must build");
+        .build()
+        .expect("option must build");
     let without_cv = base()
-        .asian(PutOrCall::Call, AveragingType::Arithmetic, AsianStrikeType::FixedStrike)
+        .asian(
+            PutOrCall::Call,
+            AveragingType::Arithmetic,
+            AsianStrikeType::FixedStrike,
+        )
         .engine(Engine::MonteCarlo)
         .paths(20_000)
-        .mc_config({
+        .mc_config(rustyqlib::equity::montecarlo::MonteCarloConfig {
             // Euler stepping disables the control variate precondition
-            let mut c = rustyqlib::equity::montecarlo::MonteCarloConfig::default();
-            c.paths = 20_000;
-            c.scheme = DiscretizationScheme::Euler;
-            c.time_steps = 100;
-            c
+            paths: 20_000,
+            scheme: DiscretizationScheme::Euler,
+            time_steps: 100,
+            ..Default::default()
         })
-        .build().expect("option must build");
+        .build()
+        .expect("option must build");
     common::row("with geometric control variate", &with_cv);
     common::row("without (Euler path route)", &without_cv);
     common::note("compare the std err column: the CV collapses the variance");
@@ -98,30 +127,56 @@ fn main() {
         common::row(
             &format!("Monte Carlo, {pc:?}"),
             &base()
-                .asian(pc, AveragingType::Arithmetic, AsianStrikeType::FloatingStrike)
+                .asian(
+                    pc,
+                    AveragingType::Arithmetic,
+                    AsianStrikeType::FloatingStrike,
+                )
                 .engine(Engine::MonteCarlo)
                 .paths(50_000)
-                .build().expect("option must build"),
+                .build()
+                .expect("option must build"),
         );
         common::row(
             &format!("Analytic (unsupported), {pc:?}"),
             &base()
-                .asian(pc, AveragingType::Arithmetic, AsianStrikeType::FloatingStrike)
+                .asian(
+                    pc,
+                    AveragingType::Arithmetic,
+                    AsianStrikeType::FloatingStrike,
+                )
                 .engine(Engine::BlackScholes)
-                .build().expect("option must build"),
+                .build()
+                .expect("option must build"),
         );
     }
 
     common::section("Orderings and limits");
-    let vanilla = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build").npv();
+    let vanilla = base()
+        .vanilla(PutOrCall::Call)
+        .engine(Engine::BlackScholes)
+        .build()
+        .expect("option must build")
+        .npv();
     let geo = geometric_asian_price(SPOT, STRIKE, RATE, DIV, VOL, 1.0, None, PutOrCall::Call);
     let arith = turnbull_wakeman_price(SPOT, STRIKE, RATE, DIV, VOL, 1.0, PutOrCall::Call);
     println!("  geometric {geo:.6} < arithmetic {arith:.6} < vanilla {vanilla:.6}");
     common::note("AM-GM: the arithmetic average dominates the geometric one");
-    common::note("averaging reduces effective volatility (sigma^2 T / 3), so both sit below vanilla");
+    common::note(
+        "averaging reduces effective volatility (sigma^2 T / 3), so both sit below vanilla",
+    );
     common::check(
         "discrete geometric (n=1e5) -> continuous",
-        geometric_asian_price(SPOT, STRIKE, RATE, DIV, VOL, 1.0, Some(100_000), PutOrCall::Call),
+        geometric_asian_price(
+            SPOT,
+            STRIKE,
+            RATE,
+            DIV,
+            VOL,
+            1.0,
+            Some(100_000),
+            PutOrCall::Call,
+        ),
         geo,
         1e-3,
     );

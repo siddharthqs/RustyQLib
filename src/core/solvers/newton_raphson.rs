@@ -15,15 +15,27 @@ pub fn newton_raphson(
     for i in 0..cfg.max_iter {
         let fx = f(x);
         if fx.abs() <= cfg.tol {
-            return Root { x, iterations: i, converged: true };
+            return Root {
+                x,
+                iterations: i,
+                converged: true,
+            };
         }
         let dfx = df(x);
         if dfx == 0.0 || !dfx.is_finite() {
-            return Root { x, iterations: i, converged: false };
+            return Root {
+                x,
+                iterations: i,
+                converged: false,
+            };
         }
         x -= fx / dfx;
     }
-    Root { x, iterations: cfg.max_iter, converged: f(x).abs() <= cfg.tol }
+    Root {
+        x,
+        iterations: cfg.max_iter,
+        converged: f(x).abs() <= cfg.tol,
+    }
 }
 
 #[cfg(test)]
@@ -33,7 +45,10 @@ mod tests {
     #[test]
     fn finds_sqrt_two() {
         let r = newton_raphson(&Solver1d::default(), |x| x * x - 2.0, |x| 2.0 * x, 1.0);
-        assert!(r.converged && (r.x - std::f64::consts::SQRT_2).abs() < 1e-12, "{r:?}");
+        assert!(
+            r.converged && (r.x - std::f64::consts::SQRT_2).abs() < 1e-12,
+            "{r:?}"
+        );
     }
 
     #[test]

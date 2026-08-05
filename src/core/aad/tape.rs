@@ -35,7 +35,11 @@ impl Tape {
     /// A new independent input variable.
     pub fn var(&self, value: f64) -> super::var::Var<'_> {
         let idx = self.push0();
-        super::var::Var { tape: self, idx, val: value }
+        super::var::Var {
+            tape: self,
+            idx,
+            val: value,
+        }
     }
 
     /// Number of recorded nodes.
@@ -54,19 +58,28 @@ impl Tape {
 
     pub(crate) fn push0(&self) -> usize {
         let mut nodes = self.nodes.borrow_mut();
-        nodes.push(Node { parents: [NONE, NONE], partials: [0.0, 0.0] });
+        nodes.push(Node {
+            parents: [NONE, NONE],
+            partials: [0.0, 0.0],
+        });
         nodes.len() - 1
     }
 
     pub(crate) fn push1(&self, parent: usize, partial: f64) -> usize {
         let mut nodes = self.nodes.borrow_mut();
-        nodes.push(Node { parents: [parent, NONE], partials: [partial, 0.0] });
+        nodes.push(Node {
+            parents: [parent, NONE],
+            partials: [partial, 0.0],
+        });
         nodes.len() - 1
     }
 
     pub(crate) fn push2(&self, p0: usize, w0: f64, p1: usize, w1: f64) -> usize {
         let mut nodes = self.nodes.borrow_mut();
-        nodes.push(Node { parents: [p0, p1], partials: [w0, w1] });
+        nodes.push(Node {
+            parents: [p0, p1],
+            partials: [w0, w1],
+        });
         nodes.len() - 1
     }
 

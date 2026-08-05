@@ -6,7 +6,7 @@
 //!   aggregated Greeks — fast, and exactly the Taylor expansion the
 //!   portfolio's PnL attribution uses;
 //! - **Full revaluation**: every scenario reprices every position
-//!   through [`EquityPortfolio::price_with`] — exact payoff convexity,
+//!   through bumped-market reprices — exact payoff convexity,
 //!   at pricing cost.
 //!
 //! Scenarios are joint lognormal-spot / normal-vol moves with a
@@ -15,6 +15,7 @@
 //! Taylor truncation — a direct read on how non-linear the book is.
 
 use crate::core::montecarlo::path_rng;
+use crate::equity::bump::{Bump, BumpedMarket};
 use crate::equity::portfolio::EquityPortfolio;
 use rand::Rng;
 use rand_distr::StandardNormal;
@@ -65,14 +66,11 @@ fn scenario_moves(cfg: &RiskConfig, spot: f64, i: u64) -> (f64, f64) {
     let mut rng = path_rng(cfg.seed, i);
     let z1: f64 = rng.sample(StandardNormal);
     let z2: f64 = rng.sample(StandardNormal);
-    let zv = cfg.spot_vol_corr * z1
-        + (1.0 - cfg.spot_vol_corr * cfg.spot_vol_corr).sqrt() * z2;
+    let zv = cfg.spot_vol_corr * z1 + (1.0 - cfg.spot_vol_corr * cfg.spot_vol_corr).sqrt() * z2;
     let sq = cfg.horizon.sqrt();
     // lognormal spot move, arithmetic vol move
-    let d_spot = spot * ((-0.5 * cfg.spot_vol * cfg.spot_vol * cfg.horizon
-        + cfg.spot_vol * sq * z1)
-        .exp()
-        - 1.0);
+    let d_spot = spot
+        * ((-0.5 * cfg.spot_vol * cfg.spot_vol * cfg.horizon + cfg.spot_vol * sq * z1).exp() - 1.0);
     let d_vol = cfg.vol_of_vol * sq * zv;
     (d_spot, d_vol)
 }
@@ -95,26 +93,34 @@ pub fn delta_gamma_var(book: &EquityPortfolio, spot: f64, cfg: &RiskConfig) -> P
     summarize(&pnl, cfg)
 }
 
-/// Full-revaluation VaR: every scenario reprices the whole book via
-/// [`EquityPortfolio::price_with`] (same scenarios as
-/// [`delta_gamma_var`], so the difference isolates the Taylor error).
-pub fn full_revaluation_var(
-    book: &EquityPortfolio,
-    spot: f64,
-    cfg: &RiskConfig,
-) -> PortfolioRisk {
+/// Full-revaluation VaR: every scenario bumps the market and reprices the
+/// whole book via [`EquityOption::price_bumped`]
+/// (crate::equity::vanilla_option::EquityOption::price_bumped) — same
+/// scenarios as [`delta_gamma_var`], so the difference isolates the
+/// Taylor error.
+pub fn full_revaluation_var(book: &EquityPortfolio, spot: f64, cfg: &RiskConfig) -> PortfolioRisk {
     let base: f64 = book
         .positions
         .iter()
-        .map(|p| p.quantity * p.option.price_with(0.0, 0.0, 0.0, 0.0))
+        .map(|p| p.quantity * p.option.price_bumped(&BumpedMarket::base(&p.option.market)))
         .sum();
     let pnl: Vec<f64> = (0..cfg.scenarios as u64)
         .map(|i| {
             let (ds, dv) = scenario_moves(cfg, spot, i);
+            let bump = Bump {
+                d_spot: ds,
+                d_vol: dv,
+                d_rate: 0.0,
+                d_time: cfg.horizon,
+            };
             let revalued: f64 = book
                 .positions
                 .iter()
-                .map(|p| p.quantity * p.option.price_with(ds, dv, 0.0, cfg.horizon))
+                .map(|p| {
+                    p.quantity
+                        * p.option
+                            .price_bumped(&BumpedMarket::new(&p.option.market, bump))
+                })
                 .sum();
             revalued - base
         })
@@ -135,9 +141,9 @@ fn summarize(pnl: &[f64], cfg: &RiskConfig) -> PortfolioRisk {
 mod tests {
     use super::*;
     use crate::core::trade::PutOrCall;
+    use crate::core::traits::Instrument;
     use crate::equity::builder::EquityOptionBuilder;
     use crate::equity::utils::Engine;
-    use crate::core::traits::Instrument;
     use crate::equity::vanilla_option::EquityOption;
     use chrono::NaiveDate;
 
@@ -154,7 +160,8 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
             .vanilla(pc)
             .engine(qty_engine)
-            .build().expect("option must build")
+            .build()
+            .expect("option must build")
     }
 
     fn book(positions: &[(PutOrCall, f64, f64)]) -> EquityPortfolio {
@@ -170,9 +177,16 @@ mod tests {
         // a long call can lose at most its value
         let b = book(&[(PutOrCall::Call, 100.0, 100.0)]);
         let value: f64 = 100.0 * option(PutOrCall::Call, 100.0, Engine::BlackScholes).npv();
-        let cfg = RiskConfig { scenarios: 10_000, ..RiskConfig::default() };
+        let cfg = RiskConfig {
+            scenarios: 10_000,
+            ..RiskConfig::default()
+        };
         let full = full_revaluation_var(&b, SPOT, &cfg);
-        assert!(full.var > 0.0 && full.var < value, "var {} value {value}", full.var);
+        assert!(
+            full.var > 0.0 && full.var < value,
+            "var {} value {value}",
+            full.var
+        );
         assert!(full.expected_shortfall >= full.var);
         let dg = delta_gamma_var(&b, SPOT, &cfg);
         assert!(dg.expected_shortfall >= dg.var);
@@ -180,8 +194,15 @@ mod tests {
 
     #[test]
     fn delta_gamma_tracks_full_revaluation_for_one_day() {
-        let b = book(&[(PutOrCall::Call, 100.0, 100.0), (PutOrCall::Put, 95.0, 50.0)]);
-        let cfg = RiskConfig { scenarios: 10_000, vol_of_vol: 0.5, ..RiskConfig::default() };
+        let b = book(&[
+            (PutOrCall::Call, 100.0, 100.0),
+            (PutOrCall::Put, 95.0, 50.0),
+        ]);
+        let cfg = RiskConfig {
+            scenarios: 10_000,
+            vol_of_vol: 0.5,
+            ..RiskConfig::default()
+        };
         let dg = delta_gamma_var(&b, SPOT, &cfg);
         let full = full_revaluation_var(&b, SPOT, &cfg);
         // one-day moves: the Taylor truncation is small
@@ -195,7 +216,10 @@ mod tests {
 
     #[test]
     fn hedging_reduces_var_and_gamma_shows_in_the_comparison() {
-        let cfg = RiskConfig { scenarios: 10_000, ..RiskConfig::default() };
+        let cfg = RiskConfig {
+            scenarios: 10_000,
+            ..RiskConfig::default()
+        };
         // naked short call vs the same with a long ATM call hedge
         let naked = book(&[(PutOrCall::Call, 100.0, -100.0)]);
         let hedged = book(&[
@@ -204,7 +228,10 @@ mod tests {
         ]);
         let naked_var = full_revaluation_var(&naked, SPOT, &cfg).var;
         let hedged_var = full_revaluation_var(&hedged, SPOT, &cfg).var;
-        assert!(hedged_var < naked_var, "hedged {hedged_var} vs naked {naked_var}");
+        assert!(
+            hedged_var < naked_var,
+            "hedged {hedged_var} vs naked {naked_var}"
+        );
         // for the short book the delta-gamma estimate must not report a
         // negative-loss (profit) VaR
         assert!(delta_gamma_var(&naked, SPOT, &cfg).var > 0.0);
@@ -214,9 +241,20 @@ mod tests {
     fn vol_scenarios_add_risk_to_a_vega_book() {
         // long straddle: pure spot scenarios miss the vega risk of a
         // vol crush; adding vol scenarios raises the VaR
-        let b = book(&[(PutOrCall::Call, 100.0, 100.0), (PutOrCall::Put, 100.0, 100.0)]);
-        let no_vol = RiskConfig { scenarios: 10_000, vol_of_vol: 0.0, ..RiskConfig::default() };
-        let with_vol = RiskConfig { scenarios: 10_000, vol_of_vol: 0.8, ..RiskConfig::default() };
+        let b = book(&[
+            (PutOrCall::Call, 100.0, 100.0),
+            (PutOrCall::Put, 100.0, 100.0),
+        ]);
+        let no_vol = RiskConfig {
+            scenarios: 10_000,
+            vol_of_vol: 0.0,
+            ..RiskConfig::default()
+        };
+        let with_vol = RiskConfig {
+            scenarios: 10_000,
+            vol_of_vol: 0.8,
+            ..RiskConfig::default()
+        };
         let base = full_revaluation_var(&b, SPOT, &no_vol).var;
         let vol_aware = full_revaluation_var(&b, SPOT, &with_vol).var;
         assert!(vol_aware > base, "with vol {vol_aware} vs without {base}");

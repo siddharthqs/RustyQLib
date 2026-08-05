@@ -1,0 +1,133 @@
+// An equity
+use crate::core::data_models::EquityFutureData;
+use crate::core::errors::RustyQLibError;
+use crate::core::quotes::Quote;
+use crate::core::traits::Instrument;
+use crate::equity::utils::LongShort;
+use chrono::NaiveDate;
+//use crate::equity::vanilla_option::EquityOption;
+
+pub struct EquityFuture {
+    pub symbol: String,
+    pub currency: Option<String>,
+    pub exchange: Option<String>,
+    pub name: Option<String>,
+    pub cusip: Option<String>,
+    pub isin: Option<String>,
+    pub settlement_type: Option<String>,
+
+    pub underlying_price: Quote,
+    pub current_price: Quote,
+    pub entry_price: f64,
+    pub multiplier: f64,
+    pub risk_free_rate: f64,
+    pub dividend_yield: f64,
+    /// Continuous stock borrow (repo) cost; part of the carry.
+    pub borrow_cost: f64,
+    pub maturity_date: NaiveDate,
+    pub valuation_date: NaiveDate,
+    pub long_short: LongShort,
+}
+
+impl EquityFuture {
+    /// Build from contract data, panicking on any invalid field. Fallible
+    /// callers should use [`EquityFuture::try_from_json`].
+    pub fn from_json(data: &EquityFutureData) -> Box<Self> {
+        Self::try_from_json(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub fn try_from_json(data: &EquityFutureData) -> Result<Box<Self>, RustyQLibError> {
+        let today =
+            crate::core::data_models::parse_valuation_date(data.base.valuation_date.as_deref())?;
+        let maturity_date =
+            NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d").map_err(|_| {
+                RustyQLibError::invalid_input(
+                    "maturity",
+                    format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
+                )
+            })?;
+
+        let underlying_quote = Quote::new(data.base.underlying_price);
+        let current_quote = Quote::new(data.current_price.unwrap_or(0.0));
+        let risk_free_rate = data.base.risk_free_rate;
+        let dividend = data.dividend;
+        let long_short = data.base.long_short.unwrap_or(1);
+        let position = match long_short {
+            1 => LongShort::LONG,
+            -1 => LongShort::SHORT,
+            _ => LongShort::LONG,
+        };
+        Ok(Box::new(Self {
+            symbol: data.base.symbol.clone(),
+            currency: data.base.currency.clone(),
+            exchange: data.base.exchange.clone(),
+            name: data.base.name.clone(),
+            cusip: data.base.cusip.clone(),
+            isin: data.base.isin.clone(),
+            settlement_type: data.base.settlement_type.clone(),
+
+            underlying_price: underlying_quote,
+            current_price: current_quote,
+            entry_price: data.entry_price.unwrap_or(0.0),
+            multiplier: data.multiplier.unwrap_or(1.0),
+            risk_free_rate: risk_free_rate.unwrap_or(0.0),
+            dividend_yield: dividend.unwrap_or(0.0),
+            borrow_cost: data.base.borrow_cost.unwrap_or(0.0),
+            maturity_date,
+            valuation_date: today,
+            long_short: position,
+        }))
+    }
+    fn pnl(&self) -> f64 {
+        let pnl = (self.current_price.value() - self.entry_price) * self.multiplier;
+        match self.long_short {
+            LongShort::LONG => pnl,
+            LongShort::SHORT => -pnl,
+        }
+    }
+}
+impl Instrument for EquityFuture {
+    fn try_npv(&self) -> Result<f64, RustyQLibError> {
+        Ok(self.pnl())
+    }
+
+    fn price(&self) -> Result<crate::core::results::PricingResult, RustyQLibError> {
+        Ok(crate::core::results::PricingResult {
+            pv: self.try_npv()?,
+            greeks: crate::core::results::Greeks {
+                delta: self.delta(),
+                ..Default::default()
+            },
+            std_err: None,
+        })
+    }
+}
+impl EquityFuture {
+    pub fn delta(&self) -> f64 {
+        1.0
+    }
+    pub fn gamma(&self) -> f64 {
+        0.0
+    }
+    pub fn vega(&self) -> f64 {
+        0.0
+    }
+    pub fn theta(&self) -> f64 {
+        0.0
+    }
+    pub fn rho(&self) -> f64 {
+        0.0
+    }
+    pub fn vanna(&self) -> f64 {
+        0.0
+    }
+    pub fn charm(&self) -> f64 {
+        0.0
+    }
+    pub fn gamma_p(&self) -> f64 {
+        0.0
+    }
+    pub fn zomma(&self) -> f64 {
+        0.0
+    }
+}

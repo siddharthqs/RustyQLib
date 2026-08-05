@@ -20,8 +20,13 @@ pub struct TensorGrid {
 impl TensorGrid {
     pub fn new(dims: &[usize]) -> Self {
         assert!(!dims.is_empty() && dims.len() <= 3, "1 to 3 axes supported");
-        assert!(dims.iter().all(|&n| n >= 1), "every axis needs at least one node");
-        Self { dims: dims.to_vec() }
+        assert!(
+            dims.iter().all(|&n| n >= 1),
+            "every axis needs at least one node"
+        );
+        Self {
+            dims: dims.to_vec(),
+        }
     }
 
     /// Total number of nodes.
@@ -60,7 +65,9 @@ impl TensorGrid {
     fn line_starts(&self, axis: usize) -> Vec<usize> {
         let stride = self.strides()[axis];
         let n = self.dims[axis];
-        (0..self.len()).filter(|i| (i / stride) % n == 0).collect()
+        (0..self.len())
+            .filter(|i| (i / stride).is_multiple_of(n))
+            .collect()
     }
 }
 
@@ -85,7 +92,12 @@ impl AxisOperator {
     pub fn zero(grid: &TensorGrid, axis: usize) -> Self {
         assert!(axis < grid.ndim());
         let n = grid.len();
-        Self { axis, sub: vec![0.0; n], diag: vec![0.0; n], sup: vec![0.0; n] }
+        Self {
+            axis,
+            sub: vec![0.0; n],
+            diag: vec![0.0; n],
+            sup: vec![0.0; n],
+        }
     }
 
     /// `A u`.
@@ -199,7 +211,11 @@ mod tests {
         let ax = op.apply(&g, &x);
         for i in 0..g.len() {
             let back = x[i] - c * ax[i];
-            assert!((back - rhs[i]).abs() < 1e-10, "node {i}: {back} vs {}", rhs[i]);
+            assert!(
+                (back - rhs[i]).abs() < 1e-10,
+                "node {i}: {back} vs {}",
+                rhs[i]
+            );
         }
     }
 }

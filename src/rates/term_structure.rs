@@ -1,9 +1,9 @@
+use crate::core::errors::RustyQLibError;
 /// Term Structure Module
 ///
 /// Provides types for managing interest rate term structures with various
 /// day count conventions and interpolation methods.
 use std::fmt;
-use crate::core::errors::RustyQLibError;
 
 // ─── Day Count Convention ────────────────────────────────────────────────────
 
@@ -34,7 +34,11 @@ fn is_leap_year(year: i32) -> bool {
 }
 
 fn days_in_year(year: i32) -> f64 {
-    if is_leap_year(year) { 366.0 } else { 365.0 }
+    if is_leap_year(year) {
+        366.0
+    } else {
+        365.0
+    }
 }
 
 /// A simple date type (calendar date only, no time component).
@@ -88,7 +92,11 @@ impl Date {
         let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
         let mp = (5 * doy + 2) / 153;
         let d = doy - (153 * mp + 2) / 5 + 1;
-        let (y, m) = if mp < 10 { (y, mp + 3) } else { (y + 1, mp - 9) };
+        let (y, m) = if mp < 10 {
+            (y, mp + 3)
+        } else {
+            (y + 1, mp - 9)
+        };
         Date::new(y as i32, m as u32, d as u32)
     }
 
@@ -97,7 +105,13 @@ impl Date {
         match self.month {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
             4 | 6 | 9 | 11 => 30,
-            2 => if is_leap_year(self.year) { 29 } else { 28 },
+            2 => {
+                if is_leap_year(self.year) {
+                    29
+                } else {
+                    28
+                }
+            }
             _ => panic!("invalid month {}", self.month),
         }
     }
@@ -148,8 +162,12 @@ impl DayCountConvention {
                 let (mut d1, m1, y1) = (start.day as i32, start.month as i32, start.year);
                 let (mut d2, m2, y2) = (end.day as i32, end.month as i32, end.year);
                 // 30/360 US (Bond Basis)
-                if d1 == 31 { d1 = 30; }
-                if d2 == 31 && d1 >= 30 { d2 = 30; }
+                if d1 == 31 {
+                    d1 = 30;
+                }
+                if d2 == 31 && d1 >= 30 {
+                    d2 = 30;
+                }
                 // TODO: Add Feb end-of-month adjustment for 30/360 US
                 let days = 360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1);
                 days as f64 / 360.0
@@ -158,8 +176,12 @@ impl DayCountConvention {
             Self::Thirty360European => {
                 let (mut d1, m1, y1) = (start.day as i32, start.month as i32, start.year);
                 let (mut d2, m2, y2) = (end.day as i32, end.month as i32, end.year);
-                if d1 == 31 { d1 = 30; }
-                if d2 == 31 { d2 = 30; }
+                if d1 == 31 {
+                    d1 = 30;
+                }
+                if d2 == 31 {
+                    d2 = 30;
+                }
                 let days = 360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1);
                 days as f64 / 360.0
             }
@@ -224,19 +246,34 @@ impl TermStructure {
     ) -> Result<Self, RustyQLibError> {
         // Validation
         if dates.len() != discount_factors.len() {
-            return Err(RustyQLibError::invalid_input("term structure", "dates and discount_factors must have the same length"));
+            return Err(RustyQLibError::invalid_input(
+                "term structure",
+                "dates and discount_factors must have the same length",
+            ));
         }
         if dates.len() < 2 {
-            return Err(RustyQLibError::invalid_input("term structure", "Need at least 2 points to define a term structure"));
+            return Err(RustyQLibError::invalid_input(
+                "term structure",
+                "Need at least 2 points to define a term structure",
+            ));
         }
         if !dates.windows(2).all(|w| w[0] < w[1]) {
-            return Err(RustyQLibError::invalid_input("term structure", "dates must be strictly increasing"));
+            return Err(RustyQLibError::invalid_input(
+                "term structure",
+                "dates must be strictly increasing",
+            ));
         }
         if !discount_factors.iter().all(|&df| df > 0.0) {
-            return Err(RustyQLibError::invalid_input("term structure", "Discount factors must be positive"));
+            return Err(RustyQLibError::invalid_input(
+                "term structure",
+                "Discount factors must be positive",
+            ));
         }
         if !discount_factors.iter().all(|&df| df <= 1.0) {
-            return Err(RustyQLibError::invalid_input("term structure", "Discount factors must be <= 1.0"));
+            return Err(RustyQLibError::invalid_input(
+                "term structure",
+                "Discount factors must be <= 1.0",
+            ));
         }
 
         let year_fractions: Vec<f64> = dates
@@ -248,7 +285,11 @@ impl TermStructure {
             .iter()
             .zip(year_fractions.iter())
             .map(|(&df, &t)| {
-                if t > 0.0 && df > 0.0 { -df.ln() / t } else { 0.0 }
+                if t > 0.0 && df > 0.0 {
+                    -df.ln() / t
+                } else {
+                    0.0
+                }
             })
             .collect();
 
@@ -301,7 +342,10 @@ impl TermStructure {
         asof_date: Date,
     ) -> Result<Self, RustyQLibError> {
         if dates.len() != zero_rates.len() {
-            return Err(RustyQLibError::invalid_input("term structure", "dates and zero_rates must have the same length"));
+            return Err(RustyQLibError::invalid_input(
+                "term structure",
+                "dates and zero_rates must have the same length",
+            ));
         }
         let discount_factors: Vec<f64> = dates
             .iter()
@@ -312,14 +356,22 @@ impl TermStructure {
             })
             .collect();
 
-        Self::new(dates, discount_factors, day_count_convention, InterpolationMethod::LogLinear, asof_date)
+        Self::new(
+            dates,
+            discount_factors,
+            day_count_convention,
+            InterpolationMethod::LogLinear,
+            asof_date,
+        )
     }
 
     // ── Core query methods ────────────────────────────────────────────────────
 
     /// Discount factor for a given maturity date.
     pub fn discount_factor(&self, maturity_date: Date) -> f64 {
-        let t = self.day_count_convention.year_fraction(self.asof_date, maturity_date);
+        let t = self
+            .day_count_convention
+            .year_fraction(self.asof_date, maturity_date);
         self.discount_factor_at_time(t)
     }
 
@@ -336,9 +388,12 @@ impl TermStructure {
                 let log_dfs: Vec<f64> = self.discount_factors.iter().map(|df| df.ln()).collect();
                 interp_linear(&self.year_fractions, &log_dfs, t).exp()
             }
-            InterpolationMethod::CubicSpline => {
-                interp_cubic(&self.year_fractions, &self.discount_factors, &self.spline_m, t)
-            }
+            InterpolationMethod::CubicSpline => interp_cubic(
+                &self.year_fractions,
+                &self.discount_factors,
+                &self.spline_m,
+                t,
+            ),
             InterpolationMethod::FlatForward => {
                 flat_forward_df(&self.year_fractions, &self.discount_factors, t)
             }
@@ -347,7 +402,9 @@ impl TermStructure {
 
     /// Zero-coupon rate (continuously compounded) for a given maturity date.
     pub fn zero_rate(&self, maturity_date: Date) -> f64 {
-        let t = self.day_count_convention.year_fraction(self.asof_date, maturity_date);
+        let t = self
+            .day_count_convention
+            .year_fraction(self.asof_date, maturity_date);
         self.zero_rate_at_time(t)
     }
 
@@ -357,20 +414,31 @@ impl TermStructure {
             return 0.0;
         }
         let df = self.discount_factor_at_time(t);
-        if df > 0.0 { -df.ln() / t } else { 0.0 }
+        if df > 0.0 {
+            -df.ln() / t
+        } else {
+            0.0
+        }
     }
 
     /// Continuously-compounded forward rate between two dates.
     pub fn forward_rate(&self, start_date: Date, end_date: Date) -> Result<f64, RustyQLibError> {
-        let t1 = self.day_count_convention.year_fraction(self.asof_date, start_date);
-        let t2 = self.day_count_convention.year_fraction(self.asof_date, end_date);
+        let t1 = self
+            .day_count_convention
+            .year_fraction(self.asof_date, start_date);
+        let t2 = self
+            .day_count_convention
+            .year_fraction(self.asof_date, end_date);
         self.forward_rate_at_time(t1, t2)
     }
 
     /// Continuously-compounded forward rate between two times.
     pub fn forward_rate_at_time(&self, t1: f64, t2: f64) -> Result<f64, RustyQLibError> {
         if t2 <= t1 {
-            return Err(RustyQLibError::invalid_input("term structure", "t2 must be greater than t1"));
+            return Err(RustyQLibError::invalid_input(
+                "term structure",
+                "t2 must be greater than t1",
+            ));
         }
         let df1 = self.discount_factor_at_time(t1);
         let df2 = self.discount_factor_at_time(t2);
@@ -400,7 +468,8 @@ impl TermStructure {
         ];
 
         for (((date, &t), &df), &rate) in self
-            .dates.iter()
+            .dates
+            .iter()
             .zip(self.year_fractions.iter())
             .zip(self.discount_factors.iter())
             .zip(self.zero_rates.iter())
@@ -439,9 +508,13 @@ fn search_sorted(xs: &[f64], x: f64) -> usize {
     match xs.binary_search_by(|probe| probe.partial_cmp(&x).unwrap()) {
         Ok(i) => i.min(xs.len() - 2),
         Err(i) => {
-            if i == 0 { 0 }
-            else if i >= xs.len() { xs.len() - 2 }
-            else { i - 1 }
+            if i == 0 {
+                0
+            } else if i >= xs.len() {
+                xs.len() - 2
+            } else {
+                i - 1
+            }
         }
     }
 }
@@ -500,8 +573,12 @@ fn compute_natural_spline(xs: &[f64], ys: &[f64]) -> Vec<f64> {
 /// Evaluate a natural cubic spline at `x` given precomputed second derivatives `m`.
 fn interp_cubic(xs: &[f64], ys: &[f64], m: &[f64], x: f64) -> f64 {
     let n = xs.len();
-    if x <= xs[0] { return ys[0]; }
-    if x >= xs[n - 1] { return ys[n - 1]; }
+    if x <= xs[0] {
+        return ys[0];
+    }
+    if x >= xs[n - 1] {
+        return ys[n - 1];
+    }
 
     let i = search_sorted(xs, x);
     let h = xs[i + 1] - xs[i];
@@ -516,7 +593,9 @@ fn interp_cubic(xs: &[f64], ys: &[f64], m: &[f64], x: f64) -> f64 {
 /// Flat-forward discount-factor interpolation.
 fn flat_forward_df(xs: &[f64], dfs: &[f64], t: f64) -> f64 {
     let n = xs.len();
-    if t <= xs[0] { return dfs[0]; }
+    if t <= xs[0] {
+        return dfs[0];
+    }
 
     for i in 0..n - 1 {
         if xs[i] <= t && t <= xs[i + 1] {
@@ -599,15 +678,10 @@ mod tests {
     #[test]
     fn test_from_zero_rates() {
         let asof = Date::new(2024, 1, 1);
-        let dates = vec![
-            asof.add_days(365),
-            asof.add_days(730),
-            asof.add_days(1825),
-        ];
+        let dates = vec![asof.add_days(365), asof.add_days(730), asof.add_days(1825)];
         let rates = vec![0.04, 0.045, 0.05];
-        let ts = TermStructure::from_zero_rates(
-            dates, rates, DayCountConvention::Actual365, asof,
-        ).unwrap();
+        let ts = TermStructure::from_zero_rates(dates, rates, DayCountConvention::Actual365, asof)
+            .unwrap();
         assert!((ts.zero_rates[0] - 0.04).abs() < 1e-6);
     }
 
@@ -632,13 +706,21 @@ mod tests {
         let d2 = asof.add_days(730);
         // Mismatched lengths
         assert!(TermStructure::new(
-            vec![d1, d2], vec![0.95], DayCountConvention::Actual365,
-            InterpolationMethod::LogLinear, asof,
-        ).is_err());
+            vec![d1, d2],
+            vec![0.95],
+            DayCountConvention::Actual365,
+            InterpolationMethod::LogLinear,
+            asof,
+        )
+        .is_err());
         // Discount factor > 1
         assert!(TermStructure::new(
-            vec![d1, d2], vec![1.1, 0.9], DayCountConvention::Actual365,
-            InterpolationMethod::LogLinear, asof,
-        ).is_err());
+            vec![d1, d2],
+            vec![1.1, 0.9],
+            DayCountConvention::Actual365,
+            InterpolationMethod::LogLinear,
+            asof,
+        )
+        .is_err());
     }
 }

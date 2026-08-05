@@ -40,8 +40,11 @@ pub fn sharpe_ratio(returns: &[f64], risk_free_per_period: f64, periods_per_year
 pub fn sortino_ratio(returns: &[f64], risk_free_per_period: f64, periods_per_year: f64) -> f64 {
     let n = returns.len();
     assert!(n >= 2);
-    let mean_excess =
-        returns.iter().map(|r| r - risk_free_per_period).sum::<f64>() / n as f64;
+    let mean_excess = returns
+        .iter()
+        .map(|r| r - risk_free_per_period)
+        .sum::<f64>()
+        / n as f64;
     let downside_sq = returns
         .iter()
         .map(|r| (r - risk_free_per_period).min(0.0).powi(2))

@@ -60,13 +60,21 @@ fn closed_forms(c: &mut Criterion) {
     let baw = american(Engine::BaroneAdesiWhaley);
     c.bench_function("american_baw_npv", |b| b.iter(|| black_box(&baw).npv()));
     let bs2002 = american(Engine::BjerksundStensland);
-    c.bench_function("american_bs2002_npv", |b| b.iter(|| black_box(&bs2002).npv()));
+    c.bench_function("american_bs2002_npv", |b| {
+        b.iter(|| black_box(&bs2002).npv())
+    });
 }
 
 fn heston_smile(c: &mut Criterion) {
     use rustyqlib::core::trade::PutOrCall;
     use rustyqlib::equity::heston::{cos_smile, heston_price};
-    let hp = HestonParams { v0: 0.09, kappa: 2.0, theta: 0.09, vol_of_vol: 0.4, rho: -0.7 };
+    let hp = HestonParams {
+        v0: 0.09,
+        kappa: 2.0,
+        theta: 0.09,
+        vol_of_vol: 0.4,
+        rho: -0.7,
+    };
     let strikes: Vec<f64> = (0..20).map(|i| 70.0 + 3.0 * i as f64).collect();
     let (s, r, q, t) = (100.0, 0.03, 0.01, 1.0);
 
@@ -95,11 +103,19 @@ fn heston_cf(c: &mut Criterion) {
         .flat_rate(0.05)
         .years_to_maturity(1.0)
         .vanilla(PutOrCall::Call)
-        .heston(HestonParams { v0: 0.09, kappa: 2.0, theta: 0.09, vol_of_vol: 0.4, rho: -0.7 })
+        .heston(HestonParams {
+            v0: 0.09,
+            kappa: 2.0,
+            theta: 0.09,
+            vol_of_vol: 0.4,
+            rho: -0.7,
+        })
         .engine(Engine::BlackScholes)
         .build()
         .expect("bench option must build");
-    c.bench_function("heston_cf_vanilla_npv", |b| b.iter(|| black_box(&heston).npv()));
+    c.bench_function("heston_cf_vanilla_npv", |b| {
+        b.iter(|| black_box(&heston).npv())
+    });
 }
 
 fn lattice_and_grid(c: &mut Criterion) {
@@ -107,7 +123,9 @@ fn lattice_and_grid(c: &mut Criterion) {
     group.sample_size(20);
 
     let bino = american(Engine::Binomial);
-    group.bench_function("binomial_american_npv", |b| b.iter(|| black_box(&bino).npv()));
+    group.bench_function("binomial_american_npv", |b| {
+        b.iter(|| black_box(&bino).npv())
+    });
 
     // Leisen-Reimer reaches CRR-1000 accuracy at ~100 steps: ~100x faster
     let mut lr = american(Engine::Binomial);
@@ -118,10 +136,14 @@ fn lattice_and_grid(c: &mut Criterion) {
             ..Default::default()
         },
     );
-    group.bench_function("binomial_lr101_american_npv", |b| b.iter(|| black_box(&lr).npv()));
+    group.bench_function("binomial_lr101_american_npv", |b| {
+        b.iter(|| black_box(&lr).npv())
+    });
 
     let fd = american(Engine::FiniteDifference); // default 400 x 400 grid
-    group.bench_function("fd_american_400x400_npv", |b| b.iter(|| black_box(&fd).npv()));
+    group.bench_function("fd_american_400x400_npv", |b| {
+        b.iter(|| black_box(&fd).npv())
+    });
 
     group.finish();
 }
@@ -132,7 +154,9 @@ fn monte_carlo(c: &mut Criterion) {
     group.sample_size(10);
 
     let mc = vanilla(Engine::MonteCarlo); // default 100k paths, Sobol
-    group.bench_function("mc_vanilla_100k_paths_npv", |b| b.iter(|| black_box(&mc).npv()));
+    group.bench_function("mc_vanilla_100k_paths_npv", |b| {
+        b.iter(|| black_box(&mc).npv())
+    });
 
     group.finish();
 }
@@ -148,7 +172,11 @@ fn batch(c: &mut Criterion) {
                 .flat_vol(0.30)
                 .flat_rate(0.05)
                 .years_to_maturity(1.0)
-                .vanilla(if i % 2 == 0 { PutOrCall::Call } else { PutOrCall::Put })
+                .vanilla(if i % 2 == 0 {
+                    PutOrCall::Call
+                } else {
+                    PutOrCall::Put
+                })
                 .engine(Engine::BlackScholes)
                 .build()
                 .expect("bench option must build")
@@ -159,5 +187,13 @@ fn batch(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, closed_forms, heston_smile, heston_cf, lattice_and_grid, monte_carlo, batch);
+criterion_group!(
+    benches,
+    closed_forms,
+    heston_smile,
+    heston_cf,
+    lattice_and_grid,
+    monte_carlo,
+    batch
+);
 criterion_main!(benches);

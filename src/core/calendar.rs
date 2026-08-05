@@ -260,7 +260,7 @@ fn last_weekday(year: i32, month: u32, weekday: Weekday) -> NaiveDate {
 /// Christmas, Boxing Day (Dec 26, since 2000).
 fn is_target_holiday(date: NaiveDate) -> bool {
     let (y, m, d) = (date.year(), date.month(), date.day());
-    if (m == 1 && d == 1) || (m == 5 && d == 1) || (m == 12 && d == 25) {
+    if matches!((m, d), (1, 1) | (5, 1) | (12, 25)) {
         return true;
     }
     if m == 12 && d == 26 && y >= 2000 {
@@ -348,11 +348,7 @@ fn is_uk_holiday(date: NaiveDate) -> bool {
     let wd = date.weekday();
 
     // New Year's Day, observed on Monday when Jan 1 is a weekend
-    if m == 1
-        && (d == 1
-            || (d == 2 && wd == Weekday::Mon)
-            || (d == 3 && wd == Weekday::Mon))
-    {
+    if m == 1 && (d == 1 || (d == 2 && wd == Weekday::Mon) || (d == 3 && wd == Weekday::Mon)) {
         return true;
     }
     let easter = easter_sunday(y);
@@ -542,7 +538,10 @@ mod tests {
         }
         // regular trading days around them
         for business in [d(2026, 1, 2), d(2026, 4, 6), d(2026, 7, 6), d(2026, 11, 27)] {
-            assert!(c.is_business_day(business), "{business} must be a business day");
+            assert!(
+                c.is_business_day(business),
+                "{business} must be a business day"
+            );
         }
     }
 
@@ -559,16 +558,19 @@ mod tests {
         let c = Calendar::Target;
         for holiday in [
             d(2026, 1, 1),
-            d(2026, 4, 3),  // Good Friday
-            d(2026, 4, 6),  // Easter Monday
-            d(2026, 5, 1),  // Labour Day
+            d(2026, 4, 3), // Good Friday
+            d(2026, 4, 6), // Easter Monday
+            d(2026, 5, 1), // Labour Day
             d(2026, 12, 25),
             // Dec 26 2026 is a Saturday: weekend, not counted as holiday
             d(2025, 12, 26),
         ] {
             assert!(!c.is_business_day(holiday), "{holiday} must be a holiday");
         }
-        assert!(c.is_business_day(d(2026, 5, 25)), "no TARGET holiday on UK spring bank");
+        assert!(
+            c.is_business_day(d(2026, 5, 25)),
+            "no TARGET holiday on UK spring bank"
+        );
     }
 
     #[test]
@@ -576,11 +578,11 @@ mod tests {
         let c = Calendar::UkSettlement;
         for holiday in [
             d(2026, 1, 1),
-            d(2026, 4, 3),   // Good Friday
-            d(2026, 4, 6),   // Easter Monday
-            d(2026, 5, 4),   // early-May bank holiday
-            d(2026, 5, 25),  // spring bank holiday
-            d(2026, 8, 31),  // summer bank holiday
+            d(2026, 4, 3),  // Good Friday
+            d(2026, 4, 6),  // Easter Monday
+            d(2026, 5, 4),  // early-May bank holiday
+            d(2026, 5, 25), // spring bank holiday
+            d(2026, 8, 31), // summer bank holiday
             d(2026, 12, 25),
             d(2026, 12, 28), // Boxing Day observed (26th is a Saturday)
         ] {
@@ -629,15 +631,27 @@ mod tests {
         // Jan 31 + 1M clamps to Feb 28 (2026 is not a leap year), a Saturday
         // in 2026 -> Following moves to Mar 2
         assert_eq!(
-            c.advance(d(2026, 1, 31), Period::Months(1), BusinessDayConvention::Following),
+            c.advance(
+                d(2026, 1, 31),
+                Period::Months(1),
+                BusinessDayConvention::Following
+            ),
             d(2026, 3, 2)
         );
         assert_eq!(
-            c.advance(d(2026, 1, 31), Period::Months(1), BusinessDayConvention::ModifiedFollowing),
+            c.advance(
+                d(2026, 1, 31),
+                Period::Months(1),
+                BusinessDayConvention::ModifiedFollowing
+            ),
             d(2026, 2, 27)
         );
         assert_eq!(
-            c.advance(d(2026, 3, 15), Period::Years(1), BusinessDayConvention::Following),
+            c.advance(
+                d(2026, 3, 15),
+                Period::Years(1),
+                BusinessDayConvention::Following
+            ),
             d(2027, 3, 15)
         );
     }
@@ -664,7 +678,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             s.dates,
-            vec![d(2026, 2, 16), d(2026, 5, 18), d(2026, 8, 17), d(2026, 11, 16)]
+            vec![
+                d(2026, 2, 16),
+                d(2026, 5, 18),
+                d(2026, 8, 17),
+                d(2026, 11, 16)
+            ]
         );
         // (Feb 16 anchor = Nov 16 - 9M; Feb 16 2026 is a Monday. May 16 is
         // a Saturday -> May 18; Aug 16 is a Sunday -> Aug 17.)
@@ -683,7 +702,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             s.dates,
-            vec![d(2026, 4, 15), d(2026, 7, 15), d(2026, 10, 15), d(2026, 11, 16)]
+            vec![
+                d(2026, 4, 15),
+                d(2026, 7, 15),
+                d(2026, 10, 15),
+                d(2026, 11, 16)
+            ]
         );
     }
 

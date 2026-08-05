@@ -40,13 +40,13 @@ fn main() {
         for pc in [PutOrCall::Call, PutOrCall::Put] {
             common::section(&format!("{name} {pc:?}"));
             common::table_header();
-            for (label, engine) in [
-                //("Analytical (closed form)", Engine::BlackScholes),
-                //("Binomial (1000 steps)", Engine::Binomial),
-                //("Finite difference", Engine::FiniteDifference),
-                ("Monte Carlo (Sobol, 100k)", Engine::MonteCarlo),
-            ] {
-                let o = base().binary(pc,binary_type,cash).engine(engine).build().unwrap();
+            {
+                let (label, engine) = ("Monte Carlo (Sobol, 100k)", Engine::MonteCarlo);
+                let o = base()
+                    .binary(pc, binary_type, cash)
+                    .engine(engine)
+                    .build()
+                    .unwrap();
                 common::row(label, &o);
             }
         }
@@ -61,7 +61,8 @@ fn main() {
             &base()
                 .binary(PutOrCall::Call, BinaryType::CashOrNothing, cash)
                 .engine(Engine::BlackScholes)
-                .build().expect("option must build"),
+                .build()
+                .expect("option must build"),
         );
     }
 
@@ -69,11 +70,13 @@ fn main() {
     let cash_call = base()
         .binary(PutOrCall::Call, BinaryType::CashOrNothing, CASH)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build");
+        .build()
+        .expect("option must build");
     let cash_put = base()
         .binary(PutOrCall::Put, BinaryType::CashOrNothing, CASH)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build");
+        .build()
+        .expect("option must build");
     common::check(
         "cash call + cash put = e^{-rT}",
         cash_call.npv() + cash_put.npv(),
@@ -84,11 +87,13 @@ fn main() {
     let asset_call = base()
         .binary(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build");
+        .build()
+        .expect("option must build");
     let asset_put = base()
         .binary(PutOrCall::Put, BinaryType::AssetOrNothing, 0.0)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build");
+        .build()
+        .expect("option must build");
     common::check(
         "asset call + asset put = S e^{-qT}",
         asset_call.npv() + asset_put.npv(),
@@ -97,16 +102,41 @@ fn main() {
     );
 
     common::section("Replication: asset digital = vanilla call + K cash digitals");
-    let vanilla = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build");
+    let vanilla = base()
+        .vanilla(PutOrCall::Call)
+        .engine(Engine::BlackScholes)
+        .build()
+        .expect("option must build");
     let k_cash = base()
         .binary(PutOrCall::Call, BinaryType::CashOrNothing, STRIKE)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build");
+        .build()
+        .expect("option must build");
     common::check("npv", asset_call.npv(), vanilla.npv() + k_cash.npv(), 1e-10);
-    common::check("delta", asset_call.delta(), vanilla.delta() + k_cash.delta(), 1e-10);
-    common::check("gamma", asset_call.gamma(), vanilla.gamma() + k_cash.gamma(), 1e-10);
-    common::check("vega", asset_call.vega(), vanilla.vega() + k_cash.vega(), 1e-10);
-    common::check("theta", asset_call.theta(), vanilla.theta() + k_cash.theta(), 1e-10);
+    common::check(
+        "delta",
+        asset_call.delta(),
+        vanilla.delta() + k_cash.delta(),
+        1e-10,
+    );
+    common::check(
+        "gamma",
+        asset_call.gamma(),
+        vanilla.gamma() + k_cash.gamma(),
+        1e-10,
+    );
+    common::check(
+        "vega",
+        asset_call.vega(),
+        vanilla.vega() + k_cash.vega(),
+        1e-10,
+    );
+    common::check(
+        "theta",
+        asset_call.theta(),
+        vanilla.theta() + k_cash.theta(),
+        1e-10,
+    );
     common::check("rho", asset_call.rho(), vanilla.rho() + k_cash.rho(), 1e-10);
     common::note("both sides are implemented independently, so this is a real cross-check");
 
@@ -119,7 +149,8 @@ fn main() {
                 .years_to_maturity(years)
                 .binary(PutOrCall::Call, BinaryType::CashOrNothing, CASH)
                 .engine(Engine::BlackScholes)
-                .build().expect("option must build"),
+                .build()
+                .expect("option must build"),
         );
     }
 
@@ -135,7 +166,9 @@ fn digital_greek_surfaces() {
     use common::plot3d::{greek_surface, linspace, save_surface_html, Labels};
     use rustyqlib::equity::vanilla_option::EquityOption;
 
-    common::section("Digital Greek surfaces over (moneyness, maturity) -> runs/binary_option/*.html");
+    common::section(
+        "Digital Greek surfaces over (moneyness, maturity) -> runs/binary_option/*.html",
+    );
 
     // tighter moneyness band and shorter maturities: that is where the
     // digital's delta/gamma structure lives
@@ -149,13 +182,18 @@ fn digital_greek_surfaces() {
                 .years_to_maturity(years)
                 .binary(PutOrCall::Call, BinaryType::CashOrNothing, CASH)
                 .engine(Engine::BlackScholes)
-                .build().expect("option must build");
+                .build()
+                .expect("option must build");
             select(&option)
         }
     };
 
     for (name, file, select) in [
-        ("Delta", "delta", (|o: &EquityOption| o.delta()) as fn(&EquityOption) -> f64),
+        (
+            "Delta",
+            "delta",
+            (|o: &EquityOption| o.delta()) as fn(&EquityOption) -> f64,
+        ),
         ("Gamma", "gamma", |o: &EquityOption| o.gamma()),
     ] {
         let surface = greek_surface(&moneyness, &mats, greek(select));
@@ -170,5 +208,7 @@ fn digital_greek_surfaces() {
             },
         );
     }
-    common::note("contrast with the vanilla surfaces: the digital is far from smooth near the strike");
+    common::note(
+        "contrast with the vanilla surfaces: the digital is far from smooth near the strike",
+    );
 }

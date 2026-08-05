@@ -12,8 +12,8 @@ use rustyqlib::core::traits::Instrument;
 use rustyqlib::core::vols::VolSurface;
 use rustyqlib::equity::builder::EquityOptionBuilder;
 use rustyqlib::equity::heston::HestonParams;
-use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
+use rustyqlib::equity::utils::Model;
 
 const SPOT: f64 = 100.0;
 const VOL: f64 = 0.30;
@@ -49,7 +49,11 @@ fn note(autocall: f64, protection: f64, coupon: f64) -> EquityOptionBuilder {
 /// Downward-skewed surface: the shape that actually drives these notes.
 fn skewed_surface() -> VolSurface {
     VolSurface::from_strike_grid(
-        &[Tenor::YearFraction(0.25), Tenor::YearFraction(0.5), Tenor::YearFraction(1.0)],
+        &[
+            Tenor::YearFraction(0.25),
+            Tenor::YearFraction(0.5),
+            Tenor::YearFraction(1.0),
+        ],
         &[60.0, 70.0, 85.0, 100.0, 115.0, 130.0],
         &[
             vec![0.42, 0.38, 0.33, 0.29, 0.27, 0.26],
@@ -71,13 +75,19 @@ fn main() {
 
     common::section("Model comparison");
     common::table_header();
-    common::row("GBM (flat 30%)", &note(AUTOCALL, PROTECTION, COUPON).build().expect("option must build"));
+    common::row(
+        "GBM (flat 30%)",
+        &note(AUTOCALL, PROTECTION, COUPON)
+            .build()
+            .expect("option must build"),
+    );
     common::row(
         "Local vol (skewed surface)",
         &note(AUTOCALL, PROTECTION, COUPON)
             .vol_surface(skewed_surface())
             .model(Model::LocalVol)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row(
         "Heston (vol-of-vol=0.4, rho=-0.7)",
@@ -89,29 +99,41 @@ fn main() {
                 vol_of_vol: 0.4,
                 rho: -0.7,
             })
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row_or_refusal(
         "Analytical (unsupported)",
-        note(AUTOCALL, PROTECTION, COUPON).engine(Engine::BlackScholes).build(),
+        note(AUTOCALL, PROTECTION, COUPON)
+            .engine(Engine::BlackScholes)
+            .build(),
     );
     common::note("skew/stoch-vol raise the knock-in probability, lowering the note value");
 
     common::section("Structure sensitivity (GBM)");
     common::table_header();
     for coupon in [0.0, 3.0, 6.0, 9.0] {
-        common::row(&format!("coupon = {coupon}/period"), &note(AUTOCALL, PROTECTION, coupon).build().expect("option must build"));
+        common::row(
+            &format!("coupon = {coupon}/period"),
+            &note(AUTOCALL, PROTECTION, coupon)
+                .build()
+                .expect("option must build"),
+        );
     }
     for protection in [50.0, 60.0, 70.0, 80.0] {
         common::row(
             &format!("protection barrier = {protection}"),
-            &note(AUTOCALL, protection, COUPON).build().expect("option must build"),
+            &note(AUTOCALL, protection, COUPON)
+                .build()
+                .expect("option must build"),
         );
     }
     for autocall in [95.0, 100.0, 105.0, 110.0] {
         common::row(
             &format!("autocall barrier = {autocall}"),
-            &note(autocall, PROTECTION, COUPON).build().expect("option must build"),
+            &note(autocall, PROTECTION, COUPON)
+                .build()
+                .expect("option must build"),
         );
     }
 
@@ -120,14 +142,18 @@ fn main() {
     for obs in [1usize, 2, 4, 12] {
         common::row(
             &format!("{obs} observations"),
-            &base().autocallable(AUTOCALL, PROTECTION, COUPON, obs, NOTIONAL).build().expect("option must build"),
+            &base()
+                .autocallable(AUTOCALL, PROTECTION, COUPON, obs, NOTIONAL)
+                .build()
+                .expect("option must build"),
         );
     }
 
     common::section("Degenerate cases (exact identities)");
     let always_calls = base()
         .autocallable(1e-9, 50.0, COUPON, OBSERVATIONS, NOTIONAL)
-        .build().expect("option must build")
+        .build()
+        .expect("option must build")
         .npv();
     common::check(
         "barrier at 0 -> called at t1 with 1 coupon",
@@ -137,7 +163,8 @@ fn main() {
     );
     let never_calls = base()
         .autocallable(1e12, 1e-9, COUPON, OBSERVATIONS, NOTIONAL)
-        .build().expect("option must build")
+        .build()
+        .expect("option must build")
         .npv();
     common::check(
         "unreachable barriers -> zero-coupon bond",
@@ -148,7 +175,8 @@ fn main() {
     let full_downside = base()
         .autocallable(1e12, 1e12, 0.0, OBSERVATIONS, NOTIONAL)
         .dividend_yield(0.0)
-        .build().expect("option must build")
+        .build()
+        .expect("option must build")
         .npv();
     common::check(
         "always knocked in, no coupon -> discounted forward",

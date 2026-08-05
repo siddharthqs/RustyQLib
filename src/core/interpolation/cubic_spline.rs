@@ -15,15 +15,18 @@
 //! Evaluation outside the knot range extrapolates linearly with the end
 //! slope (curvature is not continued — safer for financial data).
 
-use crate::core::optimization::numerics::solve_dense;
 use crate::core::errors::RustyQLibError;
+use crate::core::optimization::numerics::solve_dense;
 
 /// Boundary condition for [`CubicSpline`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BoundaryCondition {
     Natural,
     /// Prescribed end slopes `(start, end)`.
-    Clamped { start_slope: f64, end_slope: f64 },
+    Clamped {
+        start_slope: f64,
+        end_slope: f64,
+    },
     NotAKnot,
 }
 
@@ -43,14 +46,24 @@ impl CubicSpline {
     pub fn new(xs: &[f64], ys: &[f64], bc: BoundaryCondition) -> Result<Self, RustyQLibError> {
         let n = xs.len();
         if n < 2 || ys.len() != n {
-            return Err(RustyQLibError::invalid_input("cubic_spline", "need at least two knots with matching y values"));
+            return Err(RustyQLibError::invalid_input(
+                "cubic_spline",
+                "need at least two knots with matching y values",
+            ));
         }
         if xs.windows(2).any(|w| w[1] <= w[0]) {
-            return Err(RustyQLibError::invalid_input("cubic_spline", "knots must be strictly increasing"));
+            return Err(RustyQLibError::invalid_input(
+                "cubic_spline",
+                "knots must be strictly increasing",
+            ));
         }
         if n == 2 {
             // a segment: linear, zero curvature
-            return Ok(CubicSpline { xs: xs.to_vec(), ys: ys.to_vec(), m: vec![0.0; 2] });
+            return Ok(CubicSpline {
+                xs: xs.to_vec(),
+                ys: ys.to_vec(),
+                m: vec![0.0; 2],
+            });
         }
         let bc = match bc {
             BoundaryCondition::NotAKnot if n < 4 => BoundaryCondition::Natural,
@@ -73,7 +86,10 @@ impl CubicSpline {
                 a[0][0] = 1.0;
                 a[n - 1][n - 1] = 1.0;
             }
-            BoundaryCondition::Clamped { start_slope, end_slope } => {
+            BoundaryCondition::Clamped {
+                start_slope,
+                end_slope,
+            } => {
                 a[0][0] = h[0] / 3.0;
                 a[0][1] = h[0] / 6.0;
                 b[0] = (ys[1] - ys[0]) / h[0] - start_slope;
@@ -92,8 +108,15 @@ impl CubicSpline {
                 a[n - 1][n - 1] = h[n - 3];
             }
         }
-        let m = solve_dense(&mut a, &mut b).ok_or(RustyQLibError::invalid_input("cubic_spline", "singular spline system"))?;
-        Ok(CubicSpline { xs: xs.to_vec(), ys: ys.to_vec(), m })
+        let m = solve_dense(&mut a, &mut b).ok_or(RustyQLibError::invalid_input(
+            "cubic_spline",
+            "singular spline system",
+        ))?;
+        Ok(CubicSpline {
+            xs: xs.to_vec(),
+            ys: ys.to_vec(),
+            m,
+        })
     }
 
     fn segment(&self, x: f64) -> usize {
@@ -159,7 +182,10 @@ mod tests {
         let (xs, ys) = knots();
         for bc in [
             BoundaryCondition::Natural,
-            BoundaryCondition::Clamped { start_slope: 1.0, end_slope: 3.0_f64.cos() },
+            BoundaryCondition::Clamped {
+                start_slope: 1.0,
+                end_slope: 3.0_f64.cos(),
+            },
             BoundaryCondition::NotAKnot,
         ] {
             let s = CubicSpline::new(&xs, &ys, bc).unwrap();
@@ -194,7 +220,10 @@ mod tests {
     #[test]
     fn clamped_ends_match_the_prescribed_slopes() {
         let (xs, ys) = knots();
-        let bc = BoundaryCondition::Clamped { start_slope: 1.0, end_slope: 3.0_f64.cos() };
+        let bc = BoundaryCondition::Clamped {
+            start_slope: 1.0,
+            end_slope: 3.0_f64.cos(),
+        };
         let s = CubicSpline::new(&xs, &ys, bc).unwrap();
         assert!((s.derivative(0.0) - 1.0).abs() < 1e-10);
         assert!((s.derivative(3.0) - 3.0_f64.cos()).abs() < 1e-10);
@@ -206,8 +235,12 @@ mod tests {
 
     #[test]
     fn rejects_bad_knots() {
-        assert!(CubicSpline::new(&[0.0, 0.0, 1.0], &[1.0, 2.0, 3.0], BoundaryCondition::Natural)
-            .is_err());
+        assert!(CubicSpline::new(
+            &[0.0, 0.0, 1.0],
+            &[1.0, 2.0, 3.0],
+            BoundaryCondition::Natural
+        )
+        .is_err());
         assert!(CubicSpline::new(&[0.0], &[1.0], BoundaryCondition::Natural).is_err());
     }
 }

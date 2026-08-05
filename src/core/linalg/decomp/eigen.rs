@@ -6,6 +6,9 @@
 /// Eigendecomposition of a symmetric matrix: returns
 /// `(eigenvalues, eigenvectors)` with the eigenvectors in the columns
 /// (`A = V diag(vals) V^T`). Order is unspecified.
+// the paired-column rotations (`m[k][p]`, `m[k][q]`) are index math;
+// iterator forms would obscure them
+#[allow(clippy::needless_range_loop)]
 pub fn symmetric_eigen(a: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
     let n = a.len();
     let mut m = a.to_vec();

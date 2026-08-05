@@ -4,15 +4,15 @@
 
 use super::line_search::backtracking;
 use super::numerics::{dot, norm_inf, numeric_gradient};
-use super::{OptimConfig, OptimResult};
+use super::{ObjectiveFn, OptimConfig, OptimResult, VectorFn};
 
 /// Minimize `f` from `x0` by Polak-Ribiere conjugate gradient with the
 /// `beta >= 0` safeguard (automatic restart to steepest descent).
 /// `grad` falls back to central finite differences when absent.
 pub fn conjugate_gradient(
     cfg: &OptimConfig,
-    f: &dyn Fn(&[f64]) -> f64,
-    grad: Option<&dyn Fn(&[f64]) -> Vec<f64>>,
+    f: ObjectiveFn,
+    grad: Option<VectorFn>,
     x0: &[f64],
 ) -> OptimResult {
     let g_of = |x: &[f64]| match grad {
@@ -25,7 +25,12 @@ pub fn conjugate_gradient(
     let mut dir: Vec<f64> = g.iter().map(|gi| -gi).collect();
     for it in 0..cfg.max_iter {
         if norm_inf(&g) <= cfg.tol {
-            return OptimResult { x, value: fx, iterations: it, converged: true };
+            return OptimResult {
+                x,
+                value: fx,
+                iterations: it,
+                converged: true,
+            };
         }
         let mut slope = dot(&g, &dir);
         if slope >= 0.0 {
@@ -36,18 +41,34 @@ pub fn conjugate_gradient(
         let alpha0 = 1.0_f64.min(1.0 / norm_inf(&g).max(1e-12));
         let (x_new, f_new) = match backtracking(f, &x, fx, &dir, slope, alpha0) {
             Some(step) => step,
-            None => return OptimResult { x, value: fx, iterations: it, converged: false },
+            None => {
+                return OptimResult {
+                    x,
+                    value: fx,
+                    iterations: it,
+                    converged: false,
+                }
+            }
         };
         let g_new = g_of(&x_new);
         // Polak-Ribiere+ conjugacy factor
         let beta = (dot(&g_new, &g_new) - dot(&g_new, &g)) / dot(&g, &g).max(1e-300);
         let beta = beta.max(0.0);
-        dir = g_new.iter().zip(&dir).map(|(gi, di)| -gi + beta * di).collect();
+        dir = g_new
+            .iter()
+            .zip(&dir)
+            .map(|(gi, di)| -gi + beta * di)
+            .collect();
         x = x_new;
         fx = f_new;
         g = g_new;
     }
-    OptimResult { x, value: fx, iterations: cfg.max_iter, converged: norm_inf(&g) <= cfg.tol }
+    OptimResult {
+        x,
+        value: fx,
+        iterations: cfg.max_iter,
+        converged: norm_inf(&g) <= cfg.tol,
+    }
 }
 
 #[cfg(test)]
@@ -62,7 +83,10 @@ mod tests {
     fn minimizes_the_rosenbrock_valley() {
         let f = |x: &[f64]| rosenbrock(x);
         let r = conjugate_gradient(&OptimConfig::new(1e-6, 20_000), &f, None, &[-1.2, 1.0]);
-        assert!((r.x[0] - 1.0).abs() < 1e-3 && (r.x[1] - 1.0).abs() < 1e-3, "{r:?}");
+        assert!(
+            (r.x[0] - 1.0).abs() < 1e-3 && (r.x[1] - 1.0).abs() < 1e-3,
+            "{r:?}"
+        );
         assert!(r.value < 1e-6, "{r:?}");
     }
 

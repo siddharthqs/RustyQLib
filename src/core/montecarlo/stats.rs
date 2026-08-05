@@ -69,15 +69,27 @@ impl RunningStats {
 
     /// Population variance (divide by n, matching [`mean_std_err`]).
     pub fn variance(&self) -> f64 {
-        if self.n == 0 { 0.0 } else { (self.m2 / self.n as f64).max(0.0) }
+        if self.n == 0 {
+            0.0
+        } else {
+            (self.m2 / self.n as f64).max(0.0)
+        }
     }
 
     pub fn std_err(&self) -> f64 {
-        if self.n == 0 { 0.0 } else { (self.variance() / self.n as f64).sqrt() }
+        if self.n == 0 {
+            0.0
+        } else {
+            (self.variance() / self.n as f64).sqrt()
+        }
     }
 
     pub fn stats(&self) -> SimStats {
-        SimStats { mean: self.mean(), std_err: self.std_err(), n: self.n }
+        SimStats {
+            mean: self.mean(),
+            std_err: self.std_err(),
+            n: self.n,
+        }
     }
 }
 
@@ -87,7 +99,9 @@ mod tests {
 
     #[test]
     fn welford_matches_the_two_pass_computation() {
-        let xs: Vec<f64> = (0..1000).map(|i| ((i * 37) % 101) as f64 * 0.13 - 5.0).collect();
+        let xs: Vec<f64> = (0..1000)
+            .map(|i| ((i * 37) % 101) as f64 * 0.13 - 5.0)
+            .collect();
         let mut running = RunningStats::new();
         for &x in &xs {
             running.push(x);
@@ -107,7 +121,11 @@ mod tests {
         let mut right = RunningStats::new();
         for (i, &x) in xs.iter().enumerate() {
             whole.push(x);
-            if i < 200 { left.push(x) } else { right.push(x) }
+            if i < 200 {
+                left.push(x)
+            } else {
+                right.push(x)
+            }
         }
         left.merge(&right);
         assert_eq!(left.count(), whole.count());

@@ -12,8 +12,6 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use rustyqlib::core::traits::Instrument;
-use rustyqlib::equity::montecarlo;
-use rustyqlib::equity::utils::Engine;
 use rustyqlib::equity::vanilla_option::EquityOption;
 
 // Not every example uses the plotter; silence dead-code warnings there.
@@ -27,7 +25,10 @@ pub fn title(text: &str) {
 }
 
 pub fn section(text: &str) {
-    println!("\n-- {text} {}", "-".repeat(90usize.saturating_sub(text.len())));
+    println!(
+        "\n-- {text} {}",
+        "-".repeat(90usize.saturating_sub(text.len()))
+    );
 }
 
 pub fn table_header() {
@@ -43,10 +44,7 @@ pub fn table_header() {
 /// Print a priced row, or the typed build-time refusal for combinations
 /// the library rejects (`build()` now enforces engine support upfront).
 #[allow(dead_code)]
-pub fn row_or_refusal(
-    label: &str,
-    built: Result<EquityOption, rustyqlib::RustyQLibError>,
-) {
+pub fn row_or_refusal(label: &str, built: Result<EquityOption, rustyqlib::RustyQLibError>) {
     match built {
         Ok(option) => row(label, &option),
         Err(e) => note(&format!("{label}: refused at build() — {e}")),
@@ -64,8 +62,15 @@ pub fn row(label: &str, option: &EquityOption) {
         //     None
         // };
         let result = option.price().unwrap();
-        (result.pv, result.greeks.delta, result.greeks.gamma, result.greeks.vega, result.greeks.theta,
-         option.rho(), result.std_err)
+        (
+            result.pv,
+            result.greeks.delta,
+            result.greeks.gamma,
+            result.greeks.vega,
+            result.greeks.theta,
+            option.rho(),
+            result.std_err,
+        )
     }));
     std::panic::set_hook(hook);
     match result {
@@ -84,7 +89,13 @@ pub fn row(label: &str, option: &EquityOption) {
                 .cloned()
                 .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_else(|| "panicked".to_string());
-            let short: String = msg.split(';').next().unwrap_or(&msg).chars().take(52).collect();
+            let short: String = msg
+                .split(';')
+                .next()
+                .unwrap_or(&msg)
+                .chars()
+                .take(52)
+                .collect();
             println!("{label:<34} {:>12}  ({short})", "unsupported");
         }
     }

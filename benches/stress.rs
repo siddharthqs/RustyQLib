@@ -45,7 +45,11 @@ fn book() -> EquityPortfolio {
             .flat_rate(0.03)
             .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap())
-            .vanilla(if j % 2 == 0 { PutOrCall::Call } else { PutOrCall::Put })
+            .vanilla(if j % 2 == 0 {
+                PutOrCall::Call
+            } else {
+                PutOrCall::Put
+            })
             .engine(Engine::BlackScholes)
             .build()
             .expect("bench option must build");
@@ -68,7 +72,12 @@ fn config() -> StressConfig {
             },
             StressScenario {
                 name: "acme_vol_up".into(),
-                shocks: vec![shock(RiskFactor::Vol, BumpMode::Absolute, 0.05, Some("ACME"))],
+                shocks: vec![shock(
+                    RiskFactor::Vol,
+                    BumpMode::Absolute,
+                    0.05,
+                    Some("ACME"),
+                )],
             },
             StressScenario {
                 name: "rates_up_100bp".into(),
@@ -98,11 +107,15 @@ fn market_context(c: &mut Criterion) {
     c.bench_function("npv_in_single_rebind", |b| {
         b.iter(|| black_box(first).npv_in(black_box(&market)).unwrap())
     });
-    c.bench_function("npv_direct_reference", |b| b.iter(|| black_box(first).npv()));
+    c.bench_function("npv_direct_reference", |b| {
+        b.iter(|| black_box(first).npv())
+    });
 
     // snapshotting the whole book and bumping the whole market: the
     // per-scenario fixed costs of the stress runner
-    c.bench_function("snapshot_market_100pos", |b| b.iter(|| black_box(&book).snapshot_market()));
+    c.bench_function("snapshot_market_100pos", |b| {
+        b.iter(|| black_box(&book).snapshot_market())
+    });
     let crash = vec![
         shock(RiskFactor::Spot, BumpMode::Relative, -0.20, None),
         shock(RiskFactor::Vol, BumpMode::Absolute, 0.10, None),

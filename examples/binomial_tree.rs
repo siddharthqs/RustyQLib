@@ -58,11 +58,22 @@ fn base() -> EquityOptionBuilder {
 }
 
 fn tree(builder: EquityOptionBuilder, tree_type: BinomialTreeType, steps: usize) -> EquityOption {
-    builder.tree_type(tree_type).tree_steps(steps).build().expect("option must build")
+    builder
+        .tree_type(tree_type)
+        .tree_steps(steps)
+        .build()
+        .expect("option must build")
 }
 
-/// The product set: (label, builder configurator, reference price).
-fn products() -> Vec<(&'static str, fn(EquityOptionBuilder) -> EquityOptionBuilder, f64)> {
+/// A product row: (label, builder configurator, reference price).
+type Product = (
+    &'static str,
+    fn(EquityOptionBuilder) -> EquityOptionBuilder,
+    f64,
+);
+
+/// The product set priced by every scheme.
+fn products() -> Vec<Product> {
     let quarterly = || {
         vec![
             NaiveDate::from_ymd_opt(2026, 4, 6).unwrap(),
@@ -72,7 +83,12 @@ fn products() -> Vec<(&'static str, fn(EquityOptionBuilder) -> EquityOptionBuild
     };
     let bs_ref = |k: f64, pc: PutOrCall| bs_price(SPOT, k, RATE, DIV, VOL, T, pc);
     // American / Bermudan references: converged Leisen-Reimer at 5001 steps
-    let amer_ref = tree(base().american().vanilla(PutOrCall::Put), BinomialTreeType::LeisenReimer, 5001).npv();
+    let amer_ref = tree(
+        base().american().vanilla(PutOrCall::Put),
+        BinomialTreeType::LeisenReimer,
+        5001,
+    )
+    .npv();
     let berm_dates = quarterly();
     let berm_ref = tree(
         base().bermudan(berm_dates).vanilla(PutOrCall::Put),
@@ -85,12 +101,30 @@ fn products() -> Vec<(&'static str, fn(EquityOptionBuilder) -> EquityOptionBuild
     let d2 = d1 - VOL * T.sqrt();
     let binary_ref = (-RATE * T).exp() * 0.5 * (1.0 + libm::erf(d2 / std::f64::consts::SQRT_2));
 
-    println!("  references: american put {amer_ref:.6} (LR-5001), bermudan put {berm_ref:.6} (LR-5001)");
+    println!(
+        "  references: american put {amer_ref:.6} (LR-5001), bermudan put {berm_ref:.6} (LR-5001)"
+    );
     vec![
-        ("European ATM call", |b: EquityOptionBuilder| b.vanilla(PutOrCall::Call), bs_ref(STRIKE, PutOrCall::Call)),
-        ("European 130-call (OTM)", |b| b.strike(130.0).vanilla(PutOrCall::Call), bs_ref(130.0, PutOrCall::Call)),
-        ("Cash binary call", |b| b.binary(PutOrCall::Call, BinaryType::CashOrNothing, 1.0), binary_ref),
-        ("American put", |b| b.american().vanilla(PutOrCall::Put), amer_ref),
+        (
+            "European ATM call",
+            |b: EquityOptionBuilder| b.vanilla(PutOrCall::Call),
+            bs_ref(STRIKE, PutOrCall::Call),
+        ),
+        (
+            "European 130-call (OTM)",
+            |b| b.strike(130.0).vanilla(PutOrCall::Call),
+            bs_ref(130.0, PutOrCall::Call),
+        ),
+        (
+            "Cash binary call",
+            |b| b.binary(PutOrCall::Call, BinaryType::CashOrNothing, 1.0),
+            binary_ref,
+        ),
+        (
+            "American put",
+            |b| b.american().vanilla(PutOrCall::Put),
+            amer_ref,
+        ),
         (
             "Bermudan put (quarterly)",
             |b| {
@@ -125,13 +159,12 @@ fn section_pricing_table() {
     common::note("the binary's discontinuous payoff makes every non-LR scheme oscillate hard");
 }
 
+/// Per-scheme convergence curve: `(steps, |error|, wall time)` points.
+type Ladder = (String, Vec<(usize, f64, std::time::Duration)>);
+
 /// Convergence ladders on the core lattice directly; returns per-scheme
 /// (steps, |error|) curves.
-fn ladders(
-    american: bool,
-    reference: f64,
-    steps_ladder: &[usize],
-) -> Vec<(String, Vec<(usize, f64, std::time::Duration)>)> {
+fn ladders(american: bool, reference: f64, steps_ladder: &[usize]) -> Vec<Ladder> {
     let b = RATE - DIV;
     let terminal_call = |s: f64| (s - STRIKE).max(0.0);
     let terminal_put = |s: f64| (STRIKE - s).max(0.0);
@@ -141,13 +174,29 @@ fn ladders(
         .map(|(name, tree_type)| {
             let points = if american {
                 convergence_study(
-                    tree_type, SPOT, STRIKE, b, VOL, RATE, T, steps_ladder,
-                    &terminal_put, Some(&exercise),
+                    tree_type,
+                    SPOT,
+                    STRIKE,
+                    b,
+                    VOL,
+                    RATE,
+                    T,
+                    steps_ladder,
+                    &terminal_put,
+                    Some(&exercise),
                 )
             } else {
                 convergence_study(
-                    tree_type, SPOT, STRIKE, b, VOL, RATE, T, steps_ladder,
-                    &terminal_call, None,
+                    tree_type,
+                    SPOT,
+                    STRIKE,
+                    b,
+                    VOL,
+                    RATE,
+                    T,
+                    steps_ladder,
+                    &terminal_call,
+                    None,
                 )
             }
             .expect("ladder must price");
@@ -169,8 +218,9 @@ fn convergence_order(curve: &[(usize, f64, std::time::Duration)]) -> f64 {
         .collect();
     let n = pts.len() as f64;
     let (sx, sy): (f64, f64) = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
-    let (sxx, sxy): (f64, f64) =
-        pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0 * p.0, a.1 + p.0 * p.1));
+    let (sxx, sxy): (f64, f64) = pts
+        .iter()
+        .fold((0.0, 0.0), |a, p| (a.0 + p.0 * p.0, a.1 + p.0 * p.1));
     -(n * sxy - sx * sy) / (n * sxx - sx * sx)
 }
 
@@ -179,12 +229,26 @@ fn section_convergence() {
     let ladder: Vec<usize> = vec![25, 51, 101, 201, 401, 801, 1601, 3201];
 
     let euro_ref = bs_price(SPOT, STRIKE, RATE, DIV, VOL, T, PutOrCall::Call);
-    let amer_ref =
-        tree(base().american().vanilla(PutOrCall::Put), BinomialTreeType::LeisenReimer, 5001).npv();
+    let amer_ref = tree(
+        base().american().vanilla(PutOrCall::Put),
+        BinomialTreeType::LeisenReimer,
+        5001,
+    )
+    .npv();
 
     for (title, american, reference, file) in [
-        ("European ATM call vs Black-Scholes", false, euro_ref, "convergence_european"),
-        ("American ATM put vs LR-5001", true, amer_ref, "convergence_american"),
+        (
+            "European ATM call vs Black-Scholes",
+            false,
+            euro_ref,
+            "convergence_european",
+        ),
+        (
+            "American ATM put vs LR-5001",
+            true,
+            amer_ref,
+            "convergence_american",
+        ),
     ] {
         let curves = ladders(american, reference, &ladder);
         println!("  {title}");
@@ -223,8 +287,12 @@ fn section_convergence() {
 fn section_performance() {
     common::section("Performance: cost of accuracy (American ATM put)");
     let ladder: Vec<usize> = vec![25, 51, 101, 201, 401, 801, 1601, 3201];
-    let amer_ref =
-        tree(base().american().vanilla(PutOrCall::Put), BinomialTreeType::LeisenReimer, 5001).npv();
+    let amer_ref = tree(
+        base().american().vanilla(PutOrCall::Put),
+        BinomialTreeType::LeisenReimer,
+        5001,
+    )
+    .npv();
     let curves = ladders(true, amer_ref, &ladder);
 
     println!(
@@ -270,7 +338,12 @@ fn section_diagnostics() {
         501,
     );
     let diag = rustyqlib::equity::binomial::npv_with_diagnostics(&option);
-    common::check("diagnostics price == fast engine", diag.price, option.npv(), 1e-12);
+    common::check(
+        "diagnostics price == fast engine",
+        diag.price,
+        option.npv(),
+        1e-12,
+    );
     println!(
         "  tree: {:?} n={} elapsed {:?} (full trees kept; fast engine is O(n) memory)",
         diag.tree_type, diag.steps, diag.elapsed
@@ -284,7 +357,10 @@ fn section_diagnostics() {
         .iter()
         .filter_map(|&i| diag.exercise_boundary[i].map(|(_, hi)| format!("t{}: {:.2}", i, hi)))
         .collect();
-    println!("  exercise boundary (upper edge by layer): {}", sample.join("  "));
+    println!(
+        "  exercise boundary (upper edge by layer): {}",
+        sample.join("  ")
+    );
     common::note("the boundary rises toward the strike as expiry approaches — as theory demands");
 }
 

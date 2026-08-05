@@ -120,14 +120,23 @@ pub enum CurveInput {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CurveError {
     Empty,
-    LengthMismatch { tenors: usize, values: usize },
+    LengthMismatch {
+        tenors: usize,
+        values: usize,
+    },
     NonPositiveDf(f64),
     NonPositiveTime(f64),
     NonIncreasingTimes,
-    InvalidForwardPeriod { t1: f64, t2: f64 },
+    InvalidForwardPeriod {
+        t1: f64,
+        t2: f64,
+    },
     /// Two key-rate bump tenors resolve to the same curve pillar (they are
     /// closer together than twice [`KEY_RATE_TENOR_TOLERANCE`]).
-    TenorCollision { t1: f64, t2: f64 },
+    TenorCollision {
+        t1: f64,
+        t2: f64,
+    },
 }
 
 impl fmt::Display for CurveError {
@@ -135,16 +144,25 @@ impl fmt::Display for CurveError {
         match self {
             CurveError::Empty => write!(f, "curve needs at least one pillar"),
             CurveError::LengthMismatch { tenors, values } => {
-                write!(f, "tenors ({tenors}) and values ({values}) differ in length")
+                write!(
+                    f,
+                    "tenors ({tenors}) and values ({values}) differ in length"
+                )
             }
             CurveError::NonPositiveDf(df) => write!(f, "discount factor must be > 0, got {df}"),
             CurveError::NonPositiveTime(t) => write!(f, "pillar time must be > 0, got {t}"),
             CurveError::NonIncreasingTimes => write!(f, "pillar times must be strictly increasing"),
             CurveError::InvalidForwardPeriod { t1, t2 } => {
-                write!(f, "forward period requires t2 > t1 >= 0, got t1={t1}, t2={t2}")
+                write!(
+                    f,
+                    "forward period requires t2 > t1 >= 0, got t1={t1}, t2={t2}"
+                )
             }
             CurveError::TenorCollision { t1, t2 } => {
-                write!(f, "bump tenors {t1} and {t2} resolve to the same curve pillar")
+                write!(
+                    f,
+                    "bump tenors {t1} and {t2} resolve to the same curve pillar"
+                )
             }
         }
     }
@@ -244,7 +262,10 @@ impl YieldCurve {
         day_count: DayCountConvention,
         compounding: Compounding,
     ) -> Result<Self, CurveError> {
-        let tenors: Vec<Tenor> = FLAT_CURVE_GRID.iter().map(|&t| Tenor::YearFraction(t)).collect();
+        let tenors: Vec<Tenor> = FLAT_CURVE_GRID
+            .iter()
+            .map(|&t| Tenor::YearFraction(t))
+            .collect();
         let rates = vec![rate; tenors.len()];
         Self::from_zero_rates(
             &tenors,
@@ -267,10 +288,25 @@ impl YieldCurve {
     ) -> Result<Self, CurveError> {
         let (times, dates) = Self::resolve_tenors(tenors, reference_date, day_count)?;
         if rates.len() != times.len() {
-            return Err(CurveError::LengthMismatch { tenors: times.len(), values: rates.len() });
+            return Err(CurveError::LengthMismatch {
+                tenors: times.len(),
+                values: rates.len(),
+            });
         }
-        let dfs: Vec<f64> = times.iter().zip(rates).map(|(&t, &z)| compounding.df(z, t)).collect();
-        Self::from_parts(reference_date, day_count, compounding, interpolation, times, dfs, dates)
+        let dfs: Vec<f64> = times
+            .iter()
+            .zip(rates)
+            .map(|(&t, &z)| compounding.df(z, t))
+            .collect();
+        Self::from_parts(
+            reference_date,
+            day_count,
+            compounding,
+            interpolation,
+            times,
+            dfs,
+            dates,
+        )
     }
 
     /// Curve directly from discount factors.
@@ -284,7 +320,10 @@ impl YieldCurve {
     ) -> Result<Self, CurveError> {
         let (times, dates) = Self::resolve_tenors(tenors, reference_date, day_count)?;
         if dfs.len() != times.len() {
-            return Err(CurveError::LengthMismatch { tenors: times.len(), values: dfs.len() });
+            return Err(CurveError::LengthMismatch {
+                tenors: times.len(),
+                values: dfs.len(),
+            });
         }
         Self::from_parts(
             reference_date,
@@ -310,7 +349,10 @@ impl YieldCurve {
     ) -> Result<Self, CurveError> {
         let (times, dates) = Self::resolve_tenors(tenors, reference_date, day_count)?;
         if forwards.len() != times.len() {
-            return Err(CurveError::LengthMismatch { tenors: times.len(), values: forwards.len() });
+            return Err(CurveError::LengthMismatch {
+                tenors: times.len(),
+                values: forwards.len(),
+            });
         }
         let mut dfs = Vec::with_capacity(times.len());
         let mut prev_t = 0.0;
@@ -321,24 +363,67 @@ impl YieldCurve {
             prev_t = t;
             prev_df = df;
         }
-        Self::from_parts(reference_date, day_count, compounding, interpolation, times, dfs, dates)
+        Self::from_parts(
+            reference_date,
+            day_count,
+            compounding,
+            interpolation,
+            times,
+            dfs,
+            dates,
+        )
     }
 
     /// Build from a deserialized [`CurveInput`], anchored at `reference_date`.
     pub fn from_input(input: &CurveInput, reference_date: NaiveDate) -> Result<Self, CurveError> {
         match input {
-            CurveInput::Flat { rate, compounding, day_count } => {
-                Self::flat(*rate, reference_date, *day_count, *compounding)
-            }
-            CurveInput::ZeroRates { tenors, rates, compounding, day_count, interpolation } => {
-                Self::from_zero_rates(tenors, rates, reference_date, *day_count, *compounding, *interpolation)
-            }
-            CurveInput::DiscountFactors { tenors, dfs, compounding, day_count, interpolation } => {
-                Self::from_discount_factors(tenors, dfs, reference_date, *day_count, *compounding, *interpolation)
-            }
-            CurveInput::ForwardRates { tenors, forwards, compounding, day_count, interpolation } => {
-                Self::from_forward_rates(tenors, forwards, reference_date, *day_count, *compounding, *interpolation)
-            }
+            CurveInput::Flat {
+                rate,
+                compounding,
+                day_count,
+            } => Self::flat(*rate, reference_date, *day_count, *compounding),
+            CurveInput::ZeroRates {
+                tenors,
+                rates,
+                compounding,
+                day_count,
+                interpolation,
+            } => Self::from_zero_rates(
+                tenors,
+                rates,
+                reference_date,
+                *day_count,
+                *compounding,
+                *interpolation,
+            ),
+            CurveInput::DiscountFactors {
+                tenors,
+                dfs,
+                compounding,
+                day_count,
+                interpolation,
+            } => Self::from_discount_factors(
+                tenors,
+                dfs,
+                reference_date,
+                *day_count,
+                *compounding,
+                *interpolation,
+            ),
+            CurveInput::ForwardRates {
+                tenors,
+                forwards,
+                compounding,
+                day_count,
+                interpolation,
+            } => Self::from_forward_rates(
+                tenors,
+                forwards,
+                reference_date,
+                *day_count,
+                *compounding,
+                *interpolation,
+            ),
         }
     }
 
@@ -377,7 +462,10 @@ impl YieldCurve {
                     };
                     if let Some((prev_idx, prev_tenor)) = prev {
                         if idx <= prev_idx {
-                            return Err(CurveError::TenorCollision { t1: prev_tenor, t2: tenor });
+                            return Err(CurveError::TenorCollision {
+                                t1: prev_tenor,
+                                t2: tenor,
+                            });
                         }
                     }
                     prev = Some((idx, tenor));
@@ -400,7 +488,11 @@ impl YieldCurve {
     /// forward on the segment; under `LinearZero` it is the segment
     /// average. The first segment starts at the `t = 0` anchor.
     pub fn min_forward(&self) -> ForwardSegment {
-        let mut worst = ForwardSegment { t1: 0.0, t2: 0.0, forward: f64::INFINITY };
+        let mut worst = ForwardSegment {
+            t1: 0.0,
+            t2: 0.0,
+            forward: f64::INFINITY,
+        };
         for i in 0..self.times.len() - 1 {
             let (t1, t2) = (self.times[i], self.times[i + 1]);
             let forward = (self.dfs[i] / self.dfs[i + 1]).ln() / (t2 - t1);
@@ -523,7 +615,10 @@ impl YieldCurve {
             return Err(CurveError::Empty);
         }
         if tenors.len() != shifts.len() {
-            return Err(CurveError::LengthMismatch { tenors: tenors.len(), values: shifts.len() });
+            return Err(CurveError::LengthMismatch {
+                tenors: tenors.len(),
+                values: shifts.len(),
+            });
         }
         for &t in tenors {
             if t <= 0.0 {
@@ -543,7 +638,7 @@ impl YieldCurve {
         for i in 1..self.times.len() {
             let dist = (self.times[i] - t).abs();
             if dist <= KEY_RATE_TENOR_TOLERANCE
-                && best.map_or(true, |j| dist < (self.times[j] - t).abs())
+                && best.is_none_or(|j| dist < (self.times[j] - t).abs())
             {
                 best = Some(i);
             }
@@ -613,7 +708,15 @@ impl YieldCurve {
         times.insert(0, 0.0);
         dfs.insert(0, 1.0);
         dates.insert(0, Some(reference_date));
-        Ok(YieldCurve { reference_date, day_count, compounding, interpolation, times, dfs, dates })
+        Ok(YieldCurve {
+            reference_date,
+            day_count,
+            compounding,
+            interpolation,
+            times,
+            dfs,
+            dates,
+        })
     }
 }
 
@@ -624,10 +727,18 @@ impl fmt::Display for YieldCurve {
             "YieldCurve (ref {}, {:?}, {:?}, {:?})",
             self.reference_date, self.day_count, self.compounding, self.interpolation
         )?;
-        writeln!(f, "{:>12} {:>12} {:>12} {:>12}", "date", "time", "df", "zero(cont)")?;
+        writeln!(
+            f,
+            "{:>12} {:>12} {:>12} {:>12}",
+            "date", "time", "df", "zero(cont)"
+        )?;
         for p in self.pillars() {
             let date = p.date.map_or_else(|| "-".to_string(), |d| d.to_string());
-            writeln!(f, "{:>12} {:>12.6} {:>12.8} {:>12.6}", date, p.time, p.df, p.zero_rate)?;
+            writeln!(
+                f,
+                "{:>12} {:>12.6} {:>12.8} {:>12.6}",
+                date, p.time, p.df, p.zero_rate
+            )?;
         }
         let worst = self.min_forward();
         writeln!(
@@ -648,7 +759,13 @@ mod tests {
     }
 
     fn flat_5pct() -> YieldCurve {
-        YieldCurve::flat(0.05, asof(), DayCountConvention::Act365, Compounding::Continuous).unwrap()
+        YieldCurve::flat(
+            0.05,
+            asof(),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -673,7 +790,10 @@ mod tests {
     }
 
     fn key_rate(tenors: &[f64], shifts: &[f64]) -> RateShift {
-        RateShift::KeyRateAbsolute { tenors: tenors.to_vec(), shifts: shifts.to_vec() }
+        RateShift::KeyRateAbsolute {
+            tenors: tenors.to_vec(),
+            shifts: shifts.to_vec(),
+        }
     }
 
     #[test]
@@ -687,7 +807,10 @@ mod tests {
         assert!((z(&up, 3.0) - 0.05).abs() < 1e-12);
         // strictly between: partial bump, shaped by the curve interpolation
         let mid = z(&up, 2.5);
-        assert!(mid > 0.05 + 1e-6 && mid < 0.06 - 1e-6, "mid-tent zero {mid}");
+        assert!(
+            mid > 0.05 + 1e-6 && mid < 0.06 - 1e-6,
+            "mid-tent zero {mid}"
+        );
         // pillar count unchanged: 2.0 is an existing grid point
         assert_eq!(up.pillars().len(), curve.pillars().len());
     }
@@ -695,7 +818,9 @@ mod tests {
     #[test]
     fn key_rate_plateau_between_equally_bumped_tenors() {
         let curve = flat_5pct();
-        let up = curve.bumped(&key_rate(&[1.0, 2.0], &[0.005, 0.005])).unwrap();
+        let up = curve
+            .bumped(&key_rate(&[1.0, 2.0], &[0.005, 0.005]))
+            .unwrap();
         // interior of [1y, 2y] carries exactly the full bump (log-linear df
         // interpolation is linear in z*t, so equal node bumps lerp exactly)
         for t in [1.0, 1.25, 1.5, 1.75, 2.0] {
@@ -744,7 +869,10 @@ mod tests {
         // a zero-size bump at an off-grid tenor reproduces the base curve
         let noop = curve.bumped(&key_rate(&[1.5], &[0.0])).unwrap();
         for t in [0.3, 1.2, 1.5, 1.9, 4.0] {
-            assert!((noop.df(t) - curve.df(t)).abs() < 1e-15, "insertion changed df({t})");
+            assert!(
+                (noop.df(t) - curve.df(t)).abs() < 1e-15,
+                "insertion changed df({t})"
+            );
         }
     }
 
@@ -770,7 +898,10 @@ mod tests {
     #[test]
     fn key_rate_validation_errors() {
         let curve = flat_5pct();
-        assert_eq!(curve.bumped(&key_rate(&[], &[])).unwrap_err(), CurveError::Empty);
+        assert_eq!(
+            curve.bumped(&key_rate(&[], &[])).unwrap_err(),
+            CurveError::Empty
+        );
         assert!(matches!(
             curve.bumped(&key_rate(&[1.0], &[0.01, 0.02])).unwrap_err(),
             CurveError::LengthMismatch { .. }
@@ -780,12 +911,16 @@ mod tests {
             CurveError::NonPositiveTime(_)
         ));
         assert_eq!(
-            curve.bumped(&key_rate(&[2.0, 1.0], &[0.01, 0.01])).unwrap_err(),
+            curve
+                .bumped(&key_rate(&[2.0, 1.0], &[0.01, 0.01]))
+                .unwrap_err(),
             CurveError::NonIncreasingTimes
         );
         // 1.0 and 1.005 both resolve to the 1y pillar
         assert!(matches!(
-            curve.bumped(&key_rate(&[1.0, 1.005], &[0.01, 0.01])).unwrap_err(),
+            curve
+                .bumped(&key_rate(&[1.0, 1.005], &[0.01, 0.01]))
+                .unwrap_err(),
             CurveError::TenorCollision { .. }
         ));
     }
@@ -793,17 +928,30 @@ mod tests {
     #[test]
     fn min_forward_flags_negative_forwards_from_a_hard_down_bump() {
         let curve = flat_5pct();
-        assert!((curve.min_forward().forward - 0.05).abs() < 1e-10, "flat curve forward");
+        assert!(
+            (curve.min_forward().forward - 0.05).abs() < 1e-10,
+            "flat curve forward"
+        );
         // -200bp at 10y: the zero bump amplifies into the preceding forward
         // by t/dt = 10/3 => forward 5% - 2%*10/3 < 0 on [7, 10]
         let down = curve.bumped(&key_rate(&[10.0], &[-0.02])).unwrap();
         let worst = down.min_forward();
-        assert!(worst.forward < 0.0, "expected negative forward, got {}", worst.forward);
+        assert!(
+            worst.forward < 0.0,
+            "expected negative forward, got {}",
+            worst.forward
+        );
         assert!((worst.t1 - 7.0).abs() < 1e-12 && (worst.t2 - 10.0).abs() < 1e-12);
         // the same size at the short end stays arbitrage-free: entering the
         // [1y, 2y] plateau costs only d * t/dt = 2% * 1/0.5 = 4% < 5%
-        let gentle = curve.bumped(&key_rate(&[1.0, 2.0], &[-0.02, -0.02])).unwrap();
-        assert!(gentle.min_forward().forward > 0.0, "got {:?}", gentle.min_forward());
+        let gentle = curve
+            .bumped(&key_rate(&[1.0, 2.0], &[-0.02, -0.02]))
+            .unwrap();
+        assert!(
+            gentle.min_forward().forward > 0.0,
+            "got {:?}",
+            gentle.min_forward()
+        );
     }
 
     #[test]
@@ -823,8 +971,13 @@ mod tests {
 
     #[test]
     fn flat_curve_annual_compounding() {
-        let curve =
-            YieldCurve::flat(0.04, asof(), DayCountConvention::Act365, Compounding::Annual).unwrap();
+        let curve = YieldCurve::flat(
+            0.04,
+            asof(),
+            DayCountConvention::Act365,
+            Compounding::Annual,
+        )
+        .unwrap();
         // exact everywhere under log-linear interpolation
         assert!((curve.df(2.0) - 0.924556213018).abs() < 1e-10);
         assert!((curve.df(1.3) - 1.04_f64.powf(-1.3)).abs() < 1e-12);
@@ -850,13 +1003,14 @@ mod tests {
 
     #[test]
     fn zero_rate_round_trip_all_compoundings() {
-        for comp in [Compounding::Continuous, Compounding::Annual, Compounding::Simple] {
+        for comp in [
+            Compounding::Continuous,
+            Compounding::Annual,
+            Compounding::Simple,
+        ] {
             for (z, t) in [(0.03, 0.5), (0.05, 1.0), (-0.005, 2.0), (0.07, 10.0)] {
                 let df = comp.df(z, t);
-                assert!(
-                    (comp.rate(df, t) - z).abs() < 1e-12,
-                    "{comp:?} z={z} t={t}"
-                );
+                assert!((comp.rate(df, t) - z).abs() < 1e-12, "{comp:?} z={z} t={t}");
             }
         }
     }
@@ -864,7 +1018,11 @@ mod tests {
     #[test]
     fn input_forms_agree_on_flat_curve() {
         // the same flat 5% (continuous) curve expressed four ways
-        let tenors = [Tenor::YearFraction(1.0), Tenor::YearFraction(2.0), Tenor::YearFraction(5.0)];
+        let tenors = [
+            Tenor::YearFraction(1.0),
+            Tenor::YearFraction(2.0),
+            Tenor::YearFraction(5.0),
+        ];
         let dc = DayCountConvention::Act365;
         let comp = Compounding::Continuous;
         let interp = InterpolationMethod::LogLinearDf;
@@ -872,7 +1030,10 @@ mod tests {
         let from_flat = YieldCurve::flat(0.05, asof(), dc, comp).unwrap();
         let from_zeros =
             YieldCurve::from_zero_rates(&tenors, &[0.05; 3], asof(), dc, comp, interp).unwrap();
-        let dfs: Vec<f64> = [1.0_f64, 2.0, 5.0].iter().map(|t| (-0.05 * t).exp()).collect();
+        let dfs: Vec<f64> = [1.0_f64, 2.0, 5.0]
+            .iter()
+            .map(|t| (-0.05 * t).exp())
+            .collect();
         let from_dfs =
             YieldCurve::from_discount_factors(&tenors, &dfs, asof(), dc, comp, interp).unwrap();
         let from_fwds =
@@ -880,9 +1041,11 @@ mod tests {
 
         for t in [0.3, 1.0, 1.7, 4.9] {
             let reference = from_flat.df(t);
-            for (name, curve) in
-                [("zeros", &from_zeros), ("dfs", &from_dfs), ("fwds", &from_fwds)]
-            {
+            for (name, curve) in [
+                ("zeros", &from_zeros),
+                ("dfs", &from_dfs),
+                ("fwds", &from_fwds),
+            ] {
                 assert!(
                     (curve.df(t) - reference).abs() < 1e-12,
                     "{name} disagrees at t={t}"
@@ -936,13 +1099,19 @@ mod tests {
     #[test]
     fn forward_rate_on_flat_curve_equals_rate() {
         let curve = flat_5pct();
-        let fwd = curve.forward_rate_with(1.0, 2.0, Compounding::Continuous).unwrap();
+        let fwd = curve
+            .forward_rate_with(1.0, 2.0, Compounding::Continuous)
+            .unwrap();
         assert!((fwd - 0.05).abs() < 1e-10);
         // FRA-style simple forward over 6M on a flat 5% cc curve
-        let fwd_simple = curve.forward_rate_with(1.0, 1.5, Compounding::Simple).unwrap();
+        let fwd_simple = curve
+            .forward_rate_with(1.0, 1.5, Compounding::Simple)
+            .unwrap();
         let expected = ((0.05_f64 * 0.5).exp() - 1.0) / 0.5;
         assert!((fwd_simple - expected).abs() < 1e-12);
-        assert!(curve.forward_rate_with(2.0, 1.0, Compounding::Simple).is_err());
+        assert!(curve
+            .forward_rate_with(2.0, 1.0, Compounding::Simple)
+            .is_err());
     }
 
     #[test]
@@ -963,9 +1132,13 @@ mod tests {
 
     #[test]
     fn negative_rates_allowed() {
-        let curve =
-            YieldCurve::flat(-0.005, asof(), DayCountConvention::Act365, Compounding::Continuous)
-                .unwrap();
+        let curve = YieldCurve::flat(
+            -0.005,
+            asof(),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+        )
+        .unwrap();
         assert!(curve.df(2.0) > 1.0);
         assert!((curve.zero_rate(2.0) + 0.005).abs() < 1e-12);
     }
@@ -1008,8 +1181,15 @@ mod tests {
         );
         // non-positive time
         assert!(matches!(
-            YieldCurve::from_zero_rates(&[Tenor::YearFraction(0.0)], &[0.05], asof(), dc, comp, interp)
-                .unwrap_err(),
+            YieldCurve::from_zero_rates(
+                &[Tenor::YearFraction(0.0)],
+                &[0.05],
+                asof(),
+                dc,
+                comp,
+                interp
+            )
+            .unwrap_err(),
             CurveError::NonPositiveTime(_)
         ));
         // non-positive df

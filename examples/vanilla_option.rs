@@ -44,7 +44,7 @@ fn main() {
         common::section(&format!("European {pc:?}"));
         common::table_header();
         //common::row("Analytical (Black-Scholes)", &priced(base(pc), Engine::BlackScholes));
-        let op = priced(base(pc),Engine::Binomial);
+        let op = priced(base(pc), Engine::Binomial);
         common::row("Binomial (1000 steps)", &op);
         // common::row("Finite difference (400x400)", &priced(base(pc), Engine::FiniteDifference));
         // common::row("Monte Carlo (Sobol, 100k)", &priced(base(pc), Engine::MonteCarlo));
@@ -186,13 +186,18 @@ fn greek_surfaces() {
                 .years_to_maturity(years)
                 .vanilla(PutOrCall::Put)
                 .engine(Engine::BlackScholes)
-                .build().expect("option must build");
+                .build()
+                .expect("option must build");
             select(&option)
         }
     };
 
     for (name, file, select) in [
-        ("Delta", "delta", (|o: &EquityOption| o.delta()) as fn(&EquityOption) -> f64),
+        (
+            "Delta",
+            "delta",
+            (|o: &EquityOption| o.delta()) as fn(&EquityOption) -> f64,
+        ),
         ("Gamma", "gamma", |o: &EquityOption| o.gamma()),
         ("Vega", "vega", |o: &EquityOption| o.vega()),
         ("Theta", "theta", |o: &EquityOption| o.theta()),

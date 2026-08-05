@@ -1,10 +1,10 @@
 //mod dis{
-use libm::erf;
-use std::f64::consts::{PI, SQRT_2};
-use serde::{Deserialize, Serialize};
 use crate::core::data_models::ProductData;
+use libm::erf;
+use serde::{Deserialize, Serialize};
+use std::f64::consts::{PI, SQRT_2};
 
-#[derive(PartialEq,Clone,Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum ContractStyle {
     European,
     American,
@@ -57,8 +57,6 @@ impl EngineType {
     }
 }
 
-
-
 // #[derive(Clone,Debug,Deserialize,Serialize)]
 // pub struct MarketData {
 //     pub underlying_price:f64,
@@ -77,8 +75,7 @@ impl EngineType {
 //     pub entry_price:Option<f64>,
 // }
 
-
-#[derive(Clone,Debug,Deserialize,Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RateData {
     pub instrument: String,
     pub currency: String,
@@ -91,29 +88,29 @@ pub struct RateData {
     pub business_day_adjustment: i8,
 }
 
-#[derive(Clone,Debug,Deserialize,Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Contract {
     pub action: String,
     pub asset: String,
     pub product_type: ProductData,
     pub rate_data: Option<RateData>,
 }
-#[derive(Deserialize,Serialize)]
-pub struct CombinedContract{
+#[derive(Deserialize, Serialize)]
+pub struct CombinedContract {
     pub contract: Contract,
-    pub output: ContractOutput
+    pub output: ContractOutput,
 }
 
-#[derive(Debug, Deserialize,Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Contracts {
     pub asset: String,
     pub contracts: Vec<Contract>,
 }
-#[derive(Debug, Deserialize,Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OutputJson {
     pub contracts: Vec<String>,
 }
-#[derive(Deserialize,Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ContractOutput {
     pub pv: f64,
     pub delta: f64,
@@ -138,7 +135,7 @@ pub struct ContractOutput {
     /// Per-asset vegas for multi-asset (rainbow) products.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vegas: Option<Vec<f64>>,
-    pub error: Option<String>
+    pub error: Option<String>,
 }
 
 impl From<crate::core::results::PricingResult> for ContractOutput {
@@ -205,7 +202,10 @@ pub fn norm_cdf(x: f64) -> f64 {
 /// correlated tail. Used by the Bjerksund-Stensland (2002) two-boundary
 /// American approximation.
 pub fn bivariate_norm_cdf(a: f64, b: f64, rho: f64) -> f64 {
-    assert!((-1.0..=1.0).contains(&rho), "correlation must be in [-1, 1]");
+    assert!(
+        (-1.0..=1.0).contains(&rho),
+        "correlation must be in [-1, 1]"
+    );
     if rho == 1.0 {
         return norm_cdf(a.min(b));
     }
@@ -215,15 +215,27 @@ pub fn bivariate_norm_cdf(a: f64, b: f64, rho: f64) -> f64 {
     if rho.abs() <= 0.925 {
         // 10-point Gauss-Legendre on each half interval
         const WEIGHTS: [f64; 10] = [
-            0.01761400713915212, 0.04060142980038694, 0.06267204833410906,
-            0.08327674157670475, 0.1019301198172404, 0.1181945319615184,
-            0.1316886384491766, 0.1420961093183821, 0.1491729864726037,
+            0.01761400713915212,
+            0.04060142980038694,
+            0.06267204833410906,
+            0.08327674157670475,
+            0.1019301198172404,
+            0.1181945319615184,
+            0.1316886384491766,
+            0.1420961093183821,
+            0.1491729864726037,
             0.1527533871307259,
         ];
         const ABSCISSAE: [f64; 10] = [
-            0.9931285991850949, 0.9639719272779138, 0.9122344282513259,
-            0.8391169718222188, 0.7463319064601508, 0.6360536807265150,
-            0.5108670019508271, 0.3737060887154196, 0.2277858511416451,
+            0.9931285991850949,
+            0.9639719272779138,
+            0.912_234_428_251_326,
+            0.8391169718222188,
+            0.7463319064601508,
+            0.636_053_680_726_515,
+            0.5108670019508271,
+            0.3737060887154196,
+            0.2277858511416451,
             0.07652652113349733,
         ];
         let (h, k) = (-a, -b);
@@ -269,7 +281,7 @@ pub fn inv_norm_cdf(p: f64) -> f64 {
         -3.969683028665376e+01,
         2.209460984245205e+02,
         -2.759285104469687e+02,
-        1.383577518672690e+02,
+        1.383_577_518_672_69e2,
         -3.066479806614716e+01,
         2.506628277459239e+00,
     ];
@@ -316,7 +328,6 @@ pub fn inv_norm_cdf(p: f64) -> f64 {
         .x
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,7 +343,9 @@ mod tests {
             );
         }
         // independence factorizes
-        assert!((bivariate_norm_cdf(1.0, -0.5, 0.0) - norm_cdf(1.0) * norm_cdf(-0.5)).abs() < 1e-12);
+        assert!(
+            (bivariate_norm_cdf(1.0, -0.5, 0.0) - norm_cdf(1.0) * norm_cdf(-0.5)).abs() < 1e-12
+        );
         // symmetry in the arguments
         assert!(
             (bivariate_norm_cdf(0.7, -0.2, 0.4) - bivariate_norm_cdf(-0.2, 0.7, 0.4)).abs() < 1e-12
@@ -352,6 +365,9 @@ mod tests {
         assert!((genz - simpson).abs() < 5e-3, "{genz} vs {simpson}");
         // and rho = 0.99 stays close to the perfect-correlation limit
         let near = bivariate_norm_cdf(0.5, 1.2, 0.99);
-        assert!(near < norm_cdf(0.5) + 1e-9 && near > norm_cdf(0.5) - 0.02, "{near}");
+        assert!(
+            near < norm_cdf(0.5) + 1e-9 && near > norm_cdf(0.5) - 0.02,
+            "{near}"
+        );
     }
 }

@@ -24,7 +24,11 @@ pub fn newton_safeguarded(
     for i in 0..cfg.max_iter {
         let fx = f(x);
         if fx.abs() <= cfg.tol {
-            return Root { x, iterations: i, converged: true };
+            return Root {
+                x,
+                iterations: i,
+                converged: true,
+            };
         }
         if fx > 0.0 {
             hi = x;
@@ -39,10 +43,18 @@ pub fn newton_safeguarded(
             0.5 * (lo + hi)
         };
         if hi - lo <= 1e-14 {
-            return Root { x, iterations: i + 1, converged: f(x).abs() <= cfg.tol };
+            return Root {
+                x,
+                iterations: i + 1,
+                converged: f(x).abs() <= cfg.tol,
+            };
         }
     }
-    Root { x, iterations: cfg.max_iter, converged: f(x).abs() <= cfg.tol }
+    Root {
+        x,
+        iterations: cfg.max_iter,
+        converged: f(x).abs() <= cfg.tol,
+    }
 }
 
 #[cfg(test)]
@@ -59,7 +71,10 @@ mod tests {
             2.0,
             1.0,
         );
-        assert!(r.converged && (r.x - std::f64::consts::SQRT_2).abs() < 1e-12, "{r:?}");
+        assert!(
+            r.converged && (r.x - std::f64::consts::SQRT_2).abs() < 1e-12,
+            "{r:?}"
+        );
     }
 
     #[test]
@@ -70,7 +85,10 @@ mod tests {
         let dg = |x: f64| 1.0 / (1.0 + (x - 1.0) * (x - 1.0));
         let cfg = Solver1d::new(1e-12, 100);
         let raw = super::super::newton_raphson::newton_raphson(&cfg, g, dg, 30.0);
-        assert!(!raw.converged || (raw.x - 1.0).abs() > 1e-6, "raw newton unexpectedly fine");
+        assert!(
+            !raw.converged || (raw.x - 1.0).abs() > 1e-6,
+            "raw newton unexpectedly fine"
+        );
         let safe = newton_safeguarded(&cfg, g, dg, -50.0, 50.0, 30.0);
         assert!(safe.converged && (safe.x - 1.0).abs() < 1e-9, "{safe:?}");
     }

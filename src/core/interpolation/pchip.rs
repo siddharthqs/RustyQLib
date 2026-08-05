@@ -18,14 +18,19 @@ impl Pchip {
     pub fn new(xs: &[f64], ys: &[f64]) -> Result<Self, RustyQLibError> {
         let n = xs.len();
         if n < 2 || ys.len() != n {
-            return Err(RustyQLibError::invalid_input("pchip", "need at least two knots with matching y values"));
+            return Err(RustyQLibError::invalid_input(
+                "pchip",
+                "need at least two knots with matching y values",
+            ));
         }
         if xs.windows(2).any(|w| w[1] <= w[0]) {
-            return Err(RustyQLibError::invalid_input("pchip", "knots must be strictly increasing"));
+            return Err(RustyQLibError::invalid_input(
+                "pchip",
+                "knots must be strictly increasing",
+            ));
         }
         let h: Vec<f64> = xs.windows(2).map(|w| w[1] - w[0]).collect();
-        let delta: Vec<f64> =
-            (0..n - 1).map(|i| (ys[i + 1] - ys[i]) / h[i]).collect();
+        let delta: Vec<f64> = (0..n - 1).map(|i| (ys[i + 1] - ys[i]) / h[i]).collect();
 
         let mut d = vec![0.0; n];
         if n == 2 {
@@ -44,7 +49,11 @@ impl Pchip {
             d[0] = end_slope(h[0], h[1], delta[0], delta[1]);
             d[n - 1] = end_slope(h[n - 2], h[n - 3], delta[n - 2], delta[n - 3]);
         }
-        Ok(Pchip { xs: xs.to_vec(), ys: ys.to_vec(), d })
+        Ok(Pchip {
+            xs: xs.to_vec(),
+            ys: ys.to_vec(),
+            d,
+        })
     }
 
     /// Interpolant value at `x` (linear extrapolation with the end slope).
@@ -128,7 +137,10 @@ mod tests {
             let v = pchip.eval(x);
             // monotone and inside the data range
             assert!(v >= prev - 1e-12, "pchip not monotone at {x}");
-            assert!((-1e-12..=1.0 + 1e-12).contains(&v), "pchip overshoots at {x}");
+            assert!(
+                (-1e-12..=1.0 + 1e-12).contains(&v),
+                "pchip overshoots at {x}"
+            );
             prev = v;
             let s = spline.eval(x);
             if !(0.0..=1.0).contains(&s) {
@@ -136,7 +148,10 @@ mod tests {
             }
         }
         // and the comparison is meaningful: the free spline DOES overshoot
-        assert!(spline_overshoots, "cubic spline unexpectedly shape-preserving");
+        assert!(
+            spline_overshoots,
+            "cubic spline unexpectedly shape-preserving"
+        );
     }
 
     #[test]

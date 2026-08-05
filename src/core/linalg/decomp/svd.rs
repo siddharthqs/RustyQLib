@@ -77,7 +77,9 @@ pub fn svd(a: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>) {
     order.sort_by(|&i, &j| s[j].total_cmp(&s[i]));
     let s_sorted: Vec<f64> = order.iter().map(|&k| s[k]).collect();
     let permute = |mat: &[Vec<f64>]| -> Vec<Vec<f64>> {
-        mat.iter().map(|row| order.iter().map(|&k| row[k]).collect()).collect()
+        mat.iter()
+            .map(|row| order.iter().map(|&k| row[k]).collect())
+            .collect()
     };
     let (u, v) = (permute(&u), permute(&v));
     s = s_sorted;
@@ -114,7 +116,11 @@ mod tests {
 
     fn fixture() -> Vec<Vec<f64>> {
         (0..5)
-            .map(|i| (0..3).map(|j| ((2 * i + 3 * j) as f64).cos() + if i == j { 1.5 } else { 0.0 }).collect())
+            .map(|i| {
+                (0..3)
+                    .map(|j| ((2 * i + 3 * j) as f64).cos() + if i == j { 1.5 } else { 0.0 })
+                    .collect()
+            })
             .collect()
     }
 
@@ -156,7 +162,10 @@ mod tests {
     #[test]
     fn known_singular_values_of_a_diagonal_matrix() {
         let (_, s, _) = svd(&[vec![2.0, 0.0], vec![0.0, -3.0]]);
-        assert!((s[0] - 3.0).abs() < 1e-12 && (s[1] - 2.0).abs() < 1e-12, "{s:?}");
+        assert!(
+            (s[0] - 3.0).abs() < 1e-12 && (s[1] - 2.0).abs() < 1e-12,
+            "{s:?}"
+        );
     }
 
     #[test]
@@ -184,8 +193,9 @@ mod tests {
         }
         // rank-deficient: QR errors, the pseudo-inverse returns the
         // minimum-norm solution
-        let deficient: Vec<Vec<f64>> =
-            (0..4).map(|i| vec![i as f64 + 1.0, 2.0 * (i as f64 + 1.0)]).collect();
+        let deficient: Vec<Vec<f64>> = (0..4)
+            .map(|i| vec![i as f64 + 1.0, 2.0 * (i as f64 + 1.0)])
+            .collect();
         let rhs = [1.0, 2.0, 3.0, 4.0];
         assert!(least_squares(&deficient, &rhs).is_err());
         let x = pseudo_solve(&deficient, &rhs, 1e-12);

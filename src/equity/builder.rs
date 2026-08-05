@@ -25,22 +25,22 @@
 use chrono::{Duration, Local, NaiveDate};
 
 use crate::core::curves::{Compounding, YieldCurve};
-use crate::core::errors::RustyQLibError;
 use crate::core::daycount::DayCountConvention;
+use crate::core::errors::RustyQLibError;
 use crate::core::quotes::Quote;
 use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::core::vols::VolSurface;
-use crate::equity::asian::{AsianStrikeType, AveragingType};
 use crate::equity::accumulator::{AccumulatorPayoff, AccumulatorSide};
+use crate::equity::asian::{AsianStrikeType, AveragingType};
 use crate::equity::autocallable::AutocallablePayoff;
 use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::finite_difference::FdConfig;
 use crate::equity::forward_start_option::ForwardStartPayoff;
 use crate::equity::heston::HestonParams;
 use crate::equity::montecarlo::MonteCarloConfig;
-use crate::equity::utils::PricingEngine;
 use crate::equity::utils::Model;
+use crate::equity::utils::PricingEngine;
 use crate::equity::utils::{Engine, LongShort, Payoff};
 use crate::equity::vanilla_option::{
     AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityOption, EquityOptionBase,
@@ -82,6 +82,10 @@ enum PayoffSpec {
         put_or_call: PutOrCall,
         strike_fraction: f64,
         start_fraction: f64,
+    },
+    Chooser {
+        choice_fraction: f64,
+        legs: Option<crate::equity::chooser::ChooserLegs>,
     },
     Autocallable {
         autocall_barrier: f64,
@@ -168,7 +172,10 @@ impl PayoffSpec {
     /// in `EquityOption::check_engine_support`.
     fn validate(&self, ctx: &BuildContext) -> Result<(), RustyQLibError> {
         let invalid = |field: &str, reason: String| {
-            Err(RustyQLibError::InvalidInput { field: field.to_string(), reason })
+            Err(RustyQLibError::InvalidInput {
+                field: field.to_string(),
+                reason,
+            })
         };
         if self.requires_strike() && !(ctx.strike.is_finite() && ctx.strike > 0.0) {
             return invalid(
@@ -190,7 +197,12 @@ impl PayoffSpec {
                 }
                 Ok(())
             }
-            PayoffSpec::Barrier { barrier, barrier2, rebate, .. } => {
+            PayoffSpec::Barrier {
+                barrier,
+                barrier2,
+                rebate,
+                ..
+            } => {
                 if !(barrier.is_finite() && *barrier > 0.0) {
                     return invalid(
                         "barrier",
@@ -215,11 +227,17 @@ impl PayoffSpec {
                 }
                 Ok(())
             }
-            PayoffSpec::ForwardStart { strike_fraction, start_fraction, .. } => {
+            PayoffSpec::ForwardStart {
+                strike_fraction,
+                start_fraction,
+                ..
+            } => {
                 if !(strike_fraction.is_finite() && *strike_fraction > 0.0) {
                     return invalid(
                         "strike_fraction",
-                        format!("strike_fraction must be positive and finite, got {strike_fraction}"),
+                        format!(
+                            "strike_fraction must be positive and finite, got {strike_fraction}"
+                        ),
                     );
                 }
                 if !(*start_fraction > 0.0 && *start_fraction < 1.0) {
@@ -227,6 +245,44 @@ impl PayoffSpec {
                         "start_fraction",
                         format!("start_fraction must lie in (0, 1), got {start_fraction}"),
                     );
+                }
+                Ok(())
+            }
+            PayoffSpec::Chooser {
+                choice_fraction,
+                legs,
+            } => {
+                if !(*choice_fraction > 0.0 && *choice_fraction < 1.0) {
+                    return invalid(
+                        "choice_fraction",
+                        format!("choice_fraction must lie in (0, 1), got {choice_fraction}"),
+                    );
+                }
+                if let Some(legs) = legs {
+                    for (name, strike) in [
+                        ("call_strike", legs.call_strike),
+                        ("put_strike", legs.put_strike),
+                    ] {
+                        if !(strike.is_finite() && strike > 0.0) {
+                            return invalid(
+                                name,
+                                format!("{name} must be positive and finite, got {strike}"),
+                            );
+                        }
+                    }
+                    for (name, fraction) in [
+                        ("call_expiry_fraction", legs.call_expiry_fraction),
+                        ("put_expiry_fraction", legs.put_expiry_fraction),
+                    ] {
+                        if !(fraction > *choice_fraction && fraction <= 1.0) {
+                            return invalid(
+                                name,
+                                format!(
+                                    "{name} must lie in (choice_fraction, 1], got {fraction}                                      with choice_fraction {choice_fraction}"
+                                ),
+                            );
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -246,7 +302,10 @@ impl PayoffSpec {
                     ("notional", *notional),
                 ] {
                     if !(x.is_finite() && x > 0.0) {
-                        return invalid(name, format!("{name} must be positive and finite, got {x}"));
+                        return invalid(
+                            name,
+                            format!("{name} must be positive and finite, got {x}"),
+                        );
                     }
                 }
                 if let Some(cb) = coupon_barrier {
@@ -276,7 +335,13 @@ impl PayoffSpec {
                 }
                 Ok(())
             }
-            PayoffSpec::Accumulator { side, barrier, observations, shares_per_day, gearing } => {
+            PayoffSpec::Accumulator {
+                side,
+                barrier,
+                observations,
+                shares_per_day,
+                gearing,
+            } => {
                 if !(barrier.is_finite() && *barrier > 0.0) {
                     return invalid(
                         "barrier",
@@ -322,10 +387,15 @@ impl PayoffSpec {
     /// [`validate`](Self::validate) has passed.
     fn materialize(self, style: ContractStyle, ctx: &BuildContext) -> Box<dyn Payoff> {
         match self {
-            PayoffSpec::Vanilla { put_or_call } => {
-                Box::new(VanillaPayoff { put_or_call, exercise_style: style })
-            }
-            PayoffSpec::Binary { put_or_call, binary_type, cash } => Box::new(BinaryPayoff {
+            PayoffSpec::Vanilla { put_or_call } => Box::new(VanillaPayoff {
+                put_or_call,
+                exercise_style: style,
+            }),
+            PayoffSpec::Binary {
+                put_or_call,
+                binary_type,
+                cash,
+            } => Box::new(BinaryPayoff {
                 put_or_call,
                 exercise_style: style,
                 binary_type,
@@ -349,27 +419,42 @@ impl PayoffSpec {
                 rebate,
                 rebate_at_hit,
             }),
-            PayoffSpec::Asian { put_or_call, averaging, strike_type } => Box::new(AsianPayoff {
+            PayoffSpec::Asian {
+                put_or_call,
+                averaging,
+                strike_type,
+            } => Box::new(AsianPayoff {
                 put_or_call,
                 exercise_style: style,
                 averaging,
                 strike_type,
             }),
-            PayoffSpec::Lookback { put_or_call, lookback_type } => {
-                Box::new(crate::equity::vanilla_option::LookbackPayoff {
-                    put_or_call,
-                    exercise_style: style,
-                    lookback_type,
-                })
-            }
-            PayoffSpec::ForwardStart { put_or_call, strike_fraction, start_fraction } => {
-                Box::new(ForwardStartPayoff {
-                    put_or_call,
-                    exercise_style: style,
-                    strike_fraction,
-                    start_fraction,
-                })
-            }
+            PayoffSpec::Lookback {
+                put_or_call,
+                lookback_type,
+            } => Box::new(crate::equity::vanilla_option::LookbackPayoff {
+                put_or_call,
+                exercise_style: style,
+                lookback_type,
+            }),
+            PayoffSpec::ForwardStart {
+                put_or_call,
+                strike_fraction,
+                start_fraction,
+            } => Box::new(ForwardStartPayoff {
+                put_or_call,
+                exercise_style: style,
+                strike_fraction,
+                start_fraction,
+            }),
+            PayoffSpec::Chooser {
+                choice_fraction,
+                legs,
+            } => Box::new(crate::equity::chooser::ChooserPayoff {
+                exercise_style: style,
+                choice_fraction,
+                legs,
+            }),
             PayoffSpec::Autocallable {
                 autocall_barrier,
                 protection_barrier,
@@ -402,16 +487,20 @@ impl PayoffSpec {
                     observation_times,
                 })
             }
-            PayoffSpec::Accumulator { side, barrier, observations, shares_per_day, gearing } => {
-                Box::new(AccumulatorPayoff {
-                    exercise_style: style,
-                    side,
-                    barrier,
-                    observations,
-                    shares_per_day,
-                    gearing,
-                })
-            }
+            PayoffSpec::Accumulator {
+                side,
+                barrier,
+                observations,
+                shares_per_day,
+                gearing,
+            } => Box::new(AccumulatorPayoff {
+                exercise_style: style,
+                side,
+                barrier,
+                observations,
+                shares_per_day,
+                gearing,
+            }),
             PayoffSpec::Custom(p) => p,
         }
     }
@@ -533,10 +622,7 @@ impl EquityOptionBuilder {
     }
     /// Price the option on a future with Black-76: `spot` is then the
     /// futures price `F`. European vanilla, Analytical engine only.
-    pub fn on_future(
-        mut self,
-        settlement: crate::equity::black76::FuturesSettlement,
-    ) -> Self {
+    pub fn on_future(mut self, settlement: crate::equity::black76::FuturesSettlement) -> Self {
         self.futures_settlement = Some(settlement);
         self
     }
@@ -574,7 +660,11 @@ impl EquityOptionBuilder {
     /// Bermudan exercise every `months` months on business-day adjusted
     /// dates (modified following) from valuation to maturity, generated at
     /// `build()` time.
-    pub fn bermudan_schedule(mut self, months: u32, calendar: crate::core::calendar::Calendar) -> Self {
+    pub fn bermudan_schedule(
+        mut self,
+        months: u32,
+        calendar: crate::core::calendar::Calendar,
+    ) -> Self {
         self.bermudan_schedule = Some((months, calendar));
         self
     }
@@ -591,7 +681,11 @@ impl EquityOptionBuilder {
         self
     }
     pub fn binary(mut self, put_or_call: PutOrCall, binary_type: BinaryType, cash: f64) -> Self {
-        self.payoff = Some(PayoffSpec::Binary { put_or_call, binary_type, cash });
+        self.payoff = Some(PayoffSpec::Binary {
+            put_or_call,
+            binary_type,
+            cash,
+        });
         self
     }
     pub fn barrier(
@@ -637,7 +731,11 @@ impl EquityOptionBuilder {
     /// analytic engine only).
     pub fn barrier_rebate(mut self, rebate: f64, at_hit: bool) -> Self {
         match &mut self.payoff {
-            Some(PayoffSpec::Barrier { rebate: r, rebate_at_hit: h, .. }) => {
+            Some(PayoffSpec::Barrier {
+                rebate: r,
+                rebate_at_hit: h,
+                ..
+            }) => {
                 *r = rebate;
                 *h = at_hit;
             }
@@ -657,7 +755,11 @@ impl EquityOptionBuilder {
         averaging: AveragingType,
         strike_type: AsianStrikeType,
     ) -> Self {
-        self.payoff = Some(PayoffSpec::Asian { put_or_call, averaging, strike_type });
+        self.payoff = Some(PayoffSpec::Asian {
+            put_or_call,
+            averaging,
+            strike_type,
+        });
         self
     }
     /// Lookback on the path extremum: floating strike pays against the
@@ -668,7 +770,10 @@ impl EquityOptionBuilder {
         put_or_call: PutOrCall,
         lookback_type: crate::equity::vanilla_option::LookbackType,
     ) -> Self {
-        self.payoff = Some(PayoffSpec::Lookback { put_or_call, lookback_type });
+        self.payoff = Some(PayoffSpec::Lookback {
+            put_or_call,
+            lookback_type,
+        });
         self
     }
     /// `start_fraction` is the strike-fixing time as a fraction of the
@@ -683,6 +788,39 @@ impl EquityOptionBuilder {
             put_or_call,
             strike_fraction,
             start_fraction,
+        });
+        self
+    }
+    /// Simple chooser: the holder picks call or put (same strike and
+    /// expiry) at the choice date, given as a fraction of the option's
+    /// life in (0, 1). Prices on the Analytical engine.
+    pub fn chooser(mut self, choice_fraction: f64) -> Self {
+        self.payoff = Some(PayoffSpec::Chooser {
+            choice_fraction,
+            legs: None,
+        });
+        self
+    }
+    /// Complex chooser: the holder picks at the choice date between a
+    /// call and a put with their own strikes and expiries. Expiries are
+    /// fractions of the option's life (1.0 = the maturity date), strictly
+    /// after the choice fraction. Prices on the Analytical engine.
+    pub fn complex_chooser(
+        mut self,
+        choice_fraction: f64,
+        call_strike: f64,
+        call_expiry_fraction: f64,
+        put_strike: f64,
+        put_expiry_fraction: f64,
+    ) -> Self {
+        self.payoff = Some(PayoffSpec::Chooser {
+            choice_fraction,
+            legs: Some(crate::equity::chooser::ChooserLegs {
+                call_strike,
+                put_strike,
+                call_expiry_fraction,
+                put_expiry_fraction,
+            }),
         });
         self
     }
@@ -713,7 +851,9 @@ impl EquityOptionBuilder {
     /// spaced observation count.
     pub fn autocall_observation_dates(mut self, dates: Vec<NaiveDate>) -> Self {
         match &mut self.payoff {
-            Some(PayoffSpec::Autocallable { observation_dates, .. }) => {
+            Some(PayoffSpec::Autocallable {
+                observation_dates, ..
+            }) => {
                 *observation_dates = Some(dates);
             }
             _ => {
@@ -731,7 +871,11 @@ impl EquityOptionBuilder {
     /// (modified following); must follow `.autocallable(...)` or
     /// `.phoenix(...)`. The schedule is built at `build()` time from the
     /// final valuation and maturity dates.
-    pub fn autocall_schedule(mut self, months: u32, calendar: crate::core::calendar::Calendar) -> Self {
+    pub fn autocall_schedule(
+        mut self,
+        months: u32,
+        calendar: crate::core::calendar::Calendar,
+    ) -> Self {
         if !matches!(self.payoff, Some(PayoffSpec::Autocallable { .. })) {
             self.setter_error = Some(RustyQLibError::invalid_input(
                 "autocall_schedule",
@@ -889,7 +1033,10 @@ impl EquityOptionBuilder {
             return Err(e);
         }
         let invalid = |field: &str, reason: String| {
-            Err(RustyQLibError::InvalidInput { field: field.to_string(), reason })
+            Err(RustyQLibError::InvalidInput {
+                field: field.to_string(),
+                reason,
+            })
         };
 
         // ── market data domains (shared by every payoff) ────────────────
@@ -927,7 +1074,9 @@ impl EquityOptionBuilder {
         };
         if let Some((months, calendar)) = &self.autocall_schedule {
             match &mut spec {
-                PayoffSpec::Autocallable { observation_dates, .. } => {
+                PayoffSpec::Autocallable {
+                    observation_dates, ..
+                } => {
                     let schedule = crate::core::calendar::Schedule::generate(
                         self.valuation_date,
                         maturity_date,
@@ -1018,9 +1167,11 @@ impl EquityOptionBuilder {
         };
         let vol_surface = match self.vol_surface {
             Some(s) => s,
-            None => {
-                VolSurface::flat(self.flat_vol, self.valuation_date, DayCountConvention::Act365)?
-            }
+            None => VolSurface::flat(
+                self.flat_vol,
+                self.valuation_date,
+                DayCountConvention::Act365,
+            )?,
         };
 
         // ── materialize the payoff with the final exercise style ────────
@@ -1069,7 +1220,13 @@ impl EquityOptionBuilder {
             Engine::BaroneAdesiWhaley => PricingEngine::BaroneAdesiWhaley,
             Engine::BjerksundStensland => PricingEngine::BjerksundStensland,
         };
-        let option = EquityOption { base, market, payoff, engine, model: self.model };
+        let option = EquityOption {
+            base,
+            market,
+            payoff,
+            engine,
+            model: self.model,
+        };
         // "builds => prices": refuse engine/model/payoff combinations here
         // rather than at pricing time
         option.check_engine_support()?;
@@ -1079,15 +1236,24 @@ impl EquityOptionBuilder {
     /// Domain checks on the market data fields shared by every payoff.
     fn validate_market_data(&self) -> Result<(), RustyQLibError> {
         let invalid = |field: &str, reason: String| {
-            Err(RustyQLibError::InvalidInput { field: field.to_string(), reason })
+            Err(RustyQLibError::InvalidInput {
+                field: field.to_string(),
+                reason,
+            })
         };
         if !(self.spot.is_finite() && self.spot > 0.0) {
-            return invalid("spot", format!("spot must be positive and finite, got {}", self.spot));
+            return invalid(
+                "spot",
+                format!("spot must be positive and finite, got {}", self.spot),
+            );
         }
         if self.vol_surface.is_none() && !(self.flat_vol.is_finite() && self.flat_vol > 0.0) {
             return invalid(
                 "flat_vol",
-                format!("volatility must be positive and finite, got {}", self.flat_vol),
+                format!(
+                    "volatility must be positive and finite, got {}",
+                    self.flat_vol
+                ),
             );
         }
         for (name, x) in [
@@ -1127,7 +1293,8 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(PutOrCall::Call)
             .engine(Engine::BlackScholes)
-            .build().expect("option must build");
+            .build()
+            .expect("option must build");
         assert!((option.npv() - 14.2312547860).abs() < 1e-8);
         assert!((option.delta() - 0.6242517279).abs() < 1e-8);
     }
@@ -1140,7 +1307,8 @@ mod tests {
             .borrow_cost(0.02)
             .years_to_maturity(1.0)
             .vanilla(PutOrCall::Call)
-            .build().expect("option must build");
+            .build()
+            .expect("option must build");
         assert!((option.carry_yield() - 0.03).abs() < 1e-12);
     }
 
@@ -1159,7 +1327,10 @@ mod tests {
                 b.american().vanilla(PutOrCall::Put)
             };
             let option = b.build().expect("option must build");
-            assert!(matches!(option.payoff.exercise_style(), ContractStyle::American));
+            assert!(matches!(
+                option.payoff.exercise_style(),
+                ContractStyle::American
+            ));
         }
     }
 
@@ -1168,10 +1339,17 @@ mod tests {
         use crate::core::errors::RustyQLibError;
         let field = |r: Result<EquityOption, RustyQLibError>| match r {
             Err(RustyQLibError::InvalidInput { field, .. }) => field,
-            other => panic!("expected InvalidInput, got {:?}", other.map(|_| "an option")),
+            other => panic!(
+                "expected InvalidInput, got {:?}",
+                other.map(|_| "an option")
+            ),
         };
 
-        let base = || EquityOptionBuilder::new().years_to_maturity(1.0).vanilla(PutOrCall::Call);
+        let base = || {
+            EquityOptionBuilder::new()
+                .years_to_maturity(1.0)
+                .vanilla(PutOrCall::Call)
+        };
 
         assert_eq!(field(base().spot(-1.0).build()), "spot");
         assert_eq!(field(base().flat_vol(0.0).build()), "flat_vol");
@@ -1180,16 +1358,26 @@ mod tests {
             field(EquityOptionBuilder::new().vanilla(PutOrCall::Call).build()),
             "maturity_date"
         );
-        assert_eq!(field(base().years_to_maturity(-1.0).build()), "maturity_date");
+        assert_eq!(
+            field(base().years_to_maturity(-1.0).build()),
+            "maturity_date"
+        );
         assert_eq!(
             field(EquityOptionBuilder::new().years_to_maturity(1.0).build()),
             "payoff"
         );
-        assert_eq!(field(base().barrier_rebate(5.0, false).build()), "barrier_rebate");
+        assert_eq!(
+            field(base().barrier_rebate(5.0, false).build()),
+            "barrier_rebate"
+        );
         // Heston params travel inside the model, so "params missing" is
         // unrepresentable; invalid params are still rejected at build()
         let bad_heston = crate::equity::heston::HestonParams {
-            v0: -0.1, kappa: 2.0, theta: 0.09, vol_of_vol: 0.4, rho: -0.7,
+            v0: -0.1,
+            kappa: 2.0,
+            theta: 0.09,
+            vol_of_vol: 0.4,
+            rho: -0.7,
         };
         assert_eq!(
             field(base().heston(bad_heston).engine(Engine::MonteCarlo).build()),
@@ -1266,7 +1454,10 @@ mod tests {
             .as_any()
             .downcast_ref::<AutocallablePayoff>()
             .expect("autocallable payoff");
-        let times = auto.observation_times.as_ref().expect("schedule must set times");
+        let times = auto
+            .observation_times
+            .as_ref()
+            .expect("schedule must set times");
         assert_eq!(auto.observations, times.len());
         assert!(times.windows(2).all(|w| w[0] < w[1]), "times must increase");
         // the same schedule regenerated must be all NYSE business days
@@ -1280,7 +1471,10 @@ mod tests {
         )
         .unwrap();
         for d in &schedule.dates {
-            assert!(Calendar::UsNyse.is_business_day(*d), "{d} not a business day");
+            assert!(
+                Calendar::UsNyse.is_business_day(*d),
+                "{d} not a business day"
+            );
         }
         // calendar-adjusted observations price close to the equally
         // spaced approximation (same seed, same paths)
@@ -1298,7 +1492,10 @@ mod tests {
         let a = option.npv();
         let b = baseline.npv();
         assert!(a.is_finite() && a > 0.0);
-        assert!((a - b).abs() < 1.0, "dates ~quarterly: {a} vs equally spaced {b}");
+        assert!(
+            (a - b).abs() < 1.0,
+            "dates ~quarterly: {a} vs equally spaced {b}"
+        );
     }
 
     #[test]
@@ -1306,7 +1503,10 @@ mod tests {
         use crate::core::errors::RustyQLibError;
         let field = |r: Result<EquityOption, RustyQLibError>| match r {
             Err(RustyQLibError::InvalidInput { field, .. }) => field,
-            other => panic!("expected InvalidInput, got {:?}", other.map(|_| "an option")),
+            other => panic!(
+                "expected InvalidInput, got {:?}",
+                other.map(|_| "an option")
+            ),
         };
         let base = || {
             EquityOptionBuilder::new()
@@ -1358,7 +1558,10 @@ mod tests {
             .expect("option must build")
     }
 
-    fn put_with_style(style: fn(EquityOptionBuilder) -> EquityOptionBuilder, engine: Engine) -> EquityOption {
+    fn put_with_style(
+        style: fn(EquityOptionBuilder) -> EquityOptionBuilder,
+        engine: Engine,
+    ) -> EquityOption {
         let b = EquityOptionBuilder::new()
             .spot(100.0)
             .strike(100.0)
@@ -1366,7 +1569,11 @@ mod tests {
             .flat_rate(0.05)
             .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap());
-        style(b).vanilla(PutOrCall::Put).engine(engine).build().expect("option must build")
+        style(b)
+            .vanilla(PutOrCall::Put)
+            .engine(engine)
+            .build()
+            .expect("option must build")
     }
 
     fn quarterly_dates() -> Vec<NaiveDate> {
@@ -1402,8 +1609,14 @@ mod tests {
         let monthly_pv = bermudan_put(monthly, Engine::Binomial).npv();
         let eps = 1e-9;
         assert!(euro <= quarterly + eps, "euro {euro} quarterly {quarterly}");
-        assert!(quarterly <= monthly_pv + eps, "quarterly {quarterly} monthly {monthly_pv}");
-        assert!(monthly_pv <= amer + eps, "monthly {monthly_pv} american {amer}");
+        assert!(
+            quarterly <= monthly_pv + eps,
+            "quarterly {quarterly} monthly {monthly_pv}"
+        );
+        assert!(
+            monthly_pv <= amer + eps,
+            "monthly {monthly_pv} american {amer}"
+        );
         // quarterly rights must be worth something on an ITM-prone put
         assert!(quarterly > euro + 1e-4, "quarterly rights must add value");
     }
@@ -1427,7 +1640,9 @@ mod tests {
         let tree = bermudan_put(quarterly_dates(), Engine::Binomial).npv();
         let fd = bermudan_put(quarterly_dates(), Engine::FiniteDifference).npv();
         assert!((tree - fd).abs() < 0.05, "binomial {tree} vs FD {fd}");
-        let mc = bermudan_put(quarterly_dates(), Engine::MonteCarlo).price().unwrap();
+        let mc = bermudan_put(quarterly_dates(), Engine::MonteCarlo)
+            .price()
+            .unwrap();
         let se = mc.std_err.expect("MC std err");
         assert!(
             (mc.pv - tree).abs() < (3.0 * se).max(0.15),
@@ -1464,7 +1679,9 @@ mod tests {
             vec![NaiveDate::from_ymd_opt(2028, 1, 1).unwrap()],
             Engine::Binomial,
         );
-        assert!(matches!(r, Err(RustyQLibError::InvalidInput { field, .. }) if field == "bermudan"));
+        assert!(
+            matches!(r, Err(RustyQLibError::InvalidInput { field, .. }) if field == "bermudan")
+        );
     }
 
     fn bermudan_put_result(
@@ -1503,14 +1720,15 @@ mod tests {
                 .build()
                 .expect("option must build")
         };
-        let reference = bs_price(
-            100.0, 100.0, 0.05, 0.0, 0.3, 1.0, PutOrCall::Call,
-        );
+        let reference = bs_price(100.0, 100.0, 0.05, 0.0, 0.3, 1.0, PutOrCall::Call);
         // Leisen-Reimer at 101 steps beats CRR at 101 steps by an order
         // of magnitude on the same contract
         let lr_err = (build(BinomialTreeType::LeisenReimer, 101).npv() - reference).abs();
         let crr_err = (build(BinomialTreeType::CoxRossRubinstein, 101).npv() - reference).abs();
-        assert!(lr_err * 10.0 < crr_err, "LR err {lr_err} vs CRR err {crr_err}");
+        assert!(
+            lr_err * 10.0 < crr_err,
+            "LR err {lr_err} vs CRR err {crr_err}"
+        );
         // diagnostics agree with the fast engine
         let option = build(BinomialTreeType::LeisenReimer, 101);
         let diag = crate::equity::binomial::npv_with_diagnostics(&option);
@@ -1530,11 +1748,9 @@ mod tests {
             interpolation: InterpolationMethod::LinearZero,
         };
         let build = |term: bool, american: bool| {
-            let curve = YieldCurve::from_input(
-                &curve_input,
-                NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
-            )
-            .unwrap();
+            let curve =
+                YieldCurve::from_input(&curve_input, NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
+                    .unwrap();
             let mut b = EquityOptionBuilder::new()
                 .spot(100.0)
                 .strike(100.0)
@@ -1545,7 +1761,10 @@ mod tests {
             if american {
                 b = b.american();
             }
-            let mut b = b.vanilla(PutOrCall::Put).engine(Engine::Binomial).tree_steps(801);
+            let mut b = b
+                .vanilla(PutOrCall::Put)
+                .engine(Engine::Binomial)
+                .tree_steps(801);
             if term {
                 b = b.tree_term_structure();
             }
@@ -1576,7 +1795,8 @@ mod tests {
             .autocallable(1.0, 0.7, 0.05, 4, 100.0)
             .spot(250.0)
             .engine(Engine::MonteCarlo)
-            .build().expect("option must build");
+            .build()
+            .expect("option must build");
         let payoff = option
             .payoff
             .as_any()

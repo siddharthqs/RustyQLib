@@ -27,10 +27,10 @@
 
 pub mod backtest;
 pub mod ladder;
-pub mod stress;
 pub mod measures;
 pub mod performance;
 pub mod portfolio_risk;
+pub mod stress;
 pub mod volatility;
 
 pub use backtest::{kupiec_pof, KupiecTest};

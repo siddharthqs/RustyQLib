@@ -14,9 +14,11 @@ use crate::core::trade::PutOrCall;
 use crate::core::traits::Instrument;
 use crate::core::utils::ContractStyle;
 use crate::core::vols::VolSurface;
-use crate::equity::montecarlo::{npv_with_stats, MonteCarloConfig};
+use crate::equity::montecarlo::{stats, MonteCarloConfig};
 use crate::equity::utils::{LongShort, Model, PricingEngine};
-use crate::equity::vanilla_option::{EquityMarketData, EquityOption, EquityOptionBase, VanillaPayoff};
+use crate::equity::vanilla_option::{
+    EquityMarketData, EquityOption, EquityOptionBase, VanillaPayoff,
+};
 
 /// Prompt for the terms of a European vanilla option and price it with
 /// the Black-Scholes engine, printing the price and Greeks.
@@ -185,7 +187,8 @@ pub fn monte_carlo_pricing() {
     io::stdin()
         .read_line(&mut expiry)
         .expect("Failed to read line");
-    let future_date = NaiveDate::parse_from_str(&expiry.trim(), "%Y-%m-%d").expect("Invalid date format");
+    let future_date =
+        NaiveDate::parse_from_str(&expiry.trim(), "%Y-%m-%d").expect("Invalid date format");
     println!("Dividend yield on this stock:");
     let mut div = String::new();
     io::stdin()
@@ -244,8 +247,11 @@ pub fn monte_carlo_pricing() {
         model: Model::Gbm,
     };
 
-    let result = npv_with_stats(&equityoption);
-    println!("Theoretical Price ${} (std err {})", result.pv, result.std_err);
+    let result = stats(&equityoption, None);
+    println!(
+        "Theoretical Price ${} (std err {})",
+        result.pv, result.std_err
+    );
     let mut wait = String::new();
     io::stdin()
         .read_line(&mut wait)

@@ -1,22 +1,27 @@
-use std::fs::File;
-use std::fs;
-use std::io::Read;
-use chrono::Local;
-use crate::equity::vanilla_option::{EquityOption};
 use crate::core::traits::Rates;
 use crate::core::utils::{Contract, Contracts};
-use std::io::Write;
-use crate::rates;
-use crate::rates::deposits::Deposit;
-use crate::rates::build_contracts::{build_ir_contracts_from_json, build_term_structure};
-use crate::equity::build_contracts::{build_eq_contracts_from_json};
+use crate::equity::build_contracts::build_eq_contracts_from_json;
 use crate::equity::handle_equity_contracts::handle_equity_contract;
+use crate::equity::vanilla_option::EquityOption;
+use crate::rates;
+use crate::rates::build_contracts::{build_ir_contracts_from_json, build_term_structure};
+use crate::rates::deposits::Deposit;
+use chrono::Local;
+use std::fs;
+use std::fs::File;
+use std::io::Read;
+use std::io::Write;
 
+use crate::core::serialization::{self, Format};
 use rayon::prelude::*;
 use serde_json::Value;
-use crate::core::serialization::{self, Format};
 /// This function saves the output to a file and returns the path to the file.
-pub fn save_to_file<'a>(output_folder: &'a str, subfolder: &'a str, filename: &'a str, output: &'a str) -> String {
+pub fn save_to_file<'a>(
+    output_folder: &'a str,
+    subfolder: &'a str,
+    filename: &'a str,
+    output: &'a str,
+) -> String {
     let mut dir = std::path::PathBuf::from(output_folder);
     if subfolder.len() > 0 {
         dir.push(subfolder);
@@ -27,7 +32,8 @@ pub fn save_to_file<'a>(output_folder: &'a str, subfolder: &'a str, filename: &'
     }
     dir.push(filename);
     let mut file = File::create(&dir).expect("Failed to create file");
-    file.write_all(output.as_bytes()).expect("Failed to write to file");
+    file.write_all(output.as_bytes())
+        .expect("Failed to write to file");
     return dir.as_path().to_str().unwrap().to_string();
 }
 
@@ -41,37 +47,45 @@ pub fn build_curve(file: &mut File, output_filename: &str) -> () {
         .unwrap_or_else(|e| panic!("Failed to read {format:?} curve definition: {e}"));
     if list_contracts.contracts.len() == 0 {
         panic!("No contracts found in JSON file");
-    }
-    else if list_contracts.asset=="EQ"{
+    } else if list_contracts.asset == "EQ" {
         log::info!("building implied volatility surface");
-        let contracts:Vec<Box<EquityOption>> = build_eq_contracts_from_json(list_contracts.contracts);
+        let contracts: Vec<Box<EquityOption>> =
+            build_eq_contracts_from_json(list_contracts.contracts);
         let vol_surface = crate::equity::vol_surface::build_implied_vol_surface(&contracts)
             .expect("Failed to build implied vol surface");
         log::debug!("implied vol surface:\n{}", vol_surface);
         let vol_value = serde_json::to_value(&vol_surface).unwrap();
-        let serialized_vol_surface =
-            serialization::render_value(&vol_value, format, "vol_surface");
+        let serialized_vol_surface = serialization::render_value(&vol_value, format, "vol_surface");
         let filename = format!("vol_surface.{}", format.extension());
-        let out_dir = save_to_file(output_filename, "vol_surface", &filename, &serialized_vol_surface);
+        let out_dir = save_to_file(
+            output_filename,
+            "vol_surface",
+            &filename,
+            &serialized_vol_surface,
+        );
         println!("Volatility surface saved to {}", out_dir);
-    }
-    else if list_contracts.asset=="CO"{
+    } else if list_contracts.asset == "CO" {
         //Todo -build commodity vol surface
         panic!("Commodity contracts not supported");
-    }
-    else if list_contracts.asset=="IR"{
-        let contracts:Vec<Box<dyn Rates>> = build_ir_contracts_from_json(list_contracts.contracts);
+    } else if list_contracts.asset == "IR" {
+        let contracts: Vec<Box<dyn Rates>> = build_ir_contracts_from_json(list_contracts.contracts);
         let ts = build_term_structure(contracts);
         let mut output: String = String::new();
-        for i in 0..ts.date.len(){
-            output.push_str(&format!("{},{},{}\n",ts.date[i],ts.discount_factor[i],ts.rate[i]));
+        for i in 0..ts.date.len() {
+            output.push_str(&format!(
+                "{},{},{}\n",
+                ts.date[i], ts.discount_factor[i], ts.rate[i]
+            ));
         }
 
-        let out_dir = save_to_file(output_filename, "term_structure", "term_structure.csv", &output);
+        let out_dir = save_to_file(
+            output_filename,
+            "term_structure",
+            "term_structure.csv",
+            &output,
+        );
         println!("Term structure saved to {}", out_dir);
-
-    }
-    else{
+    } else {
         panic!("Asset class not supported");
     }
 }
@@ -95,24 +109,25 @@ pub fn parse_contract(file: &mut File, output_filename: &str) {
         return;
     }
     // parallel processing of each contract using rayon
-    let mut output_vec: Vec<_> = list_contracts.contracts.par_iter().enumerate()
-        .map(|(index,data)| (index,process_contract(data)))
+    let mut output_vec: Vec<_> = list_contracts
+        .contracts
+        .par_iter()
+        .enumerate()
+        .map(|(index, data)| (index, process_contract(data)))
         .collect();
     output_vec.sort_by_key(|k| k.0);
 
-    let results: Vec<Value> = output_vec.into_iter().map(|(_,v)| v).collect();
+    let results: Vec<Value> = output_vec.into_iter().map(|(_, v)| v).collect();
     let output_str = serialization::render_results(&results, out_format);
     //Write to file
     let mut file = File::create(output_filename).expect("Failed to create file");
-    file.write_all(output_str.as_bytes()).expect("Failed to write to file");
+    file.write_all(output_str.as_bytes())
+        .expect("Failed to write to file");
 }
 pub fn process_contract(data: &Contract) -> serde_json::Value {
-
-    if data.action=="PV" && data.asset=="EQ"{
+    if data.action == "PV" && data.asset == "EQ" {
         return handle_equity_contract(data);
-
-    }
-    else if data.action=="PV" && data.asset=="IR"{
+    } else if data.action == "PV" && data.asset == "IR" {
         let rate_data = data.rate_data.clone().unwrap();
         let start_date_str = rate_data.start_date; // Only for 0M case
         let maturity_date_str = rate_data.maturity_date;
@@ -128,16 +143,16 @@ pub fn process_contract(data: &Contract) -> serde_json::Value {
             fix_rate: rate_data.fix_rate,
             day_count: rates::utils::DayCountConvention::Act360,
             business_day_adjustment: 0,
-            term_structure: None
+            term_structure: None,
         };
         match rate_data.day_count.as_str() {
-            "Act360" |"A360" => {
+            "Act360" | "A360" => {
                 deposit.day_count = rates::utils::DayCountConvention::Act360;
             }
-            "Act365" |"A365" => {
+            "Act365" | "A365" => {
                 deposit.day_count = rates::utils::DayCountConvention::Act365;
             }
-            "Thirty360" |"30/360" => {
+            "Thirty360" | "30/360" => {
                 deposit.day_count = rates::utils::DayCountConvention::Thirty360;
             }
             _ => {}
@@ -145,8 +160,7 @@ pub fn process_contract(data: &Contract) -> serde_json::Value {
         let df = deposit.get_discount_factor();
         log::debug!("deposit discount factor {:?}", df);
         return serde_json::Value::String("Work in progress".to_string());
-    }
-    else{
+    } else {
         panic!("Invalid action");
     }
 }

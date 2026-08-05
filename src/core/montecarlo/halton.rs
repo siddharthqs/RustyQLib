@@ -11,7 +11,11 @@ fn first_primes(n: usize) -> Vec<u64> {
     let mut primes: Vec<u64> = Vec::with_capacity(n);
     let mut candidate = 2u64;
     while primes.len() < n {
-        if primes.iter().take_while(|&&p| p * p <= candidate).all(|&p| candidate % p != 0) {
+        if primes
+            .iter()
+            .take_while(|&&p| p * p <= candidate)
+            .all(|&p| !candidate.is_multiple_of(p))
+        {
             primes.push(candidate);
         }
         candidate += 1;
@@ -47,8 +51,10 @@ impl QmcSequence {
     pub fn new(dims: usize, seed: u64) -> Self {
         let bases = first_primes(dims);
         let shifts = (0..dims)
-            .map(|d| (splitmix64(seed ^ splitmix64(0xC0FFEE ^ d as u64)) >> 11) as f64
-                / (1u64 << 53) as f64)
+            .map(|d| {
+                (splitmix64(seed ^ splitmix64(0xC0FFEE ^ d as u64)) >> 11) as f64
+                    / (1u64 << 53) as f64
+            })
             .collect();
         QmcSequence { bases, shifts }
     }

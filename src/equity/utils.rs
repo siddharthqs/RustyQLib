@@ -1,13 +1,13 @@
-use serde::Deserialize;
-use std::str::FromStr;
-use std::error::Error;
-use crate::core::trade::{PutOrCall};
-use std::fmt::Debug;
+use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
+use serde::Deserialize;
+use std::error::Error;
+use std::fmt::Debug;
+use std::str::FromStr;
 
 ///Enum for different engines to price options
-#[derive(PartialEq,Clone,Debug)]
-pub enum Engine{
+#[derive(PartialEq, Clone, Debug)]
+pub enum Engine {
     BlackScholes,
     MonteCarlo,
     Binomial,
@@ -106,10 +106,12 @@ impl Model {
                 Ok(Model::LocalVol)
             }
             Some("heston") | Some("Heston") => {
-                let params = heston.ok_or_else(|| RustyQLibError::invalid_input(
-                    "heston",
-                    "heston parameters are required when mc_model = heston",
-                ))?;
+                let params = heston.ok_or_else(|| {
+                    RustyQLibError::invalid_input(
+                        "heston",
+                        "heston parameters are required when mc_model = heston",
+                    )
+                })?;
                 params.validate()?;
                 Ok(Model::Heston(params))
             }
@@ -121,9 +123,9 @@ impl Model {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LongShort{
+pub enum LongShort {
     LONG,
-    SHORT
+    SHORT,
 }
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -136,6 +138,7 @@ pub enum PayoffType {
     Autocallable,
     Lookback,
     Accumulator,
+    Chooser,
 }
 impl FromStr for PayoffType {
     type Err = Box<dyn Error>;
@@ -148,11 +151,11 @@ impl FromStr for PayoffType {
             "forward_start" | "forwardstart" => Ok(PayoffType::ForwardStart),
             "autocallable" | "autocall" => Ok(PayoffType::Autocallable),
             "lookback" => Ok(PayoffType::Lookback),
+            "chooser" => Ok(PayoffType::Chooser),
             _ => Err("Invalid payoff type".into()),
         }
     }
 }
-
 
 /// Common interface linking all payoffs (Vanilla, Binary, Barrier, Asian).
 ///
@@ -203,7 +206,7 @@ pub trait Payoff: Debug + Send + Sync {
 
     fn payoff_kind(&self) -> PayoffType;
     fn put_or_call(&self) -> &PutOrCall;
-    fn exercise_style(&self)->&ContractStyle;
+    fn exercise_style(&self) -> &ContractStyle;
 
     /// Downcast hook so pricers that need payoff-specific details (e.g. the
     /// analytic pricer distinguishing cash- from asset-or-nothing binaries)

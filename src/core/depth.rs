@@ -42,7 +42,11 @@ fn validate_side(levels: &[DepthLevel], side: &str, descending: bool) -> Result<
         }
     }
     let ordered = levels.windows(2).all(|w| {
-        if descending { w[1].price < w[0].price } else { w[1].price > w[0].price }
+        if descending {
+            w[1].price < w[0].price
+        } else {
+            w[1].price > w[0].price
+        }
     });
     if !ordered {
         return Err(RustyQLibError::invalid_input(
@@ -63,7 +67,10 @@ impl MarketDepth {
             if bid.price > ask.price {
                 return Err(RustyQLibError::invalid_input(
                     "market depth",
-                    format!("crossed book: best bid {} > best ask {}", bid.price, ask.price),
+                    format!(
+                        "crossed book: best bid {} > best ask {}",
+                        bid.price, ask.price
+                    ),
                 ));
             }
         }
@@ -96,7 +103,7 @@ impl MarketDepth {
     /// displayed depth cannot fill the quantity (or it is not positive) —
     /// the honest answer, not an extrapolation.
     pub fn vwap_for_size(&self, side: Transection, quantity: f64) -> Option<f64> {
-        if !(quantity > 0.0) || !quantity.is_finite() {
+        if quantity <= 0.0 || !quantity.is_finite() {
             return None;
         }
         let levels = match side {
@@ -148,7 +155,11 @@ mod tests {
     fn book() -> MarketDepth {
         MarketDepth::new(
             vec![level(99.0, 100.0), level(98.5, 200.0), level(98.0, 500.0)],
-            vec![level(101.0, 150.0), level(101.5, 300.0), level(102.0, 400.0)],
+            vec![
+                level(101.0, 150.0),
+                level(101.5, 300.0),
+                level(102.0, 400.0),
+            ],
         )
         .unwrap()
     }
@@ -160,9 +171,7 @@ mod tests {
         // unsorted asks (must be ascending)
         assert!(MarketDepth::new(vec![], vec![level(102.0, 1.0), level(101.0, 1.0)]).is_err());
         // crossed top
-        assert!(
-            MarketDepth::new(vec![level(101.5, 1.0)], vec![level(101.0, 1.0)]).is_err()
-        );
+        assert!(MarketDepth::new(vec![level(101.5, 1.0)], vec![level(101.0, 1.0)]).is_err());
         // non-positive size
         assert!(MarketDepth::new(vec![level(99.0, 0.0)], vec![]).is_err());
         // one-sided and empty books are legal
@@ -197,7 +206,9 @@ mod tests {
         assert_eq!(quote.ask(), Some(101.0));
         assert_eq!(quote.mid(), 100.0);
         match quote {
-            Quote::Sized { bid_size, ask_size, .. } => {
+            Quote::Sized {
+                bid_size, ask_size, ..
+            } => {
                 assert_eq!((bid_size, ask_size), (100.0, 150.0));
             }
             other => panic!("expected a sized quote, got {other:?}"),

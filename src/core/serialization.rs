@@ -29,6 +29,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::core::errors::RustyQLibError;
 #[cfg(feature = "xml")]
 use quick_xml::events::Event;
 #[cfg(feature = "xml")]
@@ -36,7 +37,6 @@ use quick_xml::Reader;
 #[cfg(feature = "xml")]
 use serde_json::Map;
 use serde_json::Value;
-use crate::core::errors::RustyQLibError;
 
 /// Element name that marks array members in XML.
 pub const ARRAY_ITEM: &str = "item";
@@ -91,16 +91,21 @@ impl Format {
 /// Parse a document in either format into a [`Value`].
 pub fn parse_value(content: &str, format: Format) -> Result<Value, RustyQLibError> {
     match format {
-        Format::Json => serde_json::from_str(content).map_err(|e| RustyQLibError::ParseError(format!("invalid JSON: {e}"))),
+        Format::Json => serde_json::from_str(content)
+            .map_err(|e| RustyQLibError::ParseError(format!("invalid JSON: {e}"))),
         #[cfg(feature = "xml")]
         Format::Xml => xml_to_value(content),
     }
 }
 
 /// Parse a document into any deserializable type, in either format.
-pub fn parse<T: serde::de::DeserializeOwned>(content: &str, format: Format) -> Result<T, RustyQLibError> {
+pub fn parse<T: serde::de::DeserializeOwned>(
+    content: &str,
+    format: Format,
+) -> Result<T, RustyQLibError> {
     let value = parse_value(content, format)?;
-    serde_json::from_value(value).map_err(|e| RustyQLibError::ParseError(format!("document does not match the schema: {e}")))
+    serde_json::from_value(value)
+        .map_err(|e| RustyQLibError::ParseError(format!("document does not match the schema: {e}")))
 }
 
 /// Transcode an XML document into the equivalent [`Value`].
@@ -125,16 +130,17 @@ pub fn xml_to_value(xml: &str) -> Result<Value, RustyQLibError> {
             }
             Ok(Event::Text(e)) => {
                 if let Some(node) = stack.last_mut() {
-                    let text = e
-                        .decode()
-                        .map_err(|err| RustyQLibError::ParseError(format!("invalid text content: {err}")))?;
+                    let text = e.decode().map_err(|err| {
+                        RustyQLibError::ParseError(format!("invalid text content: {err}"))
+                    })?;
                     node.text.push_str(text.as_ref());
                 }
             }
             Ok(Event::CData(e)) => {
                 if let Some(node) = stack.last_mut() {
-                    let text = String::from_utf8(e.into_inner().into_owned())
-                        .map_err(|err| RustyQLibError::ParseError(format!("invalid CDATA: {err}")))?;
+                    let text = String::from_utf8(e.into_inner().into_owned()).map_err(|err| {
+                        RustyQLibError::ParseError(format!("invalid CDATA: {err}"))
+                    })?;
                     node.text.push_str(&text);
                 }
             }
@@ -145,17 +151,26 @@ pub fn xml_to_value(xml: &str) -> Result<Value, RustyQLibError> {
                 }
             }
             Ok(Event::End(_)) => {
-                let node = stack.pop().ok_or_else(|| RustyQLibError::ParseError("unbalanced closing tag".to_string()))?;
+                let node = stack.pop().ok_or_else(|| {
+                    RustyQLibError::ParseError("unbalanced closing tag".to_string())
+                })?;
                 let (name, value) = node.finish();
                 attach(&mut stack, &mut root, name, value)?;
             }
             Ok(Event::Eof) => break,
             Ok(_) => {} // declaration, comments, processing instructions
-            Err(e) => return Err(RustyQLibError::ParseError(format!("malformed XML at byte {}: {e}", reader.buffer_position()))),
+            Err(e) => {
+                return Err(RustyQLibError::ParseError(format!(
+                    "malformed XML at byte {}: {e}",
+                    reader.buffer_position()
+                )))
+            }
         }
     }
     if !stack.is_empty() {
-        return Err(RustyQLibError::ParseError("unbalanced XML: unclosed elements".to_string()));
+        return Err(RustyQLibError::ParseError(
+            "unbalanced XML: unclosed elements".to_string(),
+        ));
     }
     match root {
         // the document element is the top-level object
@@ -181,19 +196,36 @@ impl Node {
             .map_err(|err| RustyQLibError::ParseError(format!("invalid element name: {err}")))?;
         let mut attrs = Vec::new();
         for attr in e.attributes() {
-            let attr = attr.map_err(|err| RustyQLibError::ParseError(format!("invalid attribute in <{name}>: {err}")))?;
-            let key = String::from_utf8(attr.key.as_ref().to_vec())
-                .map_err(|err| RustyQLibError::ParseError(format!("invalid attribute name: {err}")))?;
+            let attr = attr.map_err(|err| {
+                RustyQLibError::ParseError(format!("invalid attribute in <{name}>: {err}"))
+            })?;
+            let key = String::from_utf8(attr.key.as_ref().to_vec()).map_err(|err| {
+                RustyQLibError::ParseError(format!("invalid attribute name: {err}"))
+            })?;
             let raw = attr
                 .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                .map_err(|err| RustyQLibError::ParseError(format!("invalid attribute value in <{name}>: {err}")))?;
+                .map_err(|err| {
+                    RustyQLibError::ParseError(format!(
+                        "invalid attribute value in <{name}>: {err}"
+                    ))
+                })?;
             attrs.push((key, infer_scalar(raw.as_ref())));
         }
-        Ok(Node { name, attrs, children: Vec::new(), text: String::new() })
+        Ok(Node {
+            name,
+            attrs,
+            children: Vec::new(),
+            text: String::new(),
+        })
     }
 
     fn finish(self) -> (String, Value) {
-        let Node { name, attrs, children, text } = self;
+        let Node {
+            name,
+            attrs,
+            children,
+            text,
+        } = self;
 
         // an element whose children are all <item> is an array
         if !children.is_empty() && children.iter().all(|(n, _)| n == ARRAY_ITEM) {
@@ -234,11 +266,17 @@ fn resolve_entity(e: &quick_xml::events::BytesRef) -> Result<String, RustyQLibEr
     if e.is_char_ref() {
         return match e.resolve_char_ref() {
             Ok(Some(c)) => Ok(c.to_string()),
-            Ok(None) => Err(RustyQLibError::ParseError("unresolvable character reference".to_string())),
-            Err(err) => Err(RustyQLibError::ParseError(format!("invalid character reference: {err}"))),
+            Ok(None) => Err(RustyQLibError::ParseError(
+                "unresolvable character reference".to_string(),
+            )),
+            Err(err) => Err(RustyQLibError::ParseError(format!(
+                "invalid character reference: {err}"
+            ))),
         };
     }
-    let name = e.decode().map_err(|err| RustyQLibError::ParseError(format!("invalid entity reference: {err}")))?;
+    let name = e
+        .decode()
+        .map_err(|err| RustyQLibError::ParseError(format!("invalid entity reference: {err}")))?;
     match name.as_ref() {
         "amp" => Ok("&".to_string()),
         "lt" => Ok("<".to_string()),
@@ -265,7 +303,9 @@ fn attach(
         }
         None => {
             if root.is_some() {
-                return Err(RustyQLibError::ParseError("XML documents must have a single root element".to_string()));
+                return Err(RustyQLibError::ParseError(
+                    "XML documents must have a single root element".to_string(),
+                ));
             }
             *root = Some((name, value));
             Ok(())
@@ -456,7 +496,10 @@ mod tests {
             r#"<curve type="flat"><rate>0.05</rate><day_count>Act365</day_count></curve>"#,
         )
         .unwrap();
-        assert_eq!(value, json!({"type": "flat", "rate": 0.05, "day_count": "Act365"}));
+        assert_eq!(
+            value,
+            json!({"type": "flat", "rate": 0.05, "day_count": "Act365"})
+        );
     }
 
     #[test]
@@ -473,7 +516,10 @@ mod tests {
     fn nested_arrays_round_trip() {
         let xml = "<vols><item><item>0.32</item><item>0.30</item></item>\
                    <item><item>0.33</item><item>0.31</item></item></vols>";
-        assert_eq!(xml_to_value(xml).unwrap(), json!([[0.32, 0.30], [0.33, 0.31]]));
+        assert_eq!(
+            xml_to_value(xml).unwrap(),
+            json!([[0.32, 0.30], [0.33, 0.31]])
+        );
     }
 
     #[test]
@@ -546,7 +592,8 @@ mod tests {
     #[test]
     #[cfg(feature = "xml")]
     fn rendered_output_is_valid_in_both_formats() {
-        let results = vec![json!({"contract": {"action": "PV", "skip": null}, "output": {"pv": 1.5}})];
+        let results =
+            vec![json!({"contract": {"action": "PV", "skip": null}, "output": {"pv": 1.5}})];
         let as_json: Value = serde_json::from_str(&render_results(&results, Format::Json)).unwrap();
         let as_xml = xml_to_value(&render_results(&results, Format::Xml)).unwrap();
         assert_eq!(as_json, as_xml, "both formats must carry the same data");

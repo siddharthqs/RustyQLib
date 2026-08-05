@@ -3,7 +3,7 @@
 //! workhorse (Heston, SABR, Nelson-Siegel, curve and surface fits).
 
 use super::numerics::{norm_inf, numeric_jacobian, solve_dense};
-use super::{OptimConfig, OptimResult};
+use super::{JacobianFn, OptimConfig, OptimResult, VectorFn};
 
 /// Minimize the sum of squared residuals from `x0`.
 ///
@@ -15,8 +15,8 @@ use super::{OptimConfig, OptimResult};
 /// differences when absent. `OptimResult::value` is the sum of squares.
 pub fn levenberg_marquardt(
     cfg: &OptimConfig,
-    residuals: &dyn Fn(&[f64]) -> Vec<f64>,
-    jacobian: Option<&dyn Fn(&[f64]) -> Vec<Vec<f64>>>,
+    residuals: VectorFn,
+    jacobian: Option<JacobianFn>,
     x0: &[f64],
 ) -> OptimResult {
     let jac_of = |x: &[f64]| match jacobian {
@@ -43,13 +43,20 @@ pub fn levenberg_marquardt(
                 }
             }
         }
+        // mirror the upper triangle: plain subscripts read best
+        #[allow(clippy::needless_range_loop)]
         for j in 0..n {
             for k in 0..j {
                 a[j][k] = a[k][j];
             }
         }
         if norm_inf(&g) <= cfg.tol {
-            return OptimResult { x, value: cost, iterations: it, converged: true };
+            return OptimResult {
+                x,
+                value: cost,
+                iterations: it,
+                converged: true,
+            };
         }
 
         // try damped steps, growing lambda until one reduces the cost
@@ -76,17 +83,32 @@ pub fn levenberg_marquardt(
                 accepted = true;
                 // converged when the improvement stalls
                 if improvement <= cfg.tol * (1.0 + cost) {
-                    return OptimResult { x, value: cost, iterations: it + 1, converged: true };
+                    return OptimResult {
+                        x,
+                        value: cost,
+                        iterations: it + 1,
+                        converged: true,
+                    };
                 }
                 break;
             }
             lambda = (lambda * 10.0).min(1e12);
         }
         if !accepted {
-            return OptimResult { x, value: cost, iterations: it, converged: false };
+            return OptimResult {
+                x,
+                value: cost,
+                iterations: it,
+                converged: false,
+            };
         }
     }
-    OptimResult { x, value: cost, iterations: cfg.max_iter, converged: false }
+    OptimResult {
+        x,
+        value: cost,
+        iterations: cfg.max_iter,
+        converged: false,
+    }
 }
 
 #[cfg(test)]
@@ -99,11 +121,23 @@ mod tests {
         let ts: Vec<f64> = (0..12).map(|i| i as f64 * 0.25).collect();
         let data: Vec<f64> = ts.iter().map(|t| 2.0 * (-1.3 * t).exp()).collect();
         let residuals = move |p: &[f64]| -> Vec<f64> {
-            ts.iter().zip(&data).map(|(t, y)| p[0] * (p[1] * t).exp() - y).collect()
+            ts.iter()
+                .zip(&data)
+                .map(|(t, y)| p[0] * (p[1] * t).exp() - y)
+                .collect()
         };
-        let r = levenberg_marquardt(&OptimConfig::new(1e-14, 200), &residuals, None, &[1.0, -0.5]);
+        let r = levenberg_marquardt(
+            &OptimConfig::new(1e-14, 200),
+            &residuals,
+            None,
+            &[1.0, -0.5],
+        );
         assert!(r.converged, "{r:?}");
-        assert!((r.x[0] - 2.0).abs() < 1e-6 && (r.x[1] + 1.3).abs() < 1e-6, "{:?}", r.x);
+        assert!(
+            (r.x[0] - 2.0).abs() < 1e-6 && (r.x[1] + 1.3).abs() < 1e-6,
+            "{:?}",
+            r.x
+        );
     }
 
     #[test]
@@ -113,13 +147,23 @@ mod tests {
         let res = {
             let (ts, data) = (ts.clone(), data.clone());
             move |p: &[f64]| -> Vec<f64> {
-                ts.iter().zip(&data).map(|(t, y)| p[0] * (p[1] * t).exp() - y).collect()
+                ts.iter()
+                    .zip(&data)
+                    .map(|(t, y)| p[0] * (p[1] * t).exp() - y)
+                    .collect()
             }
         };
         let jac = move |p: &[f64]| -> Vec<Vec<f64>> {
-            ts.iter().map(|t| vec![(p[1] * t).exp(), p[0] * t * (p[1] * t).exp()]).collect()
+            ts.iter()
+                .map(|t| vec![(p[1] * t).exp(), p[0] * t * (p[1] * t).exp()])
+                .collect()
         };
-        let with = levenberg_marquardt(&OptimConfig::new(1e-14, 200), &res, Some(&jac), &[1.0, -0.4]);
+        let with = levenberg_marquardt(
+            &OptimConfig::new(1e-14, 200),
+            &res,
+            Some(&jac),
+            &[1.0, -0.4],
+        );
         let without = levenberg_marquardt(&OptimConfig::new(1e-14, 200), &res, None, &[1.0, -0.4]);
         assert!(with.converged && without.converged);
         assert!((with.x[0] - without.x[0]).abs() < 1e-6);
@@ -131,10 +175,18 @@ mod tests {
         // fit y = c0 + c1 t to 5 points: LM must find the least-squares line
         let ts = [0.0, 1.0, 2.0, 3.0, 4.0];
         let ys = [1.1, 1.9, 3.2, 3.8, 5.1];
-        let residuals =
-            move |p: &[f64]| -> Vec<f64> { ts.iter().zip(&ys).map(|(t, y)| p[0] + p[1] * t - y).collect() };
+        let residuals = move |p: &[f64]| -> Vec<f64> {
+            ts.iter()
+                .zip(&ys)
+                .map(|(t, y)| p[0] + p[1] * t - y)
+                .collect()
+        };
         let r = levenberg_marquardt(&OptimConfig::new(1e-14, 100), &residuals, None, &[0.0, 0.0]);
         // closed form: slope 0.99, intercept 1.04
-        assert!((r.x[0] - 1.04).abs() < 1e-6 && (r.x[1] - 0.99).abs() < 1e-6, "{:?}", r.x);
+        assert!(
+            (r.x[0] - 1.04).abs() < 1e-6 && (r.x[1] - 0.99).abs() < 1e-6,
+            "{:?}",
+            r.x
+        );
     }
 }

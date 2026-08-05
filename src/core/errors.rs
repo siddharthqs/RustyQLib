@@ -32,7 +32,9 @@ pub enum RustyQLibError {
 
     /// An iterative calibration or root search terminated without meeting
     /// its convergence criterion.
-    #[error("calibration failed after {iterations} iterations (residual {residual:.6e}): {reason}")]
+    #[error(
+        "calibration failed after {iterations} iterations (residual {residual:.6e}): {reason}"
+    )]
     CalibrationFailed {
         /// Iterations performed before giving up.
         iterations: usize,
@@ -76,6 +78,9 @@ impl From<crate::core::curves::CurveError> for RustyQLibError {
 impl RustyQLibError {
     /// Convenience constructor for [`RustyQLibError::InvalidInput`].
     pub fn invalid_input(field: impl Into<String>, reason: impl Into<String>) -> Self {
-        RustyQLibError::InvalidInput { field: field.into(), reason: reason.into() }
+        RustyQLibError::InvalidInput {
+            field: field.into(),
+            reason: reason.into(),
+        }
     }
 }

@@ -5,15 +5,15 @@
 mod common;
 
 use chrono::NaiveDate;
+use rustyqlib::core::curves::Tenor;
+use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::core::traits::Instrument;
+use rustyqlib::core::vols::VolSurface;
 use rustyqlib::equity::barrier::{barrier_price, BarrierDirection, KnockType};
 use rustyqlib::equity::builder::EquityOptionBuilder;
-use rustyqlib::equity::utils::Model;
 use rustyqlib::equity::utils::Engine;
-use rustyqlib::core::vols::VolSurface;
-use rustyqlib::core::daycount::DayCountConvention;
-use rustyqlib::core::curves::Tenor;
+use rustyqlib::equity::utils::Model;
 
 const SPOT: f64 = 100.0;
 const STRIKE: f64 = 100.0;
@@ -44,7 +44,12 @@ fn main() {
     common::table_header();
     for (dir, knock, pc, level) in [
         (BarrierDirection::Down, KnockType::In, PutOrCall::Call, 90.0),
-        (BarrierDirection::Down, KnockType::Out, PutOrCall::Call, 90.0),
+        (
+            BarrierDirection::Down,
+            KnockType::Out,
+            PutOrCall::Call,
+            90.0,
+        ),
         (BarrierDirection::Down, KnockType::In, PutOrCall::Put, 90.0),
         (BarrierDirection::Down, KnockType::Out, PutOrCall::Put, 90.0),
         (BarrierDirection::Up, KnockType::In, PutOrCall::Call, 120.0),
@@ -54,7 +59,11 @@ fn main() {
     ] {
         common::row(
             &format!("{dir:?}-and-{knock:?} {pc:?} H={level}"),
-            &base().barrier(pc, dir, knock, level).engine(Engine::BlackScholes).build().expect("option must build"),
+            &base()
+                .barrier(pc, dir, knock, level)
+                .engine(Engine::BlackScholes)
+                .build()
+                .expect("option must build"),
         );
     }
 
@@ -69,24 +78,47 @@ fn main() {
         common::row_or_refusal(
             label,
             base()
-                .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 90.0)
+                .barrier(
+                    PutOrCall::Call,
+                    BarrierDirection::Down,
+                    KnockType::Out,
+                    90.0,
+                )
                 .engine(engine)
                 .build(),
         );
     }
-    common::note("MC applies a bridge crossing correction, so monitoring is effectively continuous");
+    common::note(
+        "MC applies a bridge crossing correction, so monitoring is effectively continuous",
+    );
 
     common::section("In-out parity: KI + KO = vanilla");
-    let vanilla = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build");
+    let vanilla = base()
+        .vanilla(PutOrCall::Call)
+        .engine(Engine::BlackScholes)
+        .build()
+        .expect("option must build");
     for level in [80.0, 90.0, 99.0] {
         let ki = base()
-            .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::In, level)
+            .barrier(
+                PutOrCall::Call,
+                BarrierDirection::Down,
+                KnockType::In,
+                level,
+            )
             .engine(Engine::BlackScholes)
-            .build().expect("option must build");
+            .build()
+            .expect("option must build");
         let ko = base()
-            .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, level)
+            .barrier(
+                PutOrCall::Call,
+                BarrierDirection::Down,
+                KnockType::Out,
+                level,
+            )
             .engine(Engine::BlackScholes)
-            .build().expect("option must build");
+            .build()
+            .expect("option must build");
         common::check(
             &format!("H={level}: KI + KO"),
             ki.npv() + ko.npv(),
@@ -98,22 +130,50 @@ fn main() {
     common::section("Limits");
     common::check(
         "far barrier: KO call -> vanilla",
-        barrier_price(SPOT, STRIKE, 1e-4, RATE, DIV, VOL, 1.0, BarrierDirection::Down, KnockType::Out, PutOrCall::Call),
+        barrier_price(
+            SPOT,
+            STRIKE,
+            1e-4,
+            RATE,
+            DIV,
+            VOL,
+            1.0,
+            BarrierDirection::Down,
+            KnockType::Out,
+            PutOrCall::Call,
+        ),
         vanilla.npv(),
         1e-9,
     );
     common::check(
         "up-and-out call with K >= H is worthless",
-        barrier_price(SPOT, 110.0, 105.0, RATE, DIV, VOL, 1.0, BarrierDirection::Up, KnockType::Out, PutOrCall::Call),
+        barrier_price(
+            SPOT,
+            110.0,
+            105.0,
+            RATE,
+            DIV,
+            VOL,
+            1.0,
+            BarrierDirection::Up,
+            KnockType::Out,
+            PutOrCall::Call,
+        ),
         0.0,
         1e-12,
     );
     common::check(
         "spot at barrier: KO = 0",
         base()
-            .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, SPOT)
+            .barrier(
+                PutOrCall::Call,
+                BarrierDirection::Down,
+                KnockType::Out,
+                SPOT,
+            )
             .engine(Engine::BlackScholes)
-            .build().expect("option must build")
+            .build()
+            .expect("option must build")
             .npv(),
         0.0,
         1e-12,
@@ -125,16 +185,26 @@ fn main() {
         common::row(
             &format!("H={level}"),
             &base()
-                .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, level)
+                .barrier(
+                    PutOrCall::Call,
+                    BarrierDirection::Down,
+                    KnockType::Out,
+                    level,
+                )
                 .engine(Engine::BlackScholes)
-                .build().expect("option must build"),
+                .build()
+                .expect("option must build"),
         );
     }
     common::note("value decreases as the barrier approaches spot; delta can exceed 1 near it");
 
     common::section("Smile matters: down-and-out call under local vol");
     let skewed = VolSurface::from_strike_grid(
-        &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0), Tenor::YearFraction(2.0)],
+        &[
+            Tenor::YearFraction(0.5),
+            Tenor::YearFraction(1.0),
+            Tenor::YearFraction(2.0),
+        ],
         &[70.0, 85.0, 100.0, 115.0, 130.0],
         &[
             vec![0.38, 0.34, 0.30, 0.28, 0.27],
@@ -149,20 +219,32 @@ fn main() {
     common::row(
         "GBM (flat 30%)",
         &base()
-            .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 90.0)
+            .barrier(
+                PutOrCall::Call,
+                BarrierDirection::Down,
+                KnockType::Out,
+                90.0,
+            )
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row(
         "Local vol (skewed surface)",
         &base()
             .vol_surface(skewed)
-            .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 90.0)
+            .barrier(
+                PutOrCall::Call,
+                BarrierDirection::Down,
+                KnockType::Out,
+                90.0,
+            )
             .engine(Engine::MonteCarlo)
             .model(Model::LocalVol)
             .paths(50_000)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::note("downside skew raises the knock-out probability, lowering the price");
     println!();

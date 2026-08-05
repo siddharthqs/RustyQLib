@@ -1,38 +1,38 @@
-pub mod asian;
-pub mod autocallable;
-pub mod barrier;
-pub mod black76;
-pub mod blackscholes;
+//! Equity derivatives: contracts, pricing engines, models, and the
+//! shared spine that binds them.
+//!
+//! - [`contracts`] — what you can trade (payoffs and product logic)
+//! - [`engines`] — how it gets priced (numerical and analytic methods)
+//! - [`models`] — dynamics and volatility structure
+//! - [`service`] — JSON batch entry points
+//! - top level — the cross-cutting spine: [`market`], [`builder`],
+//!   [`greeks`], [`portfolio`], [`utils`]
+//!
+//! Every submodule is also re-exported at this level, so the historical
+//! flat paths (`equity::vanilla_option`, `equity::montecarlo`, …) keep
+//! working unchanged.
+
 pub mod builder;
+pub mod bump;
 pub mod greeks;
-pub mod heston;
-pub mod heston_adi;
-pub mod local_vol;
 pub mod market;
-pub mod cos;
-pub mod rainbow;
-pub mod vanilla_option;
-pub mod montecarlo;
-pub mod processes;
-pub mod forward_start_option;
-pub mod utils;
-pub mod binomial;
-pub mod build_contracts;
-pub mod vol_surface;
-pub mod finite_difference;
-pub mod binary_option;
-pub mod equity_future;
-pub mod handle_equity_contracts;
-pub mod equity_forward;
 pub mod portfolio;
-pub mod baw;
-pub mod bjerksund_stensland;
-pub mod perpetual;
-pub mod svi;
-pub mod bates;
-pub mod slv;
-pub mod cliquet;
-pub mod lookback;
-pub mod worst_of;
-pub mod accumulator;
-pub mod variance_swap;
+pub mod utils;
+
+pub mod contracts;
+pub mod engines;
+pub mod models;
+pub mod service;
+
+// Flat-path compatibility re-exports.
+pub use contracts::{
+    accumulator, asian, autocallable, barrier, binary_option, chooser, cliquet, equity_forward,
+    equity_future, equity_option, forward_start_option, lookback, perpetual, rainbow,
+    vanilla_option, variance_swap, worst_of,
+};
+pub use engines::{
+    baw, binomial, bjerksund_stensland, black76, blackscholes, cos, finite_difference, heston_adi,
+    montecarlo,
+};
+pub use models::{bates, heston, local_vol, processes, slv, svi, vol_surface};
+pub use service::{build_contracts, handle_equity_contracts};

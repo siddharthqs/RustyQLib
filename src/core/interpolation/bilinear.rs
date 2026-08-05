@@ -17,15 +17,28 @@ pub struct BilinearGrid {
 impl BilinearGrid {
     pub fn new(xs: &[f64], ys: &[f64], z: &[Vec<f64>]) -> Result<Self, RustyQLibError> {
         if xs.len() < 2 || ys.len() < 2 {
-            return Err(RustyQLibError::invalid_input("bilinear", "need at least a 2 x 2 grid"));
+            return Err(RustyQLibError::invalid_input(
+                "bilinear",
+                "need at least a 2 x 2 grid",
+            ));
         }
         if xs.windows(2).any(|w| w[1] <= w[0]) || ys.windows(2).any(|w| w[1] <= w[0]) {
-            return Err(RustyQLibError::invalid_input("bilinear", "grid axes must be strictly increasing"));
+            return Err(RustyQLibError::invalid_input(
+                "bilinear",
+                "grid axes must be strictly increasing",
+            ));
         }
         if z.len() != xs.len() || z.iter().any(|row| row.len() != ys.len()) {
-            return Err(RustyQLibError::invalid_input("bilinear", "z must be an xs.len() x ys.len() matrix"));
+            return Err(RustyQLibError::invalid_input(
+                "bilinear",
+                "z must be an xs.len() x ys.len() matrix",
+            ));
         }
-        Ok(BilinearGrid { xs: xs.to_vec(), ys: ys.to_vec(), z: z.to_vec() })
+        Ok(BilinearGrid {
+            xs: xs.to_vec(),
+            ys: ys.to_vec(),
+            z: z.to_vec(),
+        })
     }
 
     pub fn eval(&self, x: f64, y: f64) -> f64 {
@@ -52,8 +65,10 @@ mod tests {
         let f = |x: f64, y: f64| 2.0 + 3.0 * x + 4.0 * y + 5.0 * x * y;
         let xs = [0.0, 0.7, 1.5, 3.0];
         let ys = [-1.0, 0.5, 2.0];
-        let z: Vec<Vec<f64>> =
-            xs.iter().map(|&x| ys.iter().map(|&y| f(x, y)).collect()).collect();
+        let z: Vec<Vec<f64>> = xs
+            .iter()
+            .map(|&x| ys.iter().map(|&y| f(x, y)).collect())
+            .collect();
         let grid = BilinearGrid::new(&xs, &ys, &z).unwrap();
         for i in 0..=30 {
             for j in 0..=30 {
@@ -65,12 +80,8 @@ mod tests {
 
     #[test]
     fn clamps_outside_the_grid() {
-        let grid = BilinearGrid::new(
-            &[0.0, 1.0],
-            &[0.0, 1.0],
-            &[vec![1.0, 2.0], vec![3.0, 4.0]],
-        )
-        .unwrap();
+        let grid =
+            BilinearGrid::new(&[0.0, 1.0], &[0.0, 1.0], &[vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
         assert_eq!(grid.eval(-5.0, -5.0), 1.0);
         assert_eq!(grid.eval(9.0, 9.0), 4.0);
         assert_eq!(grid.eval(0.5, -3.0), 2.0); // clamped in y only

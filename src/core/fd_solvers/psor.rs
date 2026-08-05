@@ -25,6 +25,9 @@ pub struct PsorResult {
 /// Convergence requires the usual SOR conditions (diagonally dominant or
 /// symmetric positive definite `A`), which theta-scheme matrices satisfy.
 /// The iteration stops when the largest update falls below `tol`.
+// LAPACK-style solver signature: three matrix bands, rhs, two obstacles
+// and iteration controls — a parameter struct would only rename them
+#[allow(clippy::too_many_arguments)]
 pub fn psor(
     a: &[f64],
     b: &[f64],
@@ -68,10 +71,18 @@ pub fn psor(
             x[i] = xi;
         }
         if max_update <= tol {
-            return PsorResult { x, iterations: it, converged: true };
+            return PsorResult {
+                x,
+                iterations: it,
+                converged: true,
+            };
         }
     }
-    PsorResult { x, iterations: max_iter, converged: false }
+    PsorResult {
+        x,
+        iterations: max_iter,
+        converged: false,
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +134,12 @@ mod tests {
         let cap = [2.0, 2.0, 2.0];
         let r = psor(&A, &B, &C, &D, Some(&floor), Some(&cap), 1.2, 1e-13, 10_000);
         assert!(r.converged);
-        assert!(r.x.iter().all(|&v| v >= 1.0 - 1e-12 && v <= 2.0 + 1e-12), "{:?}", r.x);
+        assert!(
+            r.x.iter()
+                .all(|&v| (1.0 - 1e-12..=2.0 + 1e-12).contains(&v)),
+            "{:?}",
+            r.x
+        );
         // the cap actually binds somewhere (the free solution exceeds 2)
         let free = thomas_algorithm(&A, &B, &C, &D);
         assert!(free.iter().any(|&v| v > 2.0));

@@ -18,7 +18,11 @@ impl BrownianBridge {
     pub fn new(steps: usize, dt: f64) -> Self {
         assert!(steps >= 1);
         let t_at = |i: usize| {
-            if i == usize::MAX { 0.0 } else { (i + 1) as f64 * dt }
+            if i == usize::MAX {
+                0.0
+            } else {
+                (i + 1) as f64 * dt
+            }
         };
         let mut plan = Vec::with_capacity(steps.saturating_sub(1));
         let mut queue = std::collections::VecDeque::new();
@@ -37,7 +41,11 @@ impl BrownianBridge {
             queue.push_back((l, mid));
             queue.push_back((mid, r));
         }
-        BrownianBridge { steps, sqrt_t: (steps as f64 * dt).sqrt(), plan }
+        BrownianBridge {
+            steps,
+            sqrt_t: (steps as f64 * dt).sqrt(),
+            plan,
+        }
     }
 
     /// Consume `steps` standard normals, produce `steps` Brownian increments.
@@ -84,7 +92,10 @@ mod tests {
         }
         for (i, s) in sum_sq.iter().enumerate() {
             let var = s / n as f64;
-            assert!((var - dt).abs() < 0.02 * dt.max(0.001), "step {i}: var {var} vs {dt}");
+            assert!(
+                (var - dt).abs() < 0.02 * dt.max(0.001),
+                "step {i}: var {var} vs {dt}"
+            );
         }
     }
 }

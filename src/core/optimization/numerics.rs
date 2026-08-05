@@ -38,6 +38,9 @@ pub(crate) fn numeric_jacobian(r: &dyn Fn(&[f64]) -> Vec<f64>, x: &[f64]) -> Vec
 
 /// Solve the small dense system `A x = b` by Gaussian elimination with
 /// partial pivoting (calibrations have a handful of parameters).
+// elimination runs over `a[i][j]` subscripts; iterator forms would
+// obscure the math
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Option<Vec<f64>> {
     let n = b.len();
     for k in 0..n {

@@ -51,7 +51,11 @@ put-call parity, replication identities and cross-engine agreement in the test s
 - **Payoffs**: European & American vanillas, cash- and asset-or-nothing binaries,
   all eight barrier types (knock-in/out, up/down) with **rebates** (at hit or
   at expiry) and **double-barrier corridors** (Ikeda-Kunitomo), Asian options (arithmetic /
-  geometric, fixed / floating strike), forward-start options, autocallable
+  geometric, fixed / floating strike), forward-start options, **chooser
+  options** (holder picks call or put at the choice date; simple choosers
+  by the Rubinstein parity decomposition, complex choosers — per-leg
+  strikes and expiries — by critical-spot solve plus bivariate normals),
+  autocallable
   notes with coupons and knock-in protection (incl. **Phoenix certificates**
   with conditional and memory coupons), **lookback options** (floating and
   fixed strike, Goldman-Sosin-Gatto / Conze-Viswanathan closed forms),
@@ -83,6 +87,7 @@ put-call parity, replication identities and cross-engine agreement in the test s
 | Double barrier (knock-in / knock-out corridor) | Ikeda-Kunitomo image series | — | — | discrete corridor monitoring |
 | Asian (arith / geo, fixed / floating) | Turnbull-Wakeman (fixed + Henderson-Wojakowski average-strike) / exact geometric (fixed + average-strike) | — | — | geometric control variate |
 | Forward-start | Rubinstein (BS) | — | — | yes (incl. Heston forward smile) |
+| Chooser (pick call or put at the choice date; simple or per-leg strikes/expiries) | Rubinstein: parity decomposition (simple) / critical-spot + bivariate normal (complex) | — | — | — |
 | Autocallable / Phoenix (conditional + memory coupons) | — | — | — | multi-date discounting; GBM / local vol / Heston |
 | Rainbow (best/worst-of, spread, basket, exchange) | Margrabe / Kirk / moment matching | — | — | correlated terminal GBM |
 | Accumulator / decumulator (geared, knock-out) | strip of Reiner-Rubinstein knock-out pairs | — | — | discrete daily knockout |
@@ -284,7 +289,7 @@ Selected fields (all optional unless noted):
 |---|---|
 | `valuation_date` | pricing as-of date `YYYY-MM-DD`; defaults to today — set it for reproducible pricing and historical re-marking |
 | `pricer` | `Analytical`, `Binomial`, `FD`, `MC`, `BAW`, `BS2002` (analytic American) |
-| `payoff_type` | `vanilla`, `binary`, `barrier`, `asian`, `forward_start`, `autocallable` |
+| `payoff_type` | `vanilla`, `binary`, `barrier`, `asian`, `forward_start`, `autocallable`, `lookback`, `chooser` |
 | `exercise_style` | `European` (default), `American`, `Bermudan` (needs `exercise_dates`) |
 | `exercise_dates` | Bermudan exercise dates `["YYYY-MM-DD", ...]`, strictly increasing; expiry is always exercisable |
 | `binary_type`, `cash_amount` | `cash` / `asset`, cash paid when ITM |
@@ -292,6 +297,8 @@ Selected fields (all optional unless noted):
 | `averaging_type`, `asian_strike_type` | `arithmetic`/`geometric`, `fixed`/`floating` |
 | `rainbow_type`, `assets`, `correlations`, `weights` | rainbow options: `best_of`, `worst_of`, `spread`, `basket`, `exchange` |
 | `forward_start_date`, `strike_fraction` | forward-start options |
+| `choice_date` | chooser options (date the holder picks call or put) |
+| `chooser_call_strike`, `chooser_put_strike`, `chooser_call_expiry`, `chooser_put_expiry` | complex chooser legs; absent fields default to `strike_price` / `maturity` |
 | `autocall_barrier`, `protection_barrier`, `autocall_coupon`, `autocall_observations`, `notional` | autocallable notes |
 | `borrow_cost` | continuous stock borrow (repo) cost, part of the carry |
 | `futures_settlement` | option on a future (Black-76): `discounted` (standard) or `margined` (futures-style); `underlying_price` is then the futures price |

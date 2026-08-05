@@ -151,7 +151,11 @@ impl Clone for Market {
     fn clone(&self) -> Self {
         Market {
             valuation_date: self.valuation_date,
-            stores: self.stores.iter().map(|(&id, s)| (id, s.clone_box())).collect(),
+            stores: self
+                .stores
+                .iter()
+                .map(|(&id, s)| (id, s.clone_box()))
+                .collect(),
         }
     }
 }
@@ -167,7 +171,10 @@ impl Debug for Market {
 
 impl Market {
     pub fn new(valuation_date: NaiveDate) -> Self {
-        Market { valuation_date, stores: HashMap::new() }
+        Market {
+            valuation_date,
+            stores: HashMap::new(),
+        }
     }
 
     pub fn valuation_date(&self) -> NaiveDate {
@@ -206,7 +213,9 @@ impl Market {
     /// the key (e.g. `Spot("ACME")`).
     pub fn get<K: MarketKey>(&self, key: &K) -> Result<&K::Value> {
         self.try_get(key)
-            .ok_or_else(|| RustyQLibError::MissingMarketData { key: format!("{key:?}") })
+            .ok_or_else(|| RustyQLibError::MissingMarketData {
+                key: format!("{key:?}"),
+            })
     }
 
     pub fn contains<K: MarketKey>(&self, key: &K) -> bool {
@@ -392,20 +401,32 @@ impl Market {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::daycount::DayCountConvention;
     use crate::core::curves::Compounding;
+    use crate::core::daycount::DayCountConvention;
 
     fn date() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()
     }
 
     fn shock(factor: RiskFactor, mode: BumpMode, size: f64) -> Shock {
-        Shock { factor, mode, size, underlying: None, tenors: None, shifts: None }
+        Shock {
+            factor,
+            mode,
+            size,
+            underlying: None,
+            tenors: None,
+            shifts: None,
+        }
     }
 
     fn sample_market() -> Market {
-        let curve = YieldCurve::flat(0.03, date(), DayCountConvention::Act365, Compounding::Continuous)
-            .expect("curve must build");
+        let curve = YieldCurve::flat(
+            0.03,
+            date(),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+        )
+        .expect("curve must build");
         let surf = VolSurface::flat(0.25, date(), DayCountConvention::Act365).expect("surface");
         Market::new(date())
             .with(Spot("ACME".into()), Quote::new(100.0))
@@ -420,7 +441,10 @@ mod tests {
         assert_eq!(market.get(&Spot("ACME".into())).unwrap().value(), 100.0);
         assert_eq!(market.get(&Spot("ZENO".into())).unwrap().value(), 50.0);
         // the Vol lookup statically returns a VolSurface — vol() is callable
-        let sigma = market.get(&Vol("ACME".into())).unwrap().vol(100.0, 100.0, 1.0);
+        let sigma = market
+            .get(&Vol("ACME".into()))
+            .unwrap()
+            .vol(100.0, 100.0, 1.0);
         assert!((sigma - 0.25).abs() < 1e-12);
         assert_eq!(market.len(), 4);
     }
@@ -431,7 +455,10 @@ mod tests {
         // "ACME" exists as a Spot key and a Vol key; each resolves its own type
         assert!(market.contains(&Spot("ACME".into())));
         assert!(market.contains(&Vol("ACME".into())));
-        assert!(!market.contains(&Vol("ZENO".into())), "no surface stored for ZENO");
+        assert!(
+            !market.contains(&Vol("ZENO".into())),
+            "no surface stored for ZENO"
+        );
     }
 
     #[test]
@@ -439,7 +466,10 @@ mod tests {
         let market = sample_market();
         match market.get(&Vol("ZENO".into())) {
             Err(RustyQLibError::MissingMarketData { key }) => {
-                assert!(key.contains("Vol") && key.contains("ZENO"), "got key `{key}`");
+                assert!(
+                    key.contains("Vol") && key.contains("ZENO"),
+                    "got key `{key}`"
+                );
             }
             other => panic!("expected MissingMarketData, got {other:?}"),
         }
@@ -463,11 +493,14 @@ mod tests {
             type Value = f64;
         }
 
-        let market =
-            sample_market().with(Correlation("ACME".into(), "ZENO".into()), 0.65);
-        let rho = market.get(&Correlation("ACME".into(), "ZENO".into())).unwrap();
+        let market = sample_market().with(Correlation("ACME".into(), "ZENO".into()), 0.65);
+        let rho = market
+            .get(&Correlation("ACME".into(), "ZENO".into()))
+            .unwrap();
         assert_eq!(*rho, 0.65);
-        assert!(market.get(&Correlation("ACME".into(), "OTHER".into())).is_err());
+        assert!(market
+            .get(&Correlation("ACME".into(), "OTHER".into()))
+            .is_err());
     }
 
     #[test]
@@ -489,7 +522,10 @@ mod tests {
         assert!((bumped.get(&Spot("ACME".into())).unwrap().value() - 80.0).abs() < 1e-12);
         // the filter spares ZENO
         assert!((bumped.get(&Spot("ZENO".into())).unwrap().value() - 50.0).abs() < 1e-12);
-        let vol = bumped.get(&Vol("ACME".into())).unwrap().vol(100.0, 100.0, 1.0);
+        let vol = bumped
+            .get(&Vol("ACME".into()))
+            .unwrap()
+            .vol(100.0, 100.0, 1.0);
         assert!((vol - 0.30).abs() < 1e-12);
         let zero = bumped
             .get(&Discount("USD".into()))
@@ -534,12 +570,21 @@ mod tests {
     fn spot_bumps_preserve_quote_shape_and_depth_stores_under_its_own_key() {
         use crate::core::depth::{DepthLevel, MarketDepth};
         let book = MarketDepth::new(
-            vec![DepthLevel { price: 99.0, size: 100.0 }],
-            vec![DepthLevel { price: 101.0, size: 150.0 }],
+            vec![DepthLevel {
+                price: 99.0,
+                size: 100.0,
+            }],
+            vec![DepthLevel {
+                price: 101.0,
+                size: 150.0,
+            }],
         )
         .unwrap();
         let market = sample_market()
-            .with(Spot("BOOK".into()), Quote::from_bid_ask(99.0, 101.0).unwrap())
+            .with(
+                Spot("BOOK".into()),
+                Quote::from_bid_ask(99.0, 101.0).unwrap(),
+            )
             .with(Depth("BOOK".into()), Arc::new(book));
         let crash = market
             .bumped(&[Shock {
@@ -568,7 +613,10 @@ mod tests {
         let market = sample_market();
         let week = [shock(RiskFactor::Time, BumpMode::Absolute, 7.0)];
         let later = market.bumped(&week).unwrap();
-        assert_eq!(later.valuation_date(), NaiveDate::from_ymd_opt(2026, 1, 12).unwrap());
+        assert_eq!(
+            later.valuation_date(),
+            NaiveDate::from_ymd_opt(2026, 1, 12).unwrap()
+        );
         let bad = [shock(RiskFactor::Time, BumpMode::Relative, 0.1)];
         assert!(market.bumped(&bad).is_err());
     }

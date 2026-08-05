@@ -21,7 +21,13 @@ const RATE: f64 = 0.05;
 const DIV: f64 = 0.02;
 
 fn params() -> HestonParams {
-    HestonParams { v0: 0.09, kappa: 2.0, theta: 0.09, vol_of_vol: 0.4, rho: -0.7 }
+    HestonParams {
+        v0: 0.09,
+        kappa: 2.0,
+        theta: 0.09,
+        vol_of_vol: 0.4,
+        rho: -0.7,
+    }
 }
 
 fn base() -> EquityOptionBuilder {
@@ -45,7 +51,11 @@ fn main() {
     ));
     common::note(&format!(
         "Feller condition 2*kappa*theta >= vol_of_vol^2: {}",
-        if p.feller_condition_holds() { "holds" } else { "VIOLATED (variance can touch zero)" }
+        if p.feller_condition_holds() {
+            "holds"
+        } else {
+            "VIOLATED (variance can touch zero)"
+        }
     ));
 
     common::section("Vanilla: semi-analytic vs Monte Carlo");
@@ -53,14 +63,27 @@ fn main() {
     for pc in [PutOrCall::Call, PutOrCall::Put] {
         common::row(
             &format!("Analytical (char. function), {pc:?}"),
-            &base().vanilla(pc).engine(Engine::BlackScholes).build().expect("option must build"),
+            &base()
+                .vanilla(pc)
+                .engine(Engine::BlackScholes)
+                .build()
+                .expect("option must build"),
         );
         common::row(
             &format!("Monte Carlo (full-trunc Euler), {pc:?}"),
-            &base().vanilla(pc).engine(Engine::MonteCarlo).paths(100_000).build().expect("option must build"),
+            &base()
+                .vanilla(pc)
+                .engine(Engine::MonteCarlo)
+                .paths(100_000)
+                .build()
+                .expect("option must build"),
         );
     }
-    match base().vanilla(PutOrCall::Call).engine(Engine::FiniteDifference).build() {
+    match base()
+        .vanilla(PutOrCall::Call)
+        .engine(Engine::FiniteDifference)
+        .build()
+    {
         Err(e) => common::note(&format!("FD + Heston is refused at build(): {e}")),
         Ok(_) => panic!("FD + Heston must be rejected"),
     }
@@ -73,7 +96,8 @@ fn main() {
         &base()
             .binary(PutOrCall::Call, BinaryType::CashOrNothing, 1.0)
             .engine(Engine::BlackScholes)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row(
         "Cash-or-nothing call (MC)",
@@ -81,14 +105,16 @@ fn main() {
             .binary(PutOrCall::Call, BinaryType::CashOrNothing, 1.0)
             .engine(Engine::MonteCarlo)
             .paths(100_000)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row(
         "Asset-or-nothing call (analytic)",
         &base()
             .binary(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0)
             .engine(Engine::BlackScholes)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
 
     common::section("Path-dependent payoffs (Monte Carlo only)");
@@ -96,10 +122,16 @@ fn main() {
     common::row(
         "Down-and-out call H=85",
         &base()
-            .barrier(PutOrCall::Call, BarrierDirection::Down, KnockType::Out, 85.0)
+            .barrier(
+                PutOrCall::Call,
+                BarrierDirection::Down,
+                KnockType::Out,
+                85.0,
+            )
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
     common::row(
         "Down-and-in put H=85",
@@ -107,23 +139,39 @@ fn main() {
             .barrier(PutOrCall::Put, BarrierDirection::Down, KnockType::In, 85.0)
             .engine(Engine::MonteCarlo)
             .paths(50_000)
-            .build().expect("option must build"),
+            .build()
+            .expect("option must build"),
     );
 
     common::section("Identities");
-    let call = base().vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build");
-    let put = base().vanilla(PutOrCall::Put).engine(Engine::BlackScholes).build().expect("option must build");
+    let call = base()
+        .vanilla(PutOrCall::Call)
+        .engine(Engine::BlackScholes)
+        .build()
+        .expect("option must build");
+    let put = base()
+        .vanilla(PutOrCall::Put)
+        .engine(Engine::BlackScholes)
+        .build()
+        .expect("option must build");
     let parity = SPOT * (-DIV * 1.0_f64).exp() - STRIKE * (-RATE * 1.0_f64).exp();
     common::check("put-call parity", call.npv() - put.npv(), parity, 1e-10);
     let asset = base()
         .binary(PutOrCall::Call, BinaryType::AssetOrNothing, 0.0)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build");
+        .build()
+        .expect("option must build");
     let k_cash = base()
         .binary(PutOrCall::Call, BinaryType::CashOrNothing, STRIKE)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build");
-    common::check("vanilla = asset digital - K cash digitals", call.npv(), asset.npv() - k_cash.npv(), 1e-10);
+        .build()
+        .expect("option must build");
+    common::check(
+        "vanilla = asset digital - K cash digitals",
+        call.npv(),
+        asset.npv() - k_cash.npv(),
+        1e-10,
+    );
     common::check(
         "vol-of-vol -> 0 degenerates to Black-Scholes",
         heston_price(
@@ -132,7 +180,10 @@ fn main() {
             RATE,
             DIV,
             1.0,
-            &HestonParams { vol_of_vol: 1e-4, ..params() },
+            &HestonParams {
+                vol_of_vol: 1e-4,
+                ..params()
+            },
             PutOrCall::Call,
         ),
         bs_price(SPOT, STRIKE, RATE, DIV, p.v0.sqrt(), 1.0, PutOrCall::Call),
@@ -140,7 +191,10 @@ fn main() {
     );
 
     common::section("The Heston smile (implied vol backed out of Heston prices)");
-    println!("  {:>8} {:>14} {:>14}", "strike", "heston price", "implied vol");
+    println!(
+        "  {:>8} {:>14} {:>14}",
+        "strike", "heston price", "implied vol"
+    );
     for k in [70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0] {
         let price = heston_price(SPOT, k, RATE, DIV, 1.0, &p, PutOrCall::Call);
         let iv = implied_vol_from_price(SPOT, k, RATE, DIV, 1.0, price, PutOrCall::Call)
@@ -150,16 +204,34 @@ fn main() {
     common::note("rho < 0 tilts the smile: low strikes carry higher implied vol");
 
     common::section("Correlation and vol-of-vol control the smile shape");
-    println!("  {:>6} {:>8} {:>12} {:>12} {:>12}", "rho", "vol-of-vol", "iv(80)", "iv(100)", "iv(120)");
-    for (rho, vov) in [(-0.7, 0.4), (0.0, 0.4), (0.7, 0.4), (-0.7, 0.1), (-0.7, 0.8)] {
-        let hp = HestonParams { rho, vol_of_vol: vov, ..params() };
+    println!(
+        "  {:>6} {:>8} {:>12} {:>12} {:>12}",
+        "rho", "vol-of-vol", "iv(80)", "iv(100)", "iv(120)"
+    );
+    for (rho, vov) in [
+        (-0.7, 0.4),
+        (0.0, 0.4),
+        (0.7, 0.4),
+        (-0.7, 0.1),
+        (-0.7, 0.8),
+    ] {
+        let hp = HestonParams {
+            rho,
+            vol_of_vol: vov,
+            ..params()
+        };
         let iv = |k: f64| {
             let price = heston_price(SPOT, k, RATE, DIV, 1.0, &hp, PutOrCall::Call);
             implied_vol_from_price(SPOT, k, RATE, DIV, 1.0, price, PutOrCall::Call)
                 .unwrap_or(f64::NAN)
                 * 100.0
         };
-        println!("  {rho:>6.1} {vov:>10.1} {:>11.3}% {:>11.3}% {:>11.3}%", iv(80.0), iv(100.0), iv(120.0));
+        println!(
+            "  {rho:>6.1} {vov:>10.1} {:>11.3}% {:>11.3}% {:>11.3}%",
+            iv(80.0),
+            iv(100.0),
+            iv(120.0)
+        );
     }
     common::note("rho controls the skew (tilt); vol-of-vol controls the smile (curvature)");
     println!();

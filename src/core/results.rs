@@ -47,7 +47,11 @@ impl PricingResult {
     /// error — the shape produced by deterministic pricers of instruments
     /// that do not report sensitivities.
     pub fn from_pv(pv: f64) -> Self {
-        PricingResult { pv, greeks: Greeks::default(), std_err: None }
+        PricingResult {
+            pv,
+            greeks: Greeks::default(),
+            std_err: None,
+        }
     }
 }
 
@@ -67,7 +71,8 @@ mod tests {
             .years_to_maturity(1.0)
             .vanilla(PutOrCall::Call)
             .engine(engine)
-            .build().expect("option must build")
+            .build()
+            .expect("option must build")
     }
 
     #[test]
@@ -90,7 +95,9 @@ mod tests {
     fn monte_carlo_price_reports_std_err_and_reproducible_pv() {
         let option = vanilla(Engine::MonteCarlo);
         let result = option.price().unwrap();
-        let se = result.std_err.expect("MC engine must report a standard error");
+        let se = result
+            .std_err
+            .expect("MC engine must report a standard error");
         assert!(se > 0.0 && se.is_finite());
         // bit-reproducible MC: price() sees the same paths as npv()
         assert_eq!(result.pv, option.npv());
@@ -110,7 +117,10 @@ mod tests {
         option.engine = crate::equity::utils::PricingEngine::Binomial(Default::default());
         match option.price() {
             Err(RustyQLibError::UnsupportedEngine(msg)) => {
-                assert!(msg.contains("Binomial"), "should explain the refusal: {msg}")
+                assert!(
+                    msg.contains("Binomial"),
+                    "should explain the refusal: {msg}"
+                )
             }
             other => panic!("expected UnsupportedEngine, got {other:?}"),
         }

@@ -29,7 +29,12 @@ pub enum Quote {
     TopOfBook { bid: f64, ask: f64 },
     /// Best bid and offer with displayed sizes; enables the size-weighted
     /// [`microprice`](Quote::microprice).
-    Sized { bid: f64, bid_size: f64, ask: f64, ask_size: f64 },
+    Sized {
+        bid: f64,
+        bid_size: f64,
+        ask: f64,
+        ask_size: f64,
+    },
 }
 
 fn require_uncrossed(bid: f64, ask: f64) -> Result<()> {
@@ -74,7 +79,12 @@ impl Quote {
                 format!("sizes must be finite and positive, got bid_size={bid_size}, ask_size={ask_size}"),
             ));
         }
-        Ok(Quote::Sized { bid, bid_size, ask, ask_size })
+        Ok(Quote::Sized {
+            bid,
+            bid_size,
+            ask,
+            ask_size,
+        })
     }
 
     /// The mark pricing uses: the price itself for [`Mid`](Quote::Mid),
@@ -122,9 +132,12 @@ impl Quote {
     /// back to [`mid`](Self::mid) when sizes are not available.
     pub fn microprice(&self) -> f64 {
         match *self {
-            Quote::Sized { bid, bid_size, ask, ask_size } => {
-                (bid * ask_size + ask * bid_size) / (bid_size + ask_size)
-            }
+            Quote::Sized {
+                bid,
+                bid_size,
+                ask,
+                ask_size,
+            } => (bid * ask_size + ask * bid_size) / (bid_size + ask_size),
             _ => self.mid(),
         }
     }
@@ -141,12 +154,21 @@ impl Quote {
     pub fn scaled(&self, factor: f64) -> Quote {
         match *self {
             Quote::Mid(value) => Quote::Mid(value * factor),
-            Quote::TopOfBook { bid, ask } => {
-                Quote::TopOfBook { bid: bid * factor, ask: ask * factor }
-            }
-            Quote::Sized { bid, bid_size, ask, ask_size } => {
-                Quote::Sized { bid: bid * factor, bid_size, ask: ask * factor, ask_size }
-            }
+            Quote::TopOfBook { bid, ask } => Quote::TopOfBook {
+                bid: bid * factor,
+                ask: ask * factor,
+            },
+            Quote::Sized {
+                bid,
+                bid_size,
+                ask,
+                ask_size,
+            } => Quote::Sized {
+                bid: bid * factor,
+                bid_size,
+                ask: ask * factor,
+                ask_size,
+            },
         }
     }
 
@@ -155,12 +177,21 @@ impl Quote {
     pub fn shifted(&self, delta: f64) -> Quote {
         match *self {
             Quote::Mid(value) => Quote::Mid(value + delta),
-            Quote::TopOfBook { bid, ask } => {
-                Quote::TopOfBook { bid: bid + delta, ask: ask + delta }
-            }
-            Quote::Sized { bid, bid_size, ask, ask_size } => {
-                Quote::Sized { bid: bid + delta, bid_size, ask: ask + delta, ask_size }
-            }
+            Quote::TopOfBook { bid, ask } => Quote::TopOfBook {
+                bid: bid + delta,
+                ask: ask + delta,
+            },
+            Quote::Sized {
+                bid,
+                bid_size,
+                ask,
+                ask_size,
+            } => Quote::Sized {
+                bid: bid + delta,
+                bid_size,
+                ask: ask + delta,
+                ask_size,
+            },
         }
     }
 }
@@ -192,7 +223,10 @@ mod tests {
         assert!(Quote::from_bid_ask(99.0, f64::INFINITY).is_err());
         // touched (bid == ask) is legal: a locked book still has a mid
         assert!(Quote::from_bid_ask(100.0, 100.0).is_ok());
-        assert!(Quote::from_bid_ask_sized(99.0, 0.0, 101.0, 5.0).is_err(), "zero size");
+        assert!(
+            Quote::from_bid_ask_sized(99.0, 0.0, 101.0, 5.0).is_err(),
+            "zero size"
+        );
         assert!(Quote::from_bid_ask_sized(99.0, 5.0, 101.0, -1.0).is_err());
     }
 
@@ -204,7 +238,10 @@ mod tests {
         assert!((micro - (99.0 * 100.0 + 101.0 * 400.0) / 500.0).abs() < 1e-12);
         assert!(micro > quote.mid(), "heavy bid pushes fair value up");
         // without sizes it degrades to the mid
-        assert_eq!(Quote::from_bid_ask(99.0, 101.0).unwrap().microprice(), 100.0);
+        assert_eq!(
+            Quote::from_bid_ask(99.0, 101.0).unwrap().microprice(),
+            100.0
+        );
         assert_eq!(Quote::new(100.0).microprice(), 100.0);
     }
 
@@ -213,15 +250,29 @@ mod tests {
         let quote = Quote::from_bid_ask_sized(99.0, 400.0, 101.0, 100.0).unwrap();
         let scaled = quote.scaled(0.8);
         assert!((scaled.mid() - 80.0).abs() < 1e-12);
-        assert!((scaled.spread().unwrap() - 1.6).abs() < 1e-12, "relative bump scales the spread");
+        assert!(
+            (scaled.spread().unwrap() - 1.6).abs() < 1e-12,
+            "relative bump scales the spread"
+        );
         let shifted = quote.shifted(-20.0);
         assert!((shifted.mid() - 80.0).abs() < 1e-12);
-        assert!((shifted.spread().unwrap() - 2.0).abs() < 1e-12, "absolute bump preserves the spread");
+        assert!(
+            (shifted.spread().unwrap() - 2.0).abs() < 1e-12,
+            "absolute bump preserves the spread"
+        );
         // sizes ride through both, and the variant is unchanged
         match (scaled, shifted) {
             (
-                Quote::Sized { bid_size: s1, ask_size: a1, .. },
-                Quote::Sized { bid_size: s2, ask_size: a2, .. },
+                Quote::Sized {
+                    bid_size: s1,
+                    ask_size: a1,
+                    ..
+                },
+                Quote::Sized {
+                    bid_size: s2,
+                    ask_size: a2,
+                    ..
+                },
             ) => {
                 assert_eq!((s1, a1), (400.0, 100.0));
                 assert_eq!((s2, a2), (400.0, 100.0));

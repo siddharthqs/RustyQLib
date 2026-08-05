@@ -81,7 +81,10 @@ pub struct OptimConfig {
 
 impl Default for OptimConfig {
     fn default() -> Self {
-        Self { tol: 1e-8, max_iter: 500 }
+        Self {
+            tol: 1e-8,
+            max_iter: 500,
+        }
     }
 }
 
@@ -102,14 +105,22 @@ pub enum Method {
     DifferentialEvolution,
 }
 
+/// A borrowed scalar objective `f(x)`.
+pub type ObjectiveFn<'a> = &'a dyn Fn(&[f64]) -> f64;
+/// A borrowed vector-valued map of the parameters: a gradient or a
+/// stack of residuals.
+pub type VectorFn<'a> = &'a dyn Fn(&[f64]) -> Vec<f64>;
+/// A borrowed Jacobian of the residuals: one row per residual.
+pub type JacobianFn<'a> = &'a dyn Fn(&[f64]) -> Vec<Vec<f64>>;
+
 /// An optimization problem: a scalar objective or a residual vector
 /// (least squares), whatever derivatives are available, a start, and
 /// optional bounds.
 pub struct Problem<'a> {
-    pub f: Option<&'a dyn Fn(&[f64]) -> f64>,
-    pub residuals: Option<&'a dyn Fn(&[f64]) -> Vec<f64>>,
-    pub gradient: Option<&'a dyn Fn(&[f64]) -> Vec<f64>>,
-    pub jacobian: Option<&'a dyn Fn(&[f64]) -> Vec<Vec<f64>>>,
+    pub f: Option<ObjectiveFn<'a>>,
+    pub residuals: Option<VectorFn<'a>>,
+    pub gradient: Option<VectorFn<'a>>,
+    pub jacobian: Option<JacobianFn<'a>>,
     pub x0: Vec<f64>,
     /// Per-parameter `(lo, hi)` box, required by differential evolution.
     pub bounds: Option<Vec<(f64, f64)>>,
@@ -119,21 +130,37 @@ pub struct Problem<'a> {
 
 impl<'a> Problem<'a> {
     /// A scalar-objective problem.
-    pub fn scalar(f: &'a dyn Fn(&[f64]) -> f64, x0: Vec<f64>) -> Self {
-        Self { f: Some(f), residuals: None, gradient: None, jacobian: None, x0, bounds: None, seed: 42 }
+    pub fn scalar(f: ObjectiveFn<'a>, x0: Vec<f64>) -> Self {
+        Self {
+            f: Some(f),
+            residuals: None,
+            gradient: None,
+            jacobian: None,
+            x0,
+            bounds: None,
+            seed: 42,
+        }
     }
 
     /// A least-squares problem `min sum r_i(x)^2`.
-    pub fn least_squares(residuals: &'a dyn Fn(&[f64]) -> Vec<f64>, x0: Vec<f64>) -> Self {
-        Self { f: None, residuals: Some(residuals), gradient: None, jacobian: None, x0, bounds: None, seed: 42 }
+    pub fn least_squares(residuals: VectorFn<'a>, x0: Vec<f64>) -> Self {
+        Self {
+            f: None,
+            residuals: Some(residuals),
+            gradient: None,
+            jacobian: None,
+            x0,
+            bounds: None,
+            seed: 42,
+        }
     }
 
-    pub fn with_gradient(mut self, gradient: &'a dyn Fn(&[f64]) -> Vec<f64>) -> Self {
+    pub fn with_gradient(mut self, gradient: VectorFn<'a>) -> Self {
         self.gradient = Some(gradient);
         self
     }
 
-    pub fn with_jacobian(mut self, jacobian: &'a dyn Fn(&[f64]) -> Vec<Vec<f64>>) -> Self {
+    pub fn with_jacobian(mut self, jacobian: JacobianFn<'a>) -> Self {
         self.jacobian = Some(jacobian);
         self
     }
@@ -161,22 +188,28 @@ pub fn minimize(
 ) -> Result<OptimResult, RustyQLibError> {
     // the scalar view of the problem, however it was posed
     let sum_sq;
-    let f: &dyn Fn(&[f64]) -> f64 = match (problem.f, problem.residuals) {
+    let f: ObjectiveFn = match (problem.f, problem.residuals) {
         (Some(f), _) => f,
         (None, Some(r)) => {
             sum_sq = move |x: &[f64]| r(x).iter().map(|e| e * e).sum::<f64>();
             &sum_sq
         }
-        (None, None) => return Err(RustyQLibError::invalid_input("optimization problem", "Problem has neither a scalar objective nor residuals")),
+        (None, None) => {
+            return Err(RustyQLibError::invalid_input(
+                "optimization problem",
+                "Problem has neither a scalar objective nor residuals",
+            ))
+        }
     };
     match method {
         Method::SteepestDescent => Ok(steepest_descent(cfg, f, problem.gradient, &problem.x0)),
         Method::ConjugateGradient => Ok(conjugate_gradient(cfg, f, problem.gradient, &problem.x0)),
         Method::Bfgs => Ok(bfgs(cfg, f, problem.gradient, &problem.x0)),
         Method::LevenbergMarquardt => {
-            let r = problem
-                .residuals
-                .ok_or(RustyQLibError::invalid_input("optimization problem", "Levenberg-Marquardt needs residuals: use Problem::least_squares"))?;
+            let r = problem.residuals.ok_or(RustyQLibError::invalid_input(
+                "optimization problem",
+                "Levenberg-Marquardt needs residuals: use Problem::least_squares",
+            ))?;
             Ok(levenberg_marquardt(cfg, r, problem.jacobian, &problem.x0))
         }
         Method::NelderMead => Ok(nelder_mead(cfg, f, &problem.x0)),
@@ -184,7 +217,10 @@ pub fn minimize(
             let bounds = problem
                 .bounds
                 .as_deref()
-                .ok_or(RustyQLibError::invalid_input("optimization problem", "differential evolution needs bounds: use Problem::with_bounds"))?;
+                .ok_or(RustyQLibError::invalid_input(
+                    "optimization problem",
+                    "differential evolution needs bounds: use Problem::with_bounds",
+                ))?;
             Ok(differential_evolution(cfg, f, bounds, problem.seed))
         }
     }
@@ -209,8 +245,8 @@ mod tests {
             Method::NelderMead,
             Method::DifferentialEvolution,
         ] {
-            let problem = Problem::scalar(&f, vec![4.0, 4.0])
-                .with_bounds(vec![(-10.0, 10.0), (-10.0, 10.0)]);
+            let problem =
+                Problem::scalar(&f, vec![4.0, 4.0]).with_bounds(vec![(-10.0, 10.0), (-10.0, 10.0)]);
             let r = minimize(&cfg, method, &problem).unwrap();
             assert!(
                 (r.x[0] - 1.0).abs() < 1e-3 && (r.x[1] + 2.0).abs() < 1e-3,
@@ -233,7 +269,17 @@ mod tests {
     fn missing_requirements_error_clearly() {
         let f = |x: &[f64]| sphere(x);
         let no_bounds = Problem::scalar(&f, vec![0.0, 0.0]);
-        assert!(minimize(&OptimConfig::default(), Method::DifferentialEvolution, &no_bounds).is_err());
-        assert!(minimize(&OptimConfig::default(), Method::LevenbergMarquardt, &no_bounds).is_err());
+        assert!(minimize(
+            &OptimConfig::default(),
+            Method::DifferentialEvolution,
+            &no_bounds
+        )
+        .is_err());
+        assert!(minimize(
+            &OptimConfig::default(),
+            Method::LevenbergMarquardt,
+            &no_bounds
+        )
+        .is_err());
     }
 }

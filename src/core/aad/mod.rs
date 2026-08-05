@@ -73,8 +73,14 @@ mod tests {
     #[test]
     fn one_sweep_reproduces_every_black_scholes_greek() {
         let tape = Tape::new();
-        let (s, k, r, q, sigma, t) =
-            (tape.var(S), tape.var(K), tape.var(R), tape.var(Q), tape.var(SIG), tape.var(T));
+        let (s, k, r, q, sigma, t) = (
+            tape.var(S),
+            tape.var(K),
+            tape.var(R),
+            tape.var(Q),
+            tape.var(SIG),
+            tape.var(T),
+        );
         let price = black_scholes(s, k, r, q, sigma, t, PutOrCall::Call);
         assert!((price.value() - bs_price(S, K, R, Q, SIG, T, PutOrCall::Call)).abs() < 1e-12);
 
@@ -82,28 +88,49 @@ mod tests {
         let g = price.grad();
 
         // vega against the library closed form
-        assert!((g.wrt(sigma) - bs_vega(S, K, R, Q, SIG, T)).abs() < 1e-10, "vega");
+        assert!(
+            (g.wrt(sigma) - bs_vega(S, K, R, Q, SIG, T)).abs() < 1e-10,
+            "vega"
+        );
         // the rest against tight central differences of bs_price
         let h = 1e-6;
         let fd = |f: &dyn Fn(f64) -> f64| (f(h) - f(-h)) / (2.0 * h);
-        let cases: [(f64, Box<dyn Fn(f64) -> f64>); 5] = [
-            (g.wrt(s), Box::new(|e| bs_price(S + e, K, R, Q, SIG, T, PutOrCall::Call))),
-            (g.wrt(k), Box::new(|e| bs_price(S, K + e, R, Q, SIG, T, PutOrCall::Call))),
-            (g.wrt(r), Box::new(|e| bs_price(S, K, R + e, Q, SIG, T, PutOrCall::Call))),
-            (g.wrt(q), Box::new(|e| bs_price(S, K, R, Q + e, SIG, T, PutOrCall::Call))),
-            (g.wrt(t), Box::new(|e| bs_price(S, K, R, Q, SIG, T + e, PutOrCall::Call))),
+        type Bump = Box<dyn Fn(f64) -> f64>;
+        let cases: [(f64, Bump); 5] = [
+            (
+                g.wrt(s),
+                Box::new(|e| bs_price(S + e, K, R, Q, SIG, T, PutOrCall::Call)),
+            ),
+            (
+                g.wrt(k),
+                Box::new(|e| bs_price(S, K + e, R, Q, SIG, T, PutOrCall::Call)),
+            ),
+            (
+                g.wrt(r),
+                Box::new(|e| bs_price(S, K, R + e, Q, SIG, T, PutOrCall::Call)),
+            ),
+            (
+                g.wrt(q),
+                Box::new(|e| bs_price(S, K, R, Q + e, SIG, T, PutOrCall::Call)),
+            ),
+            (
+                g.wrt(t),
+                Box::new(|e| bs_price(S, K, R, Q, SIG, T + e, PutOrCall::Call)),
+            ),
         ];
         for (i, (aad, f)) in cases.iter().enumerate() {
             let numeric = fd(f);
-            assert!((aad - numeric).abs() < 1e-7, "greek {i}: aad {aad} vs fd {numeric}");
+            assert!(
+                (aad - numeric).abs() < 1e-7,
+                "greek {i}: aad {aad} vs fd {numeric}"
+            );
         }
         // put side too
         let put = black_scholes(s, k, r, q, sigma, t, PutOrCall::Put);
         let gp = put.grad();
-        let put_delta_fd =
-            (bs_price(S + h, K, R, Q, SIG, T, PutOrCall::Put)
-                - bs_price(S - h, K, R, Q, SIG, T, PutOrCall::Put))
-                / (2.0 * h);
+        let put_delta_fd = (bs_price(S + h, K, R, Q, SIG, T, PutOrCall::Put)
+            - bs_price(S - h, K, R, Q, SIG, T, PutOrCall::Put))
+            / (2.0 * h);
         assert!((gp.wrt(s) - put_delta_fd).abs() < 1e-7);
     }
 
@@ -129,8 +156,9 @@ mod tests {
             let s_t = s0 * (drift + sigma * (T.sqrt() * z)).exp();
             let payoff = (s_t - K).maxf(0.0) * (-(r * T)).exp();
             let g = payoff.grad();
-            for (slot, x) in
-                [payoff.value(), g.wrt(s0), g.wrt(sigma), g.wrt(r)].into_iter().enumerate()
+            for (slot, x) in [payoff.value(), g.wrt(s0), g.wrt(sigma), g.wrt(r)]
+                .into_iter()
+                .enumerate()
             {
                 acc[slot][0] += x;
                 acc[slot][1] += x * x;
@@ -165,14 +193,27 @@ mod tests {
         // the adjoint promise: node count (a proxy for work) does not
         // grow with the number of sensitivities requested
         let tape = Tape::new();
-        let (s, k, r, q, sigma, t) =
-            (tape.var(S), tape.var(K), tape.var(R), tape.var(Q), tape.var(SIG), tape.var(T));
+        let (s, k, r, q, sigma, t) = (
+            tape.var(S),
+            tape.var(K),
+            tape.var(R),
+            tape.var(Q),
+            tape.var(SIG),
+            tape.var(T),
+        );
         let price = black_scholes(s, k, r, q, sigma, t, PutOrCall::Call);
         let nodes = tape.len();
         assert!(nodes < 60, "tape has {nodes} nodes");
         // one sweep serves all six inputs
         let g = price.grad();
-        let six = [g.wrt(s), g.wrt(k), g.wrt(r), g.wrt(q), g.wrt(sigma), g.wrt(t)];
+        let six = [
+            g.wrt(s),
+            g.wrt(k),
+            g.wrt(r),
+            g.wrt(q),
+            g.wrt(sigma),
+            g.wrt(t),
+        ];
         assert!(six.iter().all(|x| x.is_finite() && *x != 0.0));
     }
 }

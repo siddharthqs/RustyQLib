@@ -7,8 +7,8 @@
 //! system. A `smoothing` parameter `>= 0` relaxes exact interpolation
 //! toward a smoother least-squares surface (useful for noisy quotes).
 
-use crate::core::optimization::numerics::solve_dense;
 use crate::core::errors::RustyQLibError;
+use crate::core::optimization::numerics::solve_dense;
 
 #[derive(Debug, Clone)]
 pub struct ThinPlateSpline {
@@ -19,7 +19,11 @@ pub struct ThinPlateSpline {
 
 /// `phi(r) = r^2 ln r`, written on `r^2` to avoid the square root.
 fn phi_sq(r_sq: f64) -> f64 {
-    if r_sq <= 0.0 { 0.0 } else { 0.5 * r_sq * r_sq.ln() }
+    if r_sq <= 0.0 {
+        0.0
+    } else {
+        0.5 * r_sq * r_sq.ln()
+    }
 }
 
 impl ThinPlateSpline {
@@ -28,7 +32,10 @@ impl ThinPlateSpline {
     pub fn new(points: &[(f64, f64, f64)], smoothing: f64) -> Result<Self, RustyQLibError> {
         let n = points.len();
         if n < 3 {
-            return Err(RustyQLibError::invalid_input("thin_plate", "need at least three points"));
+            return Err(RustyQLibError::invalid_input(
+                "thin_plate",
+                "need at least three points",
+            ));
         }
         // augmented system [K + lambda I, P; P^T, 0] [w; a] = [z; 0]
         let dim = n + 3;
@@ -50,8 +57,10 @@ impl ThinPlateSpline {
             a[n + 2][i] = yi;
             b[i] = zi;
         }
-        let sol = solve_dense(&mut a, &mut b)
-            .ok_or(RustyQLibError::invalid_input("thin_plate", "thin-plate system is singular (collinear or duplicate points?)"))?;
+        let sol = solve_dense(&mut a, &mut b).ok_or(RustyQLibError::invalid_input(
+            "thin_plate",
+            "thin-plate system is singular (collinear or duplicate points?)",
+        ))?;
         Ok(ThinPlateSpline {
             centers: points.iter().map(|&(x, y, _)| (x, y)).collect(),
             w: sol[..n].to_vec(),
@@ -77,8 +86,15 @@ mod tests {
         // an irregular quote layout with a smooth smile-like value
         let f = |x: f64, y: f64| 0.2 + 0.05 * (x - 1.0) * (x - 1.0) + 0.02 * y;
         [
-            (0.5, 0.25), (1.0, 0.25), (1.5, 0.25), (0.7, 1.0), (1.3, 1.0),
-            (0.9, 2.0), (1.1, 2.0), (0.6, 1.5), (1.4, 0.6),
+            (0.5, 0.25),
+            (1.0, 0.25),
+            (1.5, 0.25),
+            (0.7, 1.0),
+            (1.3, 1.0),
+            (0.9, 2.0),
+            (1.1, 2.0),
+            (0.6, 1.5),
+            (1.4, 0.6),
         ]
         .iter()
         .map(|&(x, y)| (x, y, f(x, y)))
@@ -98,8 +114,10 @@ mod tests {
     fn reproduces_affine_surfaces_everywhere() {
         // an affine function has zero bending energy: the TPS must be it
         let g = |x: f64, y: f64| 1.0 + 2.0 * x - 3.0 * y;
-        let pts: Vec<(f64, f64, f64)> =
-            scattered().iter().map(|&(x, y, _)| (x, y, g(x, y))).collect();
+        let pts: Vec<(f64, f64, f64)> = scattered()
+            .iter()
+            .map(|&(x, y, _)| (x, y, g(x, y)))
+            .collect();
         let tps = ThinPlateSpline::new(&pts, 0.0).unwrap();
         for i in 0..=20 {
             for j in 0..=20 {

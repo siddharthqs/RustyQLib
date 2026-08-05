@@ -67,7 +67,11 @@ pub fn nelder_mead(cfg: &OptimConfig, f: &dyn Fn(&[f64]) -> f64, x0: &[f64]) -> 
             simplex[worst] = reflected;
             values[worst] = f_r;
         } else {
-            let contracted = if f_r < values[worst] { point(0.5) } else { point(-0.5) };
+            let contracted = if f_r < values[worst] {
+                point(0.5)
+            } else {
+                point(-0.5)
+            };
             let f_c = f(&contracted);
             if f_c < values[worst].min(f_r) {
                 simplex[worst] = contracted;
@@ -88,9 +92,17 @@ pub fn nelder_mead(cfg: &OptimConfig, f: &dyn Fn(&[f64]) -> f64, x0: &[f64]) -> 
             }
         }
     }
-    let (best, &value) =
-        values.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).expect("non-empty");
-    OptimResult { x: simplex[best].clone(), value, iterations: cfg.max_iter, converged: false }
+    let (best, &value) = values
+        .iter()
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(b.1))
+        .expect("non-empty");
+    OptimResult {
+        x: simplex[best].clone(),
+        value,
+        iterations: cfg.max_iter,
+        converged: false,
+    }
 }
 
 #[cfg(test)]
@@ -101,7 +113,10 @@ mod tests {
     fn minimizes_rosenbrock_without_gradients() {
         let f = |x: &[f64]| (1.0 - x[0]).powi(2) + 100.0 * (x[1] - x[0] * x[0]).powi(2);
         let r = nelder_mead(&OptimConfig::new(1e-12, 2000), &f, &[-1.2, 1.0]);
-        assert!((r.x[0] - 1.0).abs() < 1e-4 && (r.x[1] - 1.0).abs() < 1e-4, "{r:?}");
+        assert!(
+            (r.x[0] - 1.0).abs() < 1e-4 && (r.x[1] - 1.0).abs() < 1e-4,
+            "{r:?}"
+        );
     }
 
     #[test]

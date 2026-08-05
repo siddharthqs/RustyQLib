@@ -12,7 +12,11 @@ use rustyqlib::equity::portfolio::EquityPortfolio;
 use rustyqlib::equity::utils::Engine;
 use rustyqlib::risk::{stress_mtm, StressConfig};
 
-fn option(pc: PutOrCall, strike: f64, months: u32) -> rustyqlib::equity::vanilla_option::EquityOption {
+fn option(
+    pc: PutOrCall,
+    strike: f64,
+    months: u32,
+) -> rustyqlib::equity::vanilla_option::EquityOption {
     EquityOptionBuilder::new()
         .symbol("ACME")
         .spot(100.0)
@@ -24,7 +28,8 @@ fn option(pc: PutOrCall, strike: f64, months: u32) -> rustyqlib::equity::vanilla
         .maturity_date(NaiveDate::from_ymd_opt(2026, 1 + months, 1).unwrap())
         .vanilla(pc)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build")
+        .build()
+        .expect("option must build")
 }
 
 fn main() {
@@ -37,12 +42,17 @@ fn main() {
 
     let config = StressConfig::from_toml_file("src/examples/stress_config.toml")
         .expect("loading stress config");
-    common::note(&format!("loaded {} scenarios from src/examples/stress_config.toml",
-        config.scenarios.len()));
+    common::note(&format!(
+        "loaded {} scenarios from src/examples/stress_config.toml",
+        config.scenarios.len()
+    ));
 
     for result in stress_mtm(&book, &config).expect("stress run must price") {
         common::section(&format!("Scenario: {}", result.scenario));
-        println!("  {:<34} {:>12} {:>12} {:>12}", "trade", "base MtM", "stressed", "stress P&L");
+        println!(
+            "  {:<34} {:>12} {:>12} {:>12}",
+            "trade", "base MtM", "stressed", "stress P&L"
+        );
         for trade in &result.trades {
             println!(
                 "  {:<34} {:>12.2} {:>12.2} {:>+12.2}",

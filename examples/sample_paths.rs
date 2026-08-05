@@ -43,8 +43,16 @@ fn main() {
     let mut terminals: Vec<f64> = paths.iter().map(|p| p[p.len() - 1]).collect();
     terminals.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mean = terminals.iter().sum::<f64>() / terminals.len() as f64;
-    println!("GBM terminal spot over {} paths x {} steps", paths.n_paths(), paths.steps());
-    println!("  mean    {:>8.3}   (forward {:.3})", mean, SPOT * ((RATE - DIV) * T).exp());
+    println!(
+        "GBM terminal spot over {} paths x {} steps",
+        paths.n_paths(),
+        paths.steps()
+    );
+    println!(
+        "  mean    {:>8.3}   (forward {:.3})",
+        mean,
+        SPOT * ((RATE - DIV) * T).exp()
+    );
     println!(
         "  p5/p50/p95  {:>7.2} / {:>7.2} / {:>7.2}",
         percentile(&terminals, 0.05),
@@ -76,7 +84,13 @@ fn main() {
     // ── 3. Heston (S, v) paths through the two-factor process
     let heston = HestonProcess {
         drift_rate: RATE - DIV,
-        params: HestonParams { v0: 0.09, kappa: 2.0, theta: 0.09, vol_of_vol: 0.4, rho: -0.7 },
+        params: HestonParams {
+            v0: 0.09,
+            kappa: 2.0,
+            theta: 0.09,
+            vol_of_vol: 0.4,
+            rho: -0.7,
+        },
         scheme: HestonScheme::QuadraticExponential,
     };
     let sv = sample_paths(&heston, &[SPOT, 0.09], &cfg);
@@ -95,8 +109,16 @@ fn main() {
         }
     }
     println!("\nHeston terminal state over {n} paths (QE)");
-    println!("  E[S_T]      {:>8.3}   (forward {:.3})", s_mean / n as f64, SPOT * ((RATE - DIV) * T).exp());
-    println!("  E[sqrt(v_T)]  {:>6.1}%  (long-run {:.1}%)", 100.0 * vol_mean / n as f64, 100.0 * 0.09_f64.sqrt());
+    println!(
+        "  E[S_T]      {:>8.3}   (forward {:.3})",
+        s_mean / n as f64,
+        SPOT * ((RATE - DIV) * T).exp()
+    );
+    println!(
+        "  E[sqrt(v_T)]  {:>6.1}%  (long-run {:.1}%)",
+        100.0 * vol_mean / n as f64,
+        100.0 * 0.09_f64.sqrt()
+    );
     let crash_mean = crash_vol.iter().sum::<f64>() / crash_vol.len().max(1) as f64;
     println!(
         "  E[sqrt(v_T) | S_T < 80]  {:>5.1}%   <- rho = -0.7: crashes end in high vol",

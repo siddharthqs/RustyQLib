@@ -141,8 +141,7 @@ pub trait StochasticProcess: Sync {
         self.drift(t, x, &mut a);
         self.diffusion(t, x, &mut b);
         for i in 0..dim {
-            let shock: f64 =
-                (0..factors).map(|j| b[i * factors + j] * dw[j]).sum();
+            let shock: f64 = (0..factors).map(|j| b[i * factors + j] * dw[j]).sum();
             out[i] = x[i] + a[i] * dt + shock;
         }
         self.constrain(out);
@@ -183,7 +182,11 @@ mod tests {
 
     #[test]
     fn euler_matches_hand_computed_step() {
-        let p = Vasicek { kappa: 2.0, theta: 0.03, sigma: 0.01 };
+        let p = Vasicek {
+            kappa: 2.0,
+            theta: 0.03,
+            sigma: 0.01,
+        };
         let (t, x, dt, dw) = (0.5, 0.05, 0.01, -0.02);
         let expected = x + 2.0 * (0.03 - 0.05) * dt + 0.01 * dw;
         let got = p.evolve(DiscretizationScheme::Euler, t, x, dt, dw);
@@ -194,7 +197,11 @@ mod tests {
     fn milstein_reduces_to_euler_for_additive_noise() {
         // constant diffusion => db/dx = 0 => the Milstein correction
         // vanishes (the numeric default derivative must see that)
-        let p = Vasicek { kappa: 2.0, theta: 0.03, sigma: 0.01 };
+        let p = Vasicek {
+            kappa: 2.0,
+            theta: 0.03,
+            sigma: 0.01,
+        };
         let (t, x, dt, dw) = (0.5, 0.05, 0.01, 0.03);
         let euler = p.evolve(DiscretizationScheme::Euler, t, x, dt, dw);
         let milstein = p.evolve(DiscretizationScheme::Milstein, t, x, dt, dw);
@@ -205,7 +212,11 @@ mod tests {
     fn state_can_go_negative_without_a_gbm_floor() {
         // a large negative shock takes the rate below zero — legitimate
         // for a normal SDE, and the default constrain must not clamp it
-        let p = Vasicek { kappa: 0.5, theta: 0.01, sigma: 0.02 };
+        let p = Vasicek {
+            kappa: 0.5,
+            theta: 0.01,
+            sigma: 0.02,
+        };
         let next = p.evolve(DiscretizationScheme::Euler, 0.0, 0.001, 0.01, -0.5);
         assert!(next < 0.0);
     }
@@ -213,7 +224,11 @@ mod tests {
     #[test]
     fn exact_step_hits_the_ou_transition_mean() {
         // dw = 0 => the exact step lands exactly on the conditional mean
-        let p = Vasicek { kappa: 2.0, theta: 0.03, sigma: 0.01 };
+        let p = Vasicek {
+            kappa: 2.0,
+            theta: 0.03,
+            sigma: 0.01,
+        };
         let next = p.evolve(DiscretizationScheme::Exact, 0.0, 0.05, 0.25, 0.0);
         let mean = 0.03 + (0.05 - 0.03) * (-2.0_f64 * 0.25).exp();
         assert!((next - mean).abs() < 1e-15);

@@ -27,7 +27,12 @@ pub fn differential_evolution(
 
     // random initial population in the box
     let mut pop: Vec<Vec<f64>> = (0..np)
-        .map(|_| bounds.iter().map(|&(lo, hi)| lo + (hi - lo) * rng.uniform()).collect())
+        .map(|_| {
+            bounds
+                .iter()
+                .map(|&(lo, hi)| lo + (hi - lo) * rng.uniform())
+                .collect()
+        })
         .collect();
     let mut values: Vec<f64> = pop.iter().map(|x| f(x)).collect();
 
@@ -74,14 +79,30 @@ pub fn differential_evolution(
         let best = values.iter().cloned().fold(f64::INFINITY, f64::min);
         let worst = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         if worst - best <= cfg.tol * (1.0 + best.abs()) {
-            let (i, &value) =
-                values.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).expect("non-empty");
-            return OptimResult { x: pop[i].clone(), value, iterations: gen, converged: true };
+            let (i, &value) = values
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(b.1))
+                .expect("non-empty");
+            return OptimResult {
+                x: pop[i].clone(),
+                value,
+                iterations: gen,
+                converged: true,
+            };
         }
     }
-    let (i, &value) =
-        values.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).expect("non-empty");
-    OptimResult { x: pop[i].clone(), value, iterations: cfg.max_iter, converged: false }
+    let (i, &value) = values
+        .iter()
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(b.1))
+        .expect("non-empty");
+    OptimResult {
+        x: pop[i].clone(),
+        value,
+        iterations: cfg.max_iter,
+        converged: false,
+    }
 }
 
 /// Small deterministic RNG (xorshift64*), so runs are reproducible for a
@@ -116,7 +137,10 @@ mod tests {
     fn finds_the_global_minimum_of_rastrigin() {
         // many local minima; the global one is 0 at the origin
         let f = |x: &[f64]| {
-            20.0 + x.iter().map(|xi| xi * xi - 10.0 * (2.0 * PI * xi).cos()).sum::<f64>()
+            20.0 + x
+                .iter()
+                .map(|xi| xi * xi - 10.0 * (2.0 * PI * xi).cos())
+                .sum::<f64>()
         };
         let bounds = [(-5.12, 5.12), (-5.12, 5.12)];
         let r = differential_evolution(&OptimConfig::new(1e-10, 600), &f, &bounds, 7);
@@ -133,7 +157,10 @@ mod tests {
         let b = differential_evolution(&cfg, &f, &bounds, 123);
         assert_eq!(a.x, b.x, "same seed must reproduce the same run");
         assert!(a.x.iter().all(|&v| (0.0..=1.0).contains(&v)));
-        assert!((a.x[0] - 0.5).abs() < 1e-5 && (a.x[1] - 0.25).abs() < 1e-5, "{a:?}");
+        assert!(
+            (a.x[0] - 0.5).abs() < 1e-5 && (a.x[1] - 0.25).abs() < 1e-5,
+            "{a:?}"
+        );
         // a different seed still finds the optimum
         let c = differential_evolution(&cfg, &f, &bounds, 999);
         assert!((c.x[0] - 0.5).abs() < 1e-5, "{c:?}");

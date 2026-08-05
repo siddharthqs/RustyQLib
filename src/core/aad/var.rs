@@ -4,7 +4,7 @@
 
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
-use crate::core::utils::{norm_pdf, norm_cdf};
+use crate::core::utils::{norm_cdf, norm_pdf};
 
 use super::tape::{Gradients, Tape};
 
@@ -25,11 +25,17 @@ impl<'a> Var<'a> {
     /// Backward sweep: the gradient of `self` with respect to every
     /// variable on the tape (query via [`Gradients::wrt`]).
     pub fn grad(self) -> Gradients {
-        Gradients { adjoints: self.tape.backward(self.idx) }
+        Gradients {
+            adjoints: self.tape.backward(self.idx),
+        }
     }
 
     fn unary(self, val: f64, partial: f64) -> Var<'a> {
-        Var { tape: self.tape, idx: self.tape.push1(self.idx, partial), val }
+        Var {
+            tape: self.tape,
+            idx: self.tape.push1(self.idx, partial),
+            val,
+        }
     }
 
     pub fn exp(self) -> Var<'a> {
@@ -147,7 +153,9 @@ impl<'a> Div for Var<'a> {
         let v = self.val / rhs.val;
         Var {
             tape: self.tape,
-            idx: self.tape.push2(self.idx, 1.0 / rhs.val, rhs.idx, -v / rhs.val),
+            idx: self
+                .tape
+                .push2(self.idx, 1.0 / rhs.val, rhs.idx, -v / rhs.val),
             val: v,
         }
     }

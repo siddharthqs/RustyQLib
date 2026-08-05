@@ -77,7 +77,10 @@ impl SobolSequence {
         for &(s, a, m_init) in JOE_KUO.iter().take(dims - 1) {
             v.push(direction_integers(s, a, &m_init[..s]));
         }
-        SobolSequence { shift: vec![0; dims], v }
+        SobolSequence {
+            shift: vec![0; dims],
+            v,
+        }
     }
 
     /// A digitally-scrambled sequence: each dimension is XORed with a
@@ -167,7 +170,9 @@ pub(crate) fn van_der_corput_base2(mut i: u64) -> f64 {
 /// `n` low-discrepancy standard normal draws (1-D Sobol through the
 /// inverse normal CDF). Deterministic.
 pub fn sobol_normals(n: usize) -> Vec<f64> {
-    (1..=n as u64).map(|i| inv_norm_cdf(van_der_corput_base2(i))).collect()
+    (1..=n as u64)
+        .map(|i| inv_norm_cdf(van_der_corput_base2(i)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -206,8 +211,10 @@ mod tests {
     fn every_dimension_stratifies_dyadic_intervals_exactly() {
         // the (0,1)-sequence property: among the first 256 points each
         // dimension hits each interval [j/256, (j+1)/256) exactly once
-        for sobol in [SobolSequence::new(SobolSequence::MAX_DIMS),
-                      SobolSequence::scrambled(SobolSequence::MAX_DIMS, 9)] {
+        for sobol in [
+            SobolSequence::new(SobolSequence::MAX_DIMS),
+            SobolSequence::scrambled(SobolSequence::MAX_DIMS, 9),
+        ] {
             let dims = sobol.dims();
             let n = 256usize;
             let mut hits = vec![vec![0u32; n]; dims];

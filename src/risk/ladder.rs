@@ -70,18 +70,21 @@ pub fn symmetric_moves(step: f64, rungs_per_side: usize) -> Vec<f64> {
 /// increasing, each above -100%) and read ladder delta/gamma off the
 /// rungs. Errors on an empty book, an invalid grid, or a position the
 /// snapshot cannot reprice.
-pub fn spot_ladder(
-    book: &EquityPortfolio,
-    moves: &[f64],
-) -> Result<SpotLadder, RustyQLibError> {
+pub fn spot_ladder(book: &EquityPortfolio, moves: &[f64]) -> Result<SpotLadder, RustyQLibError> {
     let symbol = match book.positions.first() {
         Some(p) => p.option.base.symbol.clone(),
         None => {
-            return Err(RustyQLibError::invalid_input("book", "cannot ladder an empty book"));
+            return Err(RustyQLibError::invalid_input(
+                "book",
+                "cannot ladder an empty book",
+            ));
         }
     };
     if moves.is_empty() {
-        return Err(RustyQLibError::invalid_input("moves", "the ladder needs at least one rung"));
+        return Err(RustyQLibError::invalid_input(
+            "moves",
+            "the ladder needs at least one rung",
+        ));
     }
     if moves.iter().any(|x| !x.is_finite() || *x <= -1.0) {
         return Err(RustyQLibError::invalid_input(
@@ -132,7 +135,12 @@ pub fn spot_ladder(
         point.gamma = d2;
     }
 
-    Ok(SpotLadder { symbol, base_spot, base_mtm, points })
+    Ok(SpotLadder {
+        symbol,
+        base_spot,
+        base_mtm,
+        points,
+    })
 }
 
 /// First and second derivatives of `vs` w.r.t. `xs` at every point by
@@ -144,10 +152,10 @@ fn ladder_derivatives(xs: &[f64], vs: &[f64]) -> Vec<(Option<f64>, Option<f64>)>
     for i in 1..xs.len().saturating_sub(1) {
         let (h1, h2) = (xs[i] - xs[i - 1], xs[i + 1] - xs[i]);
         let (v_prev, v_mid, v_next) = (vs[i - 1], vs[i], vs[i + 1]);
-        let d1 = -h2 / (h1 * (h1 + h2)) * v_prev + (h2 - h1) / (h1 * h2) * v_mid
+        let d1 = -h2 / (h1 * (h1 + h2)) * v_prev
+            + (h2 - h1) / (h1 * h2) * v_mid
             + h1 / (h2 * (h1 + h2)) * v_next;
-        let d2 =
-            2.0 * (v_prev / (h1 * (h1 + h2)) - v_mid / (h1 * h2) + v_next / (h2 * (h1 + h2)));
+        let d2 = 2.0 * (v_prev / (h1 * (h1 + h2)) - v_mid / (h1 * h2) + v_next / (h2 * (h1 + h2)));
         out[i] = (Some(d1), Some(d2));
     }
     out
@@ -192,14 +200,23 @@ pub fn vol_ladder(book: &EquityPortfolio, shifts: &[f64]) -> Result<VolLadder, R
     let symbol = match book.positions.first() {
         Some(p) => p.option.base.symbol.clone(),
         None => {
-            return Err(RustyQLibError::invalid_input("book", "cannot ladder an empty book"));
+            return Err(RustyQLibError::invalid_input(
+                "book",
+                "cannot ladder an empty book",
+            ));
         }
     };
     if shifts.is_empty() {
-        return Err(RustyQLibError::invalid_input("shifts", "the ladder needs at least one rung"));
+        return Err(RustyQLibError::invalid_input(
+            "shifts",
+            "the ladder needs at least one rung",
+        ));
     }
     if shifts.iter().any(|x| !x.is_finite()) {
-        return Err(RustyQLibError::invalid_input("shifts", "shifts must be finite vol points"));
+        return Err(RustyQLibError::invalid_input(
+            "shifts",
+            "shifts must be finite vol points",
+        ));
     }
     if shifts.windows(2).any(|w| w[1] <= w[0]) {
         return Err(RustyQLibError::invalid_input(
@@ -241,7 +258,11 @@ pub fn vol_ladder(book: &EquityPortfolio, shifts: &[f64]) -> Result<VolLadder, R
         point.volga = d2;
     }
 
-    Ok(VolLadder { symbol, base_mtm, points })
+    Ok(VolLadder {
+        symbol,
+        base_mtm,
+        points,
+    })
 }
 
 #[cfg(test)]
@@ -358,7 +379,10 @@ mod tests {
         // up 20%: spot starts above the KO, the structure dies almost
         // immediately — relief for the short-the-wings holder
         assert!(up > 0.0, "knock-out relief pnl {up}");
-        assert!(up.abs() < down.abs(), "asymmetry: relief is capped, the tail is not");
+        assert!(
+            up.abs() < down.abs(),
+            "asymmetry: relief is capped, the tail is not"
+        );
     }
 
     #[test]
@@ -405,7 +429,10 @@ mod tests {
         let mut otm_book = EquityPortfolio::new();
         otm_book.add(otm, 1.0);
         let otm_ladder = vol_ladder(&otm_book, &[-0.05, 0.0, 0.05]).unwrap();
-        assert!(otm_ladder.points[1].volga.unwrap() > 0.0, "OTM option is long volga");
+        assert!(
+            otm_ladder.points[1].volga.unwrap() > 0.0,
+            "OTM option is long volga"
+        );
     }
 
     #[test]
@@ -429,8 +456,14 @@ mod tests {
         let mut book = EquityPortfolio::new();
         book.add(option, 1.0);
         let ladder = vol_ladder(&book, &[-0.05, 0.0, 0.05]).unwrap();
-        assert!(ladder.points[0].pnl > 0.0, "vols down relieves the short-vol holder");
-        assert!(ladder.points[2].pnl < 0.0, "vols up hurts the short-vol holder");
+        assert!(
+            ladder.points[0].pnl > 0.0,
+            "vols down relieves the short-vol holder"
+        );
+        assert!(
+            ladder.points[2].pnl < 0.0,
+            "vols up hurts the short-vol holder"
+        );
         assert!(ladder.points[1].vega.unwrap() < 0.0, "book vega is short");
     }
 
@@ -451,7 +484,10 @@ mod tests {
     fn invalid_grids_and_empty_books_are_rejected() {
         let book = call_book(1.0);
         assert!(spot_ladder(&book, &[]).is_err(), "empty grid");
-        assert!(spot_ladder(&book, &[-0.1, -0.1, 0.1]).is_err(), "not strictly increasing");
+        assert!(
+            spot_ladder(&book, &[-0.1, -0.1, 0.1]).is_err(),
+            "not strictly increasing"
+        );
         assert!(spot_ladder(&book, &[0.1, -0.1]).is_err(), "descending");
         assert!(spot_ladder(&book, &[-1.5, 0.0]).is_err(), "below -100%");
         assert!(spot_ladder(&book, &[f64::NAN]).is_err(), "non-finite");

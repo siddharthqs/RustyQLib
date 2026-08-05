@@ -1,11 +1,13 @@
-use serde::{Deserialize, Serialize};
 use crate::core::curves::CurveInput;
 use crate::core::vols::VolInput;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "product_type", rename_all = "snake_case")]
 pub enum ProductData {
-    Option(EquityOptionData),
+    /// Boxed: `EquityOptionData` is ~4x larger than the next variant, and
+    /// boxing keeps `Contract` (and portfolio vectors of it) small.
+    Option(Box<EquityOptionData>),
     Future(EquityFutureData),
     Forward(EquityForwardData),
     RainbowOption(crate::equity::rainbow::RainbowOptionData),
@@ -58,17 +60,15 @@ pub struct CashDividendData {
     pub amount: f64,
 }
 
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EquityFutureData {
     #[serde(flatten)]
     pub base: EquityInstrumentBase,
     pub current_price: Option<f64>,
-    pub multiplier:Option<f64>,
-    pub entry_price:Option<f64>,
+    pub multiplier: Option<f64>,
+    pub entry_price: Option<f64>,
     pub maturity: String,
     pub dividend: Option<f64>,
-
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EquityForwardData {
@@ -76,10 +76,9 @@ pub struct EquityForwardData {
     pub base: EquityInstrumentBase,
     pub current_price: Option<f64>,
     pub notional: Option<f64>,
-    pub entry_price:Option<f64>,
+    pub entry_price: Option<f64>,
     pub maturity: String,
     pub dividend: Option<f64>,
-
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -111,6 +110,16 @@ pub struct EquityOptionData {
     /// fixing spot (default 1.0).
     pub forward_start_date: Option<String>,
     pub strike_fraction: Option<f64>,
+    /// Chooser: the date the holder picks call or put (between valuation
+    /// and maturity).
+    pub choice_date: Option<String>,
+    /// Complex chooser: per-leg strikes and expiry dates. Any of these
+    /// present upgrades the chooser to complex; absent legs default to
+    /// the option's `strike_price` and `maturity`.
+    pub chooser_call_strike: Option<f64>,
+    pub chooser_put_strike: Option<f64>,
+    pub chooser_call_expiry: Option<String>,
+    pub chooser_put_expiry: Option<String>,
     /// Autocallable: early-redemption and knock-in protection levels
     /// (absolute), per-period coupon (rebate), observation count, notional.
     pub autocall_barrier: Option<f64>,
@@ -156,8 +165,8 @@ pub struct EquityOptionData {
     pub maturity: String,
     pub dividend: Option<f64>,
     pub current_price: Option<f64>,
-    pub multiplier:Option<f64>,
-    pub entry_price:Option<f64>,
+    pub multiplier: Option<f64>,
+    pub entry_price: Option<f64>,
     /// Monte Carlo path count (engine "MC" only).
     pub simulation: Option<u64>,
     /// MC time steps: 1 = terminal simulation; > 1 = path-wise stepping.
@@ -178,7 +187,7 @@ pub struct EquityOptionData {
     /// Heston parameters; required when `mc_model` is "heston".
     pub heston: Option<crate::equity::heston::HestonParams>,
     pub exercise_style: Option<String>, //European, American,
-    pub pricer:Option<String>,
+    pub pricer: Option<String>,
     /// Optional discount curve; when absent a flat curve is built from
     /// `risk_free_rate` (which stays the simple way to specify a rate).
     pub discount_curve: Option<CurveInput>,
@@ -186,4 +195,3 @@ pub struct EquityOptionData {
     /// from `volatility`. One of the two must be provided.
     pub vol_surface: Option<VolInput>,
 }
-

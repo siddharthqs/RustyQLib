@@ -52,8 +52,14 @@ impl FromStr for Sampler {
 /// low-discrepancy paths are sequence points routed through the Brownian
 /// bridge.
 pub enum PathDraws {
-    Pseudo { seed: u64, sqrt_dt: f64 },
-    Qmc { seq: QmcSequence, bridge: BrownianBridge },
+    Pseudo {
+        seed: u64,
+        sqrt_dt: f64,
+    },
+    Qmc {
+        seq: QmcSequence,
+        bridge: BrownianBridge,
+    },
 }
 
 impl PathDraws {
@@ -63,12 +69,18 @@ impl PathDraws {
                 seq: QmcSequence::new(steps, seed),
                 bridge: BrownianBridge::new(steps, dt),
             },
-            Sampler::PseudoRandom => PathDraws::Pseudo { seed, sqrt_dt: dt.sqrt() },
+            Sampler::PseudoRandom => PathDraws::Pseudo {
+                seed,
+                sqrt_dt: dt.sqrt(),
+            },
         }
     }
 
     pub fn pseudo(seed: u64, dt: f64) -> Self {
-        PathDraws::Pseudo { seed, sqrt_dt: dt.sqrt() }
+        PathDraws::Pseudo {
+            seed,
+            sqrt_dt: dt.sqrt(),
+        }
     }
 
     /// Fill `dw` with the Brownian increments of path `index`; `z` and
@@ -77,7 +89,7 @@ impl PathDraws {
         match self {
             PathDraws::Pseudo { seed, sqrt_dt } => {
                 path_normals(*seed, (index / 2) as u64, z);
-                let sign = if index % 2 == 0 { 1.0 } else { -1.0 };
+                let sign = if index.is_multiple_of(2) { 1.0 } else { -1.0 };
                 for (d, zi) in dw.iter_mut().zip(z.iter()) {
                     *d = sign * sqrt_dt * zi;
                 }
@@ -194,11 +206,17 @@ pub fn sample_paths_1d<P: StochasticProcess1D>(
 /// Public so streaming multi-asset engines can consume draws without
 /// materializing a [`MultiPaths`] matrix.
 pub enum MultiDraws {
-    Pseudo { seed: u64, sqrt_dt: f64 },
+    Pseudo {
+        seed: u64,
+        sqrt_dt: f64,
+    },
     /// One low-discrepancy point per path over `factors * steps`
     /// coordinates; each factor's block runs through its own pass of the
     /// Brownian bridge.
-    Qmc { seq: QmcSequence, bridge: BrownianBridge },
+    Qmc {
+        seq: QmcSequence,
+        bridge: BrownianBridge,
+    },
 }
 
 impl MultiDraws {
@@ -208,7 +226,10 @@ impl MultiDraws {
                 seq: QmcSequence::new(factors * steps, seed),
                 bridge: BrownianBridge::new(steps, dt),
             },
-            Sampler::PseudoRandom => MultiDraws::Pseudo { seed, sqrt_dt: dt.sqrt() },
+            Sampler::PseudoRandom => MultiDraws::Pseudo {
+                seed,
+                sqrt_dt: dt.sqrt(),
+            },
         }
     }
 
@@ -223,7 +244,7 @@ impl MultiDraws {
         match self {
             MultiDraws::Pseudo { seed, sqrt_dt } => {
                 path_normals(*seed, (index / 2) as u64, &mut scratch.z);
-                let sign = if index % 2 == 0 { 1.0 } else { -1.0 };
+                let sign = if index.is_multiple_of(2) { 1.0 } else { -1.0 };
                 for (d, zi) in dw.iter_mut().zip(scratch.z.iter()) {
                     *d = sign * sqrt_dt * zi;
                 }
@@ -267,9 +288,17 @@ impl FactorScratch {
 /// (multi-factor schemes are process-owned — e.g. Heston full-truncation
 /// or QE); `dw` carries independent increments, any factor correlation
 /// lives inside the process.
-pub fn sample_paths<P: StochasticProcess>(process: &P, x0: &[f64], cfg: &SampleConfig) -> MultiPaths {
+pub fn sample_paths<P: StochasticProcess>(
+    process: &P,
+    x0: &[f64],
+    cfg: &SampleConfig,
+) -> MultiPaths {
     let (dim, factors) = (process.dim(), process.factors());
-    assert_eq!(x0.len(), dim, "initial state must have process.dim() entries");
+    assert_eq!(
+        x0.len(),
+        dim,
+        "initial state must have process.dim() entries"
+    );
     let steps = cfg.steps.max(1);
     let dt = cfg.horizon / steps as f64;
     let draws = MultiDraws::new(cfg.sampler, cfg.seed, factors, steps, dt);
@@ -287,7 +316,13 @@ pub fn sample_paths<P: StochasticProcess>(process: &P, x0: &[f64], cfg: &SampleC
             draws.fill(i, factors, steps, scratch, dw);
             x.copy_from_slice(x0);
             for j in 0..steps {
-                process.evolve(j as f64 * dt, x, dt, &dw[j * factors..(j + 1) * factors], x_next);
+                process.evolve(
+                    j as f64 * dt,
+                    x,
+                    dt,
+                    &dw[j * factors..(j + 1) * factors],
+                    x_next,
+                );
                 x.copy_from_slice(x_next);
                 out[j * dim..(j + 1) * dim].copy_from_slice(x);
             }
@@ -318,12 +353,21 @@ mod tests {
     }
 
     fn cfg(sampler: Sampler) -> SampleConfig {
-        SampleConfig { paths: 20_000, steps: 12, horizon: 1.0, sampler, seed: 7 }
+        SampleConfig {
+            paths: 20_000,
+            steps: 12,
+            horizon: 1.0,
+            sampler,
+            seed: 7,
+        }
     }
 
     #[test]
     fn terminal_moments_match_the_lognormal_law() {
-        let p = Gbm { mu: 0.05, sigma: 0.2 };
+        let p = Gbm {
+            mu: 0.05,
+            sigma: 0.2,
+        };
         for sampler in [Sampler::Sobol, Sampler::PseudoRandom] {
             let paths = sample_paths_1d(&p, 100.0, DiscretizationScheme::Exact, &cfg(sampler));
             let n = paths.n_paths() as f64;
@@ -337,8 +381,14 @@ mod tests {
                 .sum::<f64>()
                 / n;
             let target = 100.0 * (0.05_f64).exp();
-            assert!((mean - target).abs() / target < 0.01, "{sampler:?}: mean {mean}");
-            assert!((log_var - 0.04).abs() / 0.04 < 0.05, "{sampler:?}: log-var {log_var}");
+            assert!(
+                (mean - target).abs() / target < 0.01,
+                "{sampler:?}: mean {mean}"
+            );
+            assert!(
+                (log_var - 0.04).abs() / 0.04 < 0.05,
+                "{sampler:?}: log-var {log_var}"
+            );
         }
     }
 
@@ -346,8 +396,16 @@ mod tests {
     fn pseudo_paths_come_in_antithetic_pairs() {
         // under the exact GBM step, mirrored increments mirror the log
         // path around the deterministic drift
-        let p = Gbm { mu: 0.05, sigma: 0.2 };
-        let paths = sample_paths_1d(&p, 100.0, DiscretizationScheme::Exact, &cfg(Sampler::PseudoRandom));
+        let p = Gbm {
+            mu: 0.05,
+            sigma: 0.2,
+        };
+        let paths = sample_paths_1d(
+            &p,
+            100.0,
+            DiscretizationScheme::Exact,
+            &cfg(Sampler::PseudoRandom),
+        );
         let dt = 1.0 / 12.0;
         for j in 0..paths.steps() {
             let drift = (0.05 - 0.02) * dt * (j + 1) as f64;
@@ -358,11 +416,17 @@ mod tests {
 
     #[test]
     fn same_seed_reproduces_and_different_seed_differs() {
-        let p = Gbm { mu: 0.02, sigma: 0.3 };
+        let p = Gbm {
+            mu: 0.02,
+            sigma: 0.3,
+        };
         let a = sample_paths_1d(&p, 50.0, DiscretizationScheme::Exact, &cfg(Sampler::Sobol));
         let b = sample_paths_1d(&p, 50.0, DiscretizationScheme::Exact, &cfg(Sampler::Sobol));
         assert_eq!(a.path(123), b.path(123));
-        let other = SampleConfig { seed: 8, ..cfg(Sampler::Sobol) };
+        let other = SampleConfig {
+            seed: 8,
+            ..cfg(Sampler::Sobol)
+        };
         let c = sample_paths_1d(&p, 50.0, DiscretizationScheme::Exact, &other);
         assert_ne!(a.path(123), c.path(123));
     }
@@ -389,9 +453,18 @@ mod tests {
     #[test]
     fn multi_state_terminal_means_track_their_drifts() {
         for sampler in [Sampler::Sobol, Sampler::PseudoRandom] {
-            let cfg = SampleConfig { paths: 40_000, steps: 50, horizon: 1.0, sampler, seed: 3 };
+            let cfg = SampleConfig {
+                paths: 40_000,
+                steps: 50,
+                horizon: 1.0,
+                sampler,
+                seed: 3,
+            };
             let paths = sample_paths(&TwoGbm, &[100.0, 200.0], &cfg);
-            assert_eq!((paths.n_paths(), paths.steps(), paths.dim()), (40_000, 50, 2));
+            assert_eq!(
+                (paths.n_paths(), paths.steps(), paths.dim()),
+                (40_000, 50, 2)
+            );
             let n = paths.n_paths() as f64;
             let (mut m0, mut m1) = (0.0, 0.0);
             for i in 0..paths.n_paths() {

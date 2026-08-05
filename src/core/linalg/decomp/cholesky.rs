@@ -1,5 +1,10 @@
 //! Cholesky factorization `A = L L^T` of a symmetric positive
 //! (semi-)definite matrix, and the SPD linear solve through the factor.
+
+// index loops throughout mirror the textbook subscripts (`l[i][k] l[j][k]`,
+// `a[i][j]` vs `a[j][i]`); iterator forms would obscure the math
+#![allow(clippy::needless_range_loop)]
+
 use crate::core::errors::RustyQLibError;
 
 /// Lower-triangular Cholesky factor of a symmetric PSD matrix.
@@ -11,11 +16,15 @@ pub fn cholesky_factor(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, RustyQLibError> 
     let n = a.len();
     for i in 0..n {
         if a[i].len() != n {
-            return Err(RustyQLibError::NumericalError("matrix must be square".to_string()));
+            return Err(RustyQLibError::NumericalError(
+                "matrix must be square".to_string(),
+            ));
         }
         for j in 0..i {
             if (a[i][j] - a[j][i]).abs() > 1e-10 * (1.0 + a[i][j].abs()) {
-                return Err(RustyQLibError::NumericalError("matrix must be symmetric".to_string()));
+                return Err(RustyQLibError::NumericalError(
+                    "matrix must be symmetric".to_string(),
+                ));
             }
         }
     }
@@ -26,7 +35,9 @@ pub fn cholesky_factor(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, RustyQLibError> 
             if i == j {
                 let d = a[i][i] - s;
                 if d < -1e-10 * (1.0 + a[i][i].abs()) {
-                    return Err(RustyQLibError::NumericalError("matrix is not positive semi-definite".to_string()));
+                    return Err(RustyQLibError::NumericalError(
+                        "matrix is not positive semi-definite".to_string(),
+                    ));
                 }
                 l[i][j] = d.max(0.0).sqrt();
             } else if l[j][j] > 1e-12 {
@@ -45,10 +56,14 @@ pub fn cholesky_factor(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, RustyQLibError> 
 pub fn cholesky_solve(l: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, RustyQLibError> {
     let n = b.len();
     if l.len() != n {
-        return Err(RustyQLibError::NumericalError("dimension mismatch".to_string()));
+        return Err(RustyQLibError::NumericalError(
+            "dimension mismatch".to_string(),
+        ));
     }
     if (0..n).any(|i| l[i][i].abs() < 1e-300) {
-        return Err(RustyQLibError::NumericalError("factor is singular".to_string()));
+        return Err(RustyQLibError::NumericalError(
+            "factor is singular".to_string(),
+        ));
     }
     // L y = b
     let mut y = vec![0.0; n];

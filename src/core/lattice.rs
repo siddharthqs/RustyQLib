@@ -114,7 +114,10 @@ impl LatticeConfig {
         if self.steps < 2 {
             return Err(RustyQLibError::invalid_input(
                 "tree_steps",
-                format!("the binomial tree needs at least 2 steps, got {}", self.steps),
+                format!(
+                    "the binomial tree needs at least 2 steps, got {}",
+                    self.steps
+                ),
             ));
         }
         Ok(())
@@ -136,7 +139,7 @@ impl BinomialTreeType {
     pub fn effective_steps(&self, steps: usize) -> usize {
         let steps = steps.max(2);
         match self {
-            BinomialTreeType::LeisenReimer if steps % 2 == 0 => steps + 1,
+            BinomialTreeType::LeisenReimer if steps.is_multiple_of(2) => steps + 1,
             _ => steps,
         }
     }
@@ -159,6 +162,8 @@ impl BinomialTreeType {
                 format!("lattice volatility must be positive and finite, got {sigma}"),
             ));
         }
+        // `!(t > 0.0)` rather than `t <= 0.0` so a NaN maturity also fails
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(t > 0.0) || n < 2 {
             return Err(RustyQLibError::invalid_input(
                 "lattice",
@@ -188,7 +193,11 @@ impl BinomialTreeType {
                 let root = (v * v + 2.0 * v - 3.0).sqrt();
                 let u = 0.5 * m * v * (v + 1.0 + root);
                 let d = 0.5 * m * v * (v + 1.0 - root);
-                LatticeParams { log_up: u.ln(), log_down: d.ln(), p_up: (m - d) / (u - d) }
+                LatticeParams {
+                    log_up: u.ln(),
+                    log_down: d.ln(),
+                    p_up: (m - d) / (u - d),
+                }
             }
             BinomialTreeType::Trigeorgis => {
                 let dx = (sigma * sigma * dt + nu * nu * dt * dt).sqrt();
@@ -225,7 +234,11 @@ impl BinomialTreeType {
                         "Leisen-Reimer step degenerated (u {u}, d {d}); increase the step count"
                     )));
                 }
-                LatticeParams { log_up: u.ln(), log_down: d.ln(), p_up: p }
+                LatticeParams {
+                    log_up: u.ln(),
+                    log_down: d.ln(),
+                    p_up: p,
+                }
             }
             BinomialTreeType::AdditiveEqp => {
                 let disc = 4.0 * sigma * sigma * dt - 3.0 * nu * nu * dt * dt;
@@ -280,7 +293,9 @@ pub fn price_backward(
 ) -> f64 {
     // spot(i, j) = s0 * up_pow[j] * down_pow[i - j]
     let up_pow: Vec<f64> = (0..=n).map(|j| (j as f64 * params.log_up).exp()).collect();
-    let down_pow: Vec<f64> = (0..=n).map(|j| (j as f64 * params.log_down).exp()).collect();
+    let down_pow: Vec<f64> = (0..=n)
+        .map(|j| (j as f64 * params.log_down).exp())
+        .collect();
     let spot = |i: usize, j: usize| s0 * up_pow[j] * down_pow[i - j];
 
     let mut v: Vec<f64> = (0..=n).map(|j| terminal(spot(n, j))).collect();
@@ -326,7 +341,9 @@ pub fn price_backward_with_greeks(
     exercise: Option<&dyn Fn(usize, f64, f64) -> f64>,
 ) -> LatticeSolution {
     let up_pow: Vec<f64> = (0..=n).map(|j| (j as f64 * params.log_up).exp()).collect();
-    let down_pow: Vec<f64> = (0..=n).map(|j| (j as f64 * params.log_down).exp()).collect();
+    let down_pow: Vec<f64> = (0..=n)
+        .map(|j| (j as f64 * params.log_down).exp())
+        .collect();
     let spot = |i: usize, j: usize| s0 * up_pow[j] * down_pow[i - j];
 
     let mut v: Vec<f64> = (0..=n).map(|j| terminal(spot(n, j))).collect();
@@ -363,7 +380,12 @@ pub fn price_backward_with_greeks(
     let ds = s_ud - s0;
     let theta = (layer2[1] - price - delta * ds - 0.5 * gamma * ds * ds) / (2.0 * dt);
 
-    LatticeSolution { price, delta, gamma, theta }
+    LatticeSolution {
+        price,
+        delta,
+        gamma,
+        theta,
+    }
 }
 
 // ── Diagnostic engine ───────────────────────────────────────────────────
@@ -395,6 +417,9 @@ pub struct LatticeDiagnostics {
 
 /// The debug engine: same induction as [`price_backward`] but keeping
 /// every layer, the exercise boundary, tree Greeks and timing.
+// same argument list as `price_backward` plus the tree type, kept
+// positional so the two engines stay call-compatible
+#[allow(clippy::too_many_arguments)]
 pub fn price_with_diagnostics(
     tree_type: BinomialTreeType,
     s0: f64,
@@ -409,7 +434,9 @@ pub fn price_with_diagnostics(
     // identical spot computation to `price_backward`, so the two engines
     // agree bit-for-bit
     let up_pow: Vec<f64> = (0..=n).map(|j| (j as f64 * params.log_up).exp()).collect();
-    let down_pow: Vec<f64> = (0..=n).map(|j| (j as f64 * params.log_down).exp()).collect();
+    let down_pow: Vec<f64> = (0..=n)
+        .map(|j| (j as f64 * params.log_down).exp())
+        .collect();
     let spot_tree: Vec<Vec<f64>> = (0..=n)
         .map(|i| (0..=i).map(|j| s0 * up_pow[j] * down_pow[i - j]).collect())
         .collect();
@@ -497,11 +524,14 @@ pub fn convergence_study(
             let df_step = (-r * t / n as f64).exp();
             let start = Instant::now();
             let price = price_backward(s0, &params, n, df_step, terminal, exercise);
-            Ok(ConvergencePoint { steps: n, price, elapsed: start.elapsed() })
+            Ok(ConvergencePoint {
+                steps: n,
+                price,
+                elapsed: start.elapsed(),
+            })
         })
         .collect()
 }
-
 
 // ── Time-dependent (term-structure) lattice ─────────────────────────────
 
@@ -552,6 +582,8 @@ impl TermLattice {
         forward_carry: &dyn Fn(f64, f64) -> f64,
         total_variance: &dyn Fn(f64) -> f64,
     ) -> Result<TermLattice, RustyQLibError> {
+        // `!(t > 0.0)` rather than `t <= 0.0` so a NaN maturity also fails
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(t > 0.0) || n < 2 {
             return Err(RustyQLibError::invalid_input(
                 "lattice",
@@ -613,7 +645,12 @@ impl TermLattice {
             df.push((-r * dt).exp());
         }
 
-        Ok(TermLattice { times, dx, p_up, df })
+        Ok(TermLattice {
+            times,
+            dx,
+            p_up,
+            df,
+        })
     }
 
     pub fn steps(&self) -> usize {
@@ -632,7 +669,9 @@ impl TermLattice {
     ) -> f64 {
         let n = self.steps();
         // spot(i, j) = s0 * e^{(2j - i) dx}: one power table over [-n, n]
-        let pow: Vec<f64> = (0..=2 * n).map(|k| ((k as f64 - n as f64) * self.dx).exp()).collect();
+        let pow: Vec<f64> = (0..=2 * n)
+            .map(|k| ((k as f64 - n as f64) * self.dx).exp())
+            .collect();
         let spot = |i: usize, j: usize| s0 * pow[2 * j + n - i];
 
         let mut v: Vec<f64> = (0..=n).map(|j| terminal(spot(n, j))).collect();
@@ -662,7 +701,9 @@ impl TermLattice {
         exercise: Option<&dyn Fn(usize, f64, f64, f64) -> f64>,
     ) -> LatticeSolution {
         let n = self.steps();
-        let pow: Vec<f64> = (0..=2 * n).map(|k| ((k as f64 - n as f64) * self.dx).exp()).collect();
+        let pow: Vec<f64> = (0..=2 * n)
+            .map(|k| ((k as f64 - n as f64) * self.dx).exp())
+            .collect();
         let spot = |i: usize, j: usize| s0 * pow[2 * j + n - i];
 
         let mut v: Vec<f64> = (0..=n).map(|j| terminal(spot(n, j))).collect();
@@ -694,10 +735,14 @@ impl TermLattice {
         let d_down = (layer2[1] - layer2[0]) / (s_ud - s_dd);
         let gamma = (d_up - d_down) / (0.5 * (s_uu - s_dd));
         let theta = (layer2[1] - price) / self.times[2];
-        LatticeSolution { price, delta, gamma, theta }
+        LatticeSolution {
+            price,
+            delta,
+            gamma,
+            theta,
+        }
     }
 }
-
 
 // ── Trinomial lattice ───────────────────────────────────────────────────
 
@@ -745,6 +790,8 @@ impl TrinomialLattice {
         dx: f64,
         branching: &dyn Fn(usize, i32) -> TrinomialBranch,
     ) -> Result<TrinomialLattice, RustyQLibError> {
+        // `!(dt > 0.0)` rather than `dt <= 0.0` so NaN steps also fail
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if n < 1 || !(dt > 0.0) || !(dx > 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "trinomial",
@@ -767,10 +814,8 @@ impl TrinomialLattice {
                         b.target
                     )));
                 }
-                for (name, prob) in
-                    [("p_up", b.p_up), ("p_mid", b.p_mid), ("p_down", b.p_down)]
-                {
-                    if !(prob >= 0.0 && prob <= 1.0) {
+                for (name, prob) in [("p_up", b.p_up), ("p_mid", b.p_mid), ("p_down", b.p_down)] {
+                    if !(0.0..=1.0).contains(&prob) {
                         return Err(RustyQLibError::NumericalError(format!(
                             "node ({i}, {j}): {name} = {prob:.6} outside [0, 1] \
                              (adjust the spacing or the branching rule)"
@@ -791,7 +836,13 @@ impl TrinomialLattice {
             j_min.push(next_lo);
             j_max.push(next_hi);
         }
-        Ok(TrinomialLattice { dt, dx, j_min, j_max, branches })
+        Ok(TrinomialLattice {
+            dt,
+            dx,
+            j_min,
+            j_max,
+            branches,
+        })
     }
 
     pub fn steps(&self) -> usize {
@@ -823,8 +874,8 @@ impl TrinomialLattice {
             for j in lo..=hi {
                 let b = self.branches[i][(j - lo) as usize];
                 let k = (b.target - next_lo) as usize;
-                let expected = b.p_up * values[k + 1] + b.p_mid * values[k]
-                    + b.p_down * values[k - 1];
+                let expected =
+                    b.p_up * values[k + 1] + b.p_mid * values[k] + b.p_down * values[k - 1];
                 let cont = node_df(i, j) * expected;
                 layer.push(match exercise {
                     Some(ex) => ex(i, j, cont),
@@ -945,7 +996,14 @@ mod tests {
 
     fn all_types() -> [BinomialTreeType; 6] {
         use BinomialTreeType::*;
-        [CoxRossRubinstein, JarrowRudd, Tian, Trigeorgis, LeisenReimer, AdditiveEqp]
+        [
+            CoxRossRubinstein,
+            JarrowRudd,
+            Tian,
+            Trigeorgis,
+            LeisenReimer,
+            AdditiveEqp,
+        ]
     }
 
     #[test]
@@ -955,7 +1013,11 @@ mod tests {
             let price = tree_call(tree_type, 1000);
             // EQP converges at O(sqrt(dt)) — the known laggard, kept for
             // completeness (same formulation as QuantLib's AdditiveEQP)
-            let tol = if tree_type == BinomialTreeType::AdditiveEqp { 2e-2 } else { 5e-3 };
+            let tol = if tree_type == BinomialTreeType::AdditiveEqp {
+                2e-2
+            } else {
+                5e-3
+            };
             assert!(
                 (price - reference).abs() < tol,
                 "{tree_type:?}: {price} vs BS {reference}"
@@ -982,7 +1044,10 @@ mod tests {
     fn leisen_reimer_bumps_even_step_counts_to_odd() {
         assert_eq!(BinomialTreeType::LeisenReimer.effective_steps(100), 101);
         assert_eq!(BinomialTreeType::LeisenReimer.effective_steps(101), 101);
-        assert_eq!(BinomialTreeType::CoxRossRubinstein.effective_steps(100), 100);
+        assert_eq!(
+            BinomialTreeType::CoxRossRubinstein.effective_steps(100),
+            100
+        );
     }
 
     #[test]
@@ -996,7 +1061,14 @@ mod tests {
             let exercise = |_: usize, s: f64, cont: f64| (K - s).max(0.0).max(cont);
             let fast = price_backward(S, &params, n, df, &terminal, Some(&exercise));
             let diag = price_with_diagnostics(
-                tree_type, S, &params, n, dt, df, &terminal, Some(&exercise),
+                tree_type,
+                S,
+                &params,
+                n,
+                dt,
+                df,
+                &terminal,
+                Some(&exercise),
             );
             assert_eq!(fast, diag.price, "{tree_type:?} engines disagree");
             assert_eq!(diag.spot_tree.len(), n + 1);
@@ -1027,7 +1099,10 @@ mod tests {
             let terminal = |s: f64| (s - K).max(0.0);
             let sol = price_backward_with_greeks(S, &params, n, dt, df, &terminal, None);
             let plain = price_backward(S, &params, n, df, &terminal, None);
-            assert_eq!(sol.price, plain, "{tree_type:?}: one-pass price must match exactly");
+            assert_eq!(
+                sol.price, plain,
+                "{tree_type:?}: one-pass price must match exactly"
+            );
             assert!(
                 (sol.delta - bs_delta).abs() < 2e-3,
                 "{tree_type:?} delta {} vs BS {bs_delta}",
@@ -1056,17 +1131,20 @@ mod tests {
         let df = (-R * dt).exp();
         let terminal = |s: f64| (K - s).max(0.0);
         let exercise = |_: usize, s: f64, cont: f64| (K - s).max(0.0).max(cont);
-        let sol =
-            price_backward_with_greeks(S, &params, n, dt, df, &terminal, Some(&exercise));
-        let diag = price_with_diagnostics(
-            tree_type, S, &params, n, dt, df, &terminal, Some(&exercise),
-        );
+        let sol = price_backward_with_greeks(S, &params, n, dt, df, &terminal, Some(&exercise));
+        let diag =
+            price_with_diagnostics(tree_type, S, &params, n, dt, df, &terminal, Some(&exercise));
         assert_eq!(sol.price, diag.price);
         assert_eq!(sol.delta, diag.delta);
         assert_eq!(sol.gamma, diag.gamma);
         // CRR is symmetric (the layer-2 center returns to s0), so the
         // drift correction vanishes and the thetas coincide
-        assert!((sol.theta - diag.theta).abs() < 1e-10, "{} vs {}", sol.theta, diag.theta);
+        assert!(
+            (sol.theta - diag.theta).abs() < 1e-10,
+            "{} vs {}",
+            sol.theta,
+            diag.theta
+        );
     }
 
     #[test]
@@ -1078,9 +1156,8 @@ mod tests {
         let df = (-R * dt).exp();
         let terminal = |s: f64| (K - s).max(0.0);
         let exercise = |_: usize, s: f64, cont: f64| (K - s).max(0.0).max(cont);
-        let diag = price_with_diagnostics(
-            tree_type, S, &params, n, dt, df, &terminal, Some(&exercise),
-        );
+        let diag =
+            price_with_diagnostics(tree_type, S, &params, n, dt, df, &terminal, Some(&exercise));
         // an American put on a dividend payer exercises early somewhere
         let exercised_layers = diag.exercise_boundary.iter().flatten().count();
         assert!(exercised_layers > 0, "the put must have an exercise region");
@@ -1090,7 +1167,11 @@ mod tests {
         }
         // early exercise premium over the European put
         let euro = price_backward(S, &params, n, df, &terminal, None);
-        assert!(diag.price > euro + 1e-4, "american {} european {euro}", diag.price);
+        assert!(
+            diag.price > euro + 1e-4,
+            "american {} european {euro}",
+            diag.price
+        );
         // tree Greeks are sane for an ATM put
         assert!(diag.delta > -1.0 && diag.delta < 0.0);
         assert!(diag.gamma > 0.0);
@@ -1101,12 +1182,19 @@ mod tests {
     #[test]
     fn convergence_ladder_reports_prices_and_timing() {
         let terminal = |s: f64| (s - K).max(0.0);
-        let ladder =
-            convergence_study(
-                BinomialTreeType::LeisenReimer, S, K, R - Q, SIGMA, R, T,
-                &[25, 51, 101, 201], &terminal, None,
-            )
-            .unwrap();
+        let ladder = convergence_study(
+            BinomialTreeType::LeisenReimer,
+            S,
+            K,
+            R - Q,
+            SIGMA,
+            R,
+            T,
+            &[25, 51, 101, 201],
+            &terminal,
+            None,
+        )
+        .unwrap();
         assert_eq!(ladder.len(), 4);
         let reference = bs_call();
         let errors: Vec<f64> = ladder.iter().map(|p| (p.price - reference).abs()).collect();
@@ -1143,7 +1231,11 @@ mod tests {
             let lattice = TrinomialLattice::build(n, dt, dx, &branching).unwrap();
             let df = (-R * dt).exp();
             (
-                lattice.price(&|_, _| df, &|j| (S * (j as f64 * dx).exp() - K).max(0.0), None),
+                lattice.price(
+                    &|_, _| df,
+                    &|j| (S * (j as f64 * dx).exp() - K).max(0.0),
+                    None,
+                ),
                 dx,
                 lattice,
                 df,
@@ -1165,9 +1257,7 @@ mod tests {
         // American put dominates European on the same tree
         let terminal_put = |j: i32| (K - S * (j as f64 * dx).exp()).max(0.0);
         let euro = lattice.price(&|_, _| df, &terminal_put, None);
-        let ex = |_: usize, j: i32, cont: f64| {
-            (K - S * (j as f64 * dx).exp()).max(0.0).max(cont)
-        };
+        let ex = |_: usize, j: i32, cont: f64| (K - S * (j as f64 * dx).exp()).max(0.0).max(cont);
         let amer = lattice.price(&|_, _| df, &terminal_put, Some(&ex));
         assert!(amer >= euro - 1e-12, "american {amer} vs european {euro}");
     }
@@ -1254,10 +1344,21 @@ mod tests {
         let lattice = TermLattice::build(n, T, &flat_rate, &flat_carry, &flat_var).unwrap();
         let term = lattice.price(S, &|s| (s - K).max(0.0), None);
         // flat inputs reduce to the CRR tree
-        let params = BinomialTreeType::CoxRossRubinstein.params(S, K, R - Q, SIGMA, T, n).unwrap();
-        let uniform =
-            price_backward(S, &params, n, (-R * T / n as f64).exp(), &|s| (s - K).max(0.0), None);
-        assert!((term - uniform).abs() < 1e-9, "term {term} vs uniform {uniform}");
+        let params = BinomialTreeType::CoxRossRubinstein
+            .params(S, K, R - Q, SIGMA, T, n)
+            .unwrap();
+        let uniform = price_backward(
+            S,
+            &params,
+            n,
+            (-R * T / n as f64).exp(),
+            &|s| (s - K).max(0.0),
+            None,
+        );
+        assert!(
+            (term - uniform).abs() < 1e-9,
+            "term {term} vs uniform {uniform}"
+        );
     }
 
     #[test]
@@ -1267,7 +1368,11 @@ mod tests {
         // converge to BS at the equivalent vol sqrt((0.2^2 + 0.4^2)/2)
         let (s1, s2) = (0.2, 0.4);
         let var = move |t: f64| {
-            if t <= 0.5 { s1 * s1 * t } else { s1 * s1 * 0.5 + s2 * s2 * (t - 0.5) }
+            if t <= 0.5 {
+                s1 * s1 * t
+            } else {
+                s1 * s1 * 0.5 + s2 * s2 * (t - 0.5)
+            }
         };
         let sigma_eq = (0.5f64 * (s1 * s1 + s2 * s2)).sqrt();
         let flat_rate = |_: f64, _: f64| R;
@@ -1287,7 +1392,11 @@ mod tests {
         // match BS with the average rate 5% (exact discounting + drift)
         let fwd = |t1: f64, t2: f64| {
             let integral = |t: f64| {
-                if t <= 0.5 { 0.02 * t } else { 0.02 * 0.5 + 0.08 * (t - 0.5) }
+                if t <= 0.5 {
+                    0.02 * t
+                } else {
+                    0.02 * 0.5 + 0.08 * (t - 0.5)
+                }
             };
             (integral(t2) - integral(t1)) / (t2 - t1)
         };

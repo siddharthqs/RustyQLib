@@ -49,11 +49,11 @@
 
 use serde::Deserialize;
 
+use crate::core::errors::RustyQLibError;
 use crate::core::market::{Discount, Market};
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::utils::PayoffType;
 use crate::equity::vanilla_option::EquityOption;
-use crate::core::errors::RustyQLibError;
 
 // the shock vocabulary is the market layer's; re-exported here so stress
 // configs keep their import paths
@@ -101,7 +101,10 @@ pub struct ArbitrageCheck {
 
 impl Default for ArbitrageCheck {
     fn default() -> Self {
-        ArbitrageCheck { policy: ArbitragePolicy::default(), forward_floor: 0.0 }
+        ArbitrageCheck {
+            policy: ArbitragePolicy::default(),
+            forward_floor: 0.0,
+        }
     }
 }
 
@@ -118,8 +121,8 @@ impl StressConfig {
     /// Parse from TOML text. Requires the `stress-config` feature.
     #[cfg(feature = "stress-config")]
     pub fn from_toml_str(text: &str) -> Result<StressConfig, RustyQLibError> {
-        let config: StressConfig =
-            toml::from_str(text).map_err(|e| RustyQLibError::ParseError(format!("invalid stress config: {e}")))?;
+        let config: StressConfig = toml::from_str(text)
+            .map_err(|e| RustyQLibError::ParseError(format!("invalid stress config: {e}")))?;
         config.validate()?;
         Ok(config)
     }
@@ -127,19 +130,25 @@ impl StressConfig {
     /// Load and parse a TOML file. Requires the `stress-config` feature.
     #[cfg(feature = "stress-config")]
     pub fn from_toml_file(path: &str) -> Result<StressConfig, RustyQLibError> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| RustyQLibError::ParseError(format!("cannot read stress config '{path}': {e}")))?;
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            RustyQLibError::ParseError(format!("cannot read stress config '{path}': {e}"))
+        })?;
         Self::from_toml_str(&text)
     }
 
     #[cfg(feature = "stress-config")]
     fn validate(&self) -> Result<(), RustyQLibError> {
         if self.scenarios.is_empty() {
-            return Err(RustyQLibError::ParseError("stress config has no scenarios".to_string()));
+            return Err(RustyQLibError::ParseError(
+                "stress config has no scenarios".to_string(),
+            ));
         }
         for scenario in &self.scenarios {
             if scenario.shocks.is_empty() {
-                return Err(RustyQLibError::ParseError(format!("scenario '{}' has no shocks", scenario.name)));
+                return Err(RustyQLibError::ParseError(format!(
+                    "scenario '{}' has no shocks",
+                    scenario.name
+                )));
             }
             for shock in &scenario.shocks {
                 if shock.factor == RiskFactor::Time && shock.mode == BumpMode::Relative {
@@ -162,7 +171,9 @@ impl StressConfig {
                         return Err(scenario_error("tenors must not be empty"));
                     }
                     if tenors.windows(2).any(|w| w[1] <= w[0]) || tenors.iter().any(|&t| t <= 0.0) {
-                        return Err(scenario_error("tenors must be positive and strictly increasing"));
+                        return Err(scenario_error(
+                            "tenors must be positive and strictly increasing",
+                        ));
                     }
                     if let Some(shifts) = &shock.shifts {
                         if shifts.len() != tenors.len() {
@@ -293,6 +304,8 @@ mod tests {
     use super::*;
     use crate::core::trade::PutOrCall;
     use crate::equity::builder::EquityOptionBuilder;
+    #[cfg(feature = "stress-config")]
+    use crate::equity::bump::{Bump, BumpedMarket};
     use crate::equity::utils::Engine;
     use chrono::NaiveDate;
 
@@ -336,7 +349,8 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(pc)
             .engine(Engine::BlackScholes)
-            .build().expect("option must build")
+            .build()
+            .expect("option must build")
     }
 
     #[cfg(feature = "stress-config")]
@@ -357,7 +371,10 @@ mod tests {
         assert_eq!(crash.shocks[0].factor, RiskFactor::Spot);
         assert_eq!(crash.shocks[0].mode, BumpMode::Relative);
         assert_eq!(crash.shocks[1].factor, RiskFactor::Vol);
-        assert_eq!(config.scenarios[1].shocks[0].underlying.as_deref(), Some("ACME"));
+        assert_eq!(
+            config.scenarios[1].shocks[0].underlying.as_deref(),
+            Some("ACME")
+        );
         // rejects an empty config and relative time shocks
         assert!(StressConfig::from_toml_str("scenarios = []").is_err());
         let bad = r#"
@@ -387,17 +404,44 @@ mod tests {
         let opt = option("ACME", PutOrCall::Call, 100.0);
         let market = opt.snapshot_market();
         let shocks = vec![
-            Shock { factor: RiskFactor::Spot, mode: BumpMode::Relative, size: -0.2, underlying: None, tenors: None, shifts: None },
-            Shock { factor: RiskFactor::Spot, mode: BumpMode::Absolute, size: -1.0, underlying: None, tenors: None, shifts: None },
+            Shock {
+                factor: RiskFactor::Spot,
+                mode: BumpMode::Relative,
+                size: -0.2,
+                underlying: None,
+                tenors: None,
+                shifts: None,
+            },
+            Shock {
+                factor: RiskFactor::Spot,
+                mode: BumpMode::Absolute,
+                size: -1.0,
+                underlying: None,
+                tenors: None,
+                shifts: None,
+            },
             // filtered out: different underlying
-            Shock { factor: RiskFactor::Vol, mode: BumpMode::Absolute, size: 0.1, underlying: Some("OTHER".into()), tenors: None, shifts: None },
+            Shock {
+                factor: RiskFactor::Vol,
+                mode: BumpMode::Absolute,
+                size: 0.1,
+                underlying: Some("OTHER".into()),
+                tenors: None,
+                shifts: None,
+            },
         ];
         let bumped = market.bumped(&shocks).unwrap();
         // in order: 100 * 0.8 = 80, then - 1
         let spot = bumped.get(&Spot("ACME".to_string())).unwrap().value();
         assert!((spot - 79.0).abs() < 1e-12, "composed spot {spot}");
-        let vol = bumped.get(&Vol("ACME".to_string())).unwrap().vol(100.0, 100.0, 1.0);
-        assert!((vol - 0.25).abs() < 1e-12, "filtered vol shock must not apply, got {vol}");
+        let vol = bumped
+            .get(&Vol("ACME".to_string()))
+            .unwrap()
+            .vol(100.0, 100.0, 1.0);
+        assert!(
+            (vol - 0.25).abs() < 1e-12,
+            "filtered vol shock must not apply, got {vol}"
+        );
     }
 
     #[test]
@@ -409,9 +453,14 @@ mod tests {
         assert_eq!(results.len(), 3);
         let crash = &results[0];
         assert_eq!(crash.trades.len(), 2);
-        // trade-level equals a direct price_with reprice
+        // trade-level equals a direct bumped-market reprice
         let call = option("ACME", PutOrCall::Call, 100.0);
-        let expected_stressed = 100.0 * call.price_with(-20.0, 0.10, 0.0, 0.0);
+        let stress = Bump {
+            d_spot: -20.0,
+            d_vol: 0.10,
+            ..Bump::NONE
+        };
+        let expected_stressed = 100.0 * call.price_bumped(&BumpedMarket::new(&call.market, stress));
         assert!(
             (crash.trades[0].stressed_mtm - expected_stressed).abs() < 1e-10,
             "{} vs {expected_stressed}",
@@ -420,7 +469,11 @@ mod tests {
         // aggregation identity: portfolio = sum of trades, exactly
         for result in &results {
             let sum_pnl: f64 = result.trades.iter().map(|t| t.stress_pnl).sum();
-            assert!((result.stress_pnl - sum_pnl).abs() < 1e-10, "{}", result.scenario);
+            assert!(
+                (result.stress_pnl - sum_pnl).abs() < 1e-10,
+                "{}",
+                result.scenario
+            );
             let sum_base: f64 = result.trades.iter().map(|t| t.base_mtm).sum();
             assert!((result.base_mtm - sum_base).abs() < 1e-10);
         }
@@ -434,11 +487,23 @@ mod tests {
         let results = stress_mtm(&b, &config).unwrap();
         let crash = &results[0];
         // spot -20% + vol +10pts: the long call loses, the long put gains
-        assert!(crash.trades[0].stress_pnl < 0.0, "call {:?}", crash.trades[0]);
-        assert!(crash.trades[1].stress_pnl > 0.0, "put {:?}", crash.trades[1]);
+        assert!(
+            crash.trades[0].stress_pnl < 0.0,
+            "call {:?}",
+            crash.trades[0]
+        );
+        assert!(
+            crash.trades[1].stress_pnl > 0.0,
+            "put {:?}",
+            crash.trades[1]
+        );
         // a week of pure decay costs a long-options book money
         let decay = &results[2];
-        assert!(decay.stress_pnl < 0.0, "theta scenario {:?}", decay.stress_pnl);
+        assert!(
+            decay.stress_pnl < 0.0,
+            "theta scenario {:?}",
+            decay.stress_pnl
+        );
         // the ACME-only rate shock hits every trade in this single-name book
         assert!(results[1].trades.iter().all(|t| t.stress_pnl != 0.0));
     }
@@ -461,7 +526,11 @@ mod tests {
         let shock = &config.scenarios[0].shocks[0];
         assert_eq!(shock.tenors.as_deref(), Some(&[2.0][..]));
         assert_eq!(shock.shifts, None);
-        assert_eq!(config.arbitrage.policy, ArbitragePolicy::Warn, "default policy");
+        assert_eq!(
+            config.arbitrage.policy,
+            ArbitragePolicy::Warn,
+            "default policy"
+        );
 
         // a 1.5y option sits between the 1y (unbumped) and 2y (bumped)
         // pillars: the 2y key-rate bump must move it less than the
@@ -493,7 +562,10 @@ mod tests {
         )
         .unwrap();
         let parallel = stress_mtm(&b, &parallel).unwrap();
-        assert!(key_rate[0].stress_pnl.abs() > 1e-8, "key-rate shock must move the book");
+        assert!(
+            key_rate[0].stress_pnl.abs() > 1e-8,
+            "key-rate shock must move the book"
+        );
         assert!(
             key_rate[0].stress_pnl.abs() < parallel[0].stress_pnl.abs(),
             "key-rate {} vs parallel {}",
@@ -555,7 +627,10 @@ mod tests {
             tenors = [2.0, 1.0]
             "#,
         ] {
-            assert!(StressConfig::from_toml_str(bad).is_err(), "must reject: {bad}");
+            assert!(
+                StressConfig::from_toml_str(bad).is_err(),
+                "must reject: {bad}"
+            );
         }
     }
 
@@ -588,13 +663,14 @@ mod tests {
         // warn and allow both let the run complete
         for policy in ["warn", "allow"] {
             let config = StressConfig::from_toml_str(&toml(policy)).unwrap();
-            assert!(stress_mtm(&b, &config).is_ok(), "policy {policy} must not fail");
+            assert!(
+                stress_mtm(&b, &config).is_ok(),
+                "policy {policy} must not fail"
+            );
         }
         // a floor can also be relaxed instead of the policy
-        let relaxed = StressConfig::from_toml_str(
-            &(toml("reject") + "forward_floor = -0.10\n"),
-        )
-        .unwrap();
+        let relaxed =
+            StressConfig::from_toml_str(&(toml("reject") + "forward_floor = -0.10\n")).unwrap();
         assert!((relaxed.arbitrage.forward_floor + 0.10).abs() < 1e-12);
         assert!(stress_mtm(&b, &relaxed).is_ok());
     }

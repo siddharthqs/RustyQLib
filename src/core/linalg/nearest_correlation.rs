@@ -14,6 +14,11 @@
 //! ([`decomp::eigen`](super::decomp::eigen)) — exactly the right tool
 //! for the small symmetric matrices of basket products.
 
+// index loops throughout mirror the matrix subscripts of the algorithm
+// (`y[i][j]` vs `y[j][i]`, per-entry Dykstra corrections); iterator forms
+// would obscure the math
+#![allow(clippy::needless_range_loop)]
+
 use super::decomp::eigen::symmetric_eigen;
 use crate::core::errors::RustyQLibError;
 
@@ -23,15 +28,23 @@ use crate::core::errors::RustyQLibError;
 /// and `max_iter` caps the projection rounds (typically converges in
 /// tens). The result has an exact unit diagonal and eigenvalues
 /// `>= -1e-12`.
-pub fn nearest_correlation(a: &[Vec<f64>], tol: f64, max_iter: usize) -> Result<Vec<Vec<f64>>, RustyQLibError> {
+pub fn nearest_correlation(
+    a: &[Vec<f64>],
+    tol: f64,
+    max_iter: usize,
+) -> Result<Vec<Vec<f64>>, RustyQLibError> {
     let n = a.len();
     if a.iter().any(|row| row.len() != n) {
-        return Err(RustyQLibError::NumericalError("matrix must be square".to_string()));
+        return Err(RustyQLibError::NumericalError(
+            "matrix must be square".to_string(),
+        ));
     }
     for i in 0..n {
         for j in 0..n {
             if (a[i][j] - a[j][i]).abs() > 1e-8 {
-                return Err(RustyQLibError::NumericalError("matrix must be symmetric".to_string()));
+                return Err(RustyQLibError::NumericalError(
+                    "matrix must be symmetric".to_string(),
+                ));
             }
         }
     }
@@ -129,7 +142,11 @@ mod tests {
         // the worked example from Higham's paper: nearest correlation
         // matrix to [[1,1,0],[1,1,1],[0,1,1]] has off-diagonals
         // 0.7607 and 0.1573
-        let a = vec![vec![1.0, 1.0, 0.0], vec![1.0, 1.0, 1.0], vec![0.0, 1.0, 1.0]];
+        let a = vec![
+            vec![1.0, 1.0, 0.0],
+            vec![1.0, 1.0, 1.0],
+            vec![0.0, 1.0, 1.0],
+        ];
         let x = nearest_correlation(&a, 1e-12, 200).unwrap();
         assert!((x[0][1] - 0.7607).abs() < 1e-3, "x01 {}", x[0][1]);
         assert!((x[1][2] - 0.7607).abs() < 1e-3, "x12 {}", x[1][2]);
@@ -143,7 +160,10 @@ mod tests {
             vec![0.9, 1.0, 0.9],
             vec![-0.9, 0.9, 1.0],
         ];
-        assert!(eigenvalues(&a).iter().any(|&v| v < -1e-6), "test input should be indefinite");
+        assert!(
+            eigenvalues(&a).iter().any(|&v| v < -1e-6),
+            "test input should be indefinite"
+        );
         let x = nearest_correlation(&a, 1e-12, 200).unwrap();
         for i in 0..3 {
             assert_eq!(x[i][i], 1.0);
@@ -152,14 +172,22 @@ mod tests {
                 assert!(x[i][j].abs() <= 1.0 + 1e-12);
             }
         }
-        assert!(eigenvalues(&x).iter().all(|&v| v >= -1e-10), "not PSD: {:?}", eigenvalues(&x));
+        assert!(
+            eigenvalues(&x).iter().all(|&v| v >= -1e-10),
+            "not PSD: {:?}",
+            eigenvalues(&x)
+        );
         // and it now factorizes for simulation
         assert!(cholesky(&x).is_ok());
     }
 
     #[test]
     fn valid_matrices_pass_through_unchanged() {
-        let a = vec![vec![1.0, 0.3, 0.1], vec![0.3, 1.0, 0.2], vec![0.1, 0.2, 1.0]];
+        let a = vec![
+            vec![1.0, 0.3, 0.1],
+            vec![0.3, 1.0, 0.2],
+            vec![0.1, 0.2, 1.0],
+        ];
         let x = nearest_correlation(&a, 1e-12, 200).unwrap();
         for i in 0..3 {
             for j in 0..3 {
@@ -167,5 +195,4 @@ mod tests {
             }
         }
     }
-
 }

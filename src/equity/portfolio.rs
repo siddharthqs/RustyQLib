@@ -17,11 +17,12 @@
 //!    +  unexplained
 //! ```
 //!
-//! The `actual` PnL is a full reprice of every position under the shifted
-//! market ([`EquityOption::price_with`]), so `unexplained` is a true
+//! The `actual` PnL is a full reprice of every position under the bumped
+//! market ([`EquityOption::price_bumped`]), so `unexplained` is a true
 //! residual — third-order terms and any cross terms not in the expansion.
 
 use crate::core::traits::Instrument;
+use crate::equity::bump::{Bump, BumpedMarket};
 use crate::equity::vanilla_option::EquityOption;
 
 /// A signed position in one option: `quantity` contracts (negative = short).
@@ -51,20 +52,10 @@ pub struct PortfolioGreeks {
     pub volga: f64,
 }
 
-/// A market move to attribute PnL over. All fields default to zero, so a
-/// scenario can set only what moves, e.g.
-/// `MarketMove { d_spot: 2.0, d_time: 1.0 / 365.0, ..Default::default() }`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MarketMove {
-    /// Absolute change in the underlying price.
-    pub d_spot: f64,
-    /// Parallel shift of the implied volatility (absolute, e.g. 0.01 = 1 pt).
-    pub d_vol: f64,
-    /// Parallel shift of the risk-free rate.
-    pub d_rate: f64,
-    /// Elapsed calendar time in years (1.0 / 365.0 = one day).
-    pub d_time: f64,
-}
+/// A market move to attribute PnL over is a plain [`Bump`]; all fields
+/// default to zero, so a scenario can set only what moves, e.g.
+/// `Bump { d_spot: 2.0, d_time: 1.0 / 365.0, ..Bump::NONE }`.
+pub type MarketMove = Bump;
 
 /// Risk-based PnL explain for one market move.
 #[derive(Debug, Clone, Copy)]
@@ -86,7 +77,9 @@ pub struct PnlAttribution {
 
 impl EquityPortfolio {
     pub fn new() -> Self {
-        Self { positions: Vec::new() }
+        Self {
+            positions: Vec::new(),
+        }
     }
 
     /// Add `quantity` contracts of `option` (negative = short). All
@@ -115,7 +108,10 @@ impl EquityPortfolio {
 
     /// Book value: quantity-weighted sum of position NPVs.
     pub fn npv(&self) -> f64 {
-        self.positions.iter().map(|p| p.quantity * p.option.npv()).sum()
+        self.positions
+            .iter()
+            .map(|p| p.quantity * p.option.npv())
+            .sum()
     }
 
     /// Aggregated Greeks, each position computed by its own engine.
@@ -152,15 +148,17 @@ impl EquityPortfolio {
         let explained =
             delta_pnl + gamma_pnl + vega_pnl + volga_pnl + vanna_pnl + theta_pnl + rho_pnl;
 
-        // base from price_with(0,0,0,0), not npv(): under Monte Carlo both
+        // base from a zero-bump reprice, not npv(): under Monte Carlo both
         // legs then share the same draws and the difference is noise-free
+        let bump = *m;
         let actual: f64 = self
             .positions
             .iter()
             .map(|p| {
+                let market = &p.option.market;
                 p.quantity
-                    * (p.option.price_with(m.d_spot, m.d_vol, m.d_rate, m.d_time)
-                        - p.option.price_with(0.0, 0.0, 0.0, 0.0))
+                    * (p.option.price_bumped(&BumpedMarket::new(market, bump))
+                        - p.option.price_bumped(&BumpedMarket::base(market)))
             })
             .sum();
 
@@ -199,7 +197,8 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(put_or_call)
             .engine(Engine::BlackScholes)
-            .build().expect("option must build")
+            .build()
+            .expect("option must build")
     }
 
     #[test]
@@ -220,7 +219,9 @@ mod tests {
         flat.add(option(PutOrCall::Call, 100.0), 5.0);
         flat.add(option(PutOrCall::Call, 100.0), -5.0);
         let g = flat.greeks();
-        for v in [g.npv, g.delta, g.gamma, g.vega, g.theta, g.rho, g.vanna, g.volga] {
+        for v in [
+            g.npv, g.delta, g.gamma, g.vega, g.theta, g.rho, g.vanna, g.volga,
+        ] {
             assert!(v.abs() < 1e-12);
         }
     }
@@ -251,7 +252,8 @@ mod tests {
             .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
             .vanilla(PutOrCall::Call)
             .engine(Engine::BlackScholes)
-            .build().expect("option must build");
+            .build()
+            .expect("option must build");
         let mut book = EquityPortfolio::new();
         book.add(option(PutOrCall::Call, 100.0), 1.0);
         book.add(other, 1.0);
@@ -264,12 +266,27 @@ mod tests {
         book.add(option(PutOrCall::Call, 110.0), -15.0);
         book.add(option(PutOrCall::Put, 95.0), 5.0);
 
-        let m = MarketMove { d_spot: 1.0, d_vol: 0.01, d_rate: 1e-4, d_time: 1.0 / 365.0 };
+        let m = MarketMove {
+            d_spot: 1.0,
+            d_vol: 0.01,
+            d_rate: 1e-4,
+            d_time: 1.0 / 365.0,
+        };
         let a = book.pnl_attribution(&m);
 
         // the Taylor terms must reproduce the reprice up to third order
-        assert!((a.explained - (a.delta_pnl + a.gamma_pnl + a.vega_pnl + a.volga_pnl
-            + a.vanna_pnl + a.theta_pnl + a.rho_pnl)).abs() < 1e-12);
+        assert!(
+            (a.explained
+                - (a.delta_pnl
+                    + a.gamma_pnl
+                    + a.vega_pnl
+                    + a.volga_pnl
+                    + a.vanna_pnl
+                    + a.theta_pnl
+                    + a.rho_pnl))
+                .abs()
+                < 1e-12
+        );
         assert!(
             a.unexplained.abs() < 0.01 * a.actual.abs().max(1.0),
             "unexplained {} vs actual {}",
@@ -283,7 +300,10 @@ mod tests {
     fn pure_time_move_is_theta() {
         let mut book = EquityPortfolio::new();
         book.add(option(PutOrCall::Call, 100.0), 10.0);
-        let m = MarketMove { d_time: 1.0 / 365.0, ..Default::default() };
+        let m = MarketMove {
+            d_time: 1.0 / 365.0,
+            ..Default::default()
+        };
         let a = book.pnl_attribution(&m);
         assert_eq!(a.delta_pnl, 0.0);
         assert_eq!(a.vega_pnl, 0.0);
@@ -295,7 +315,12 @@ mod tests {
     fn attribution_holds_across_engines() {
         // same book priced analytically and on the FD grid: attribution
         // buckets must broadly agree (grid discretization is the tolerance)
-        let m = MarketMove { d_spot: 2.0, d_vol: 0.02, d_rate: 0.0, d_time: 1.0 / 365.0 };
+        let m = MarketMove {
+            d_spot: 2.0,
+            d_vol: 0.02,
+            d_rate: 0.0,
+            d_time: 1.0 / 365.0,
+        };
 
         let mut analytic = EquityPortfolio::new();
         analytic.add(option(PutOrCall::Call, 100.0), 10.0);
@@ -307,8 +332,12 @@ mod tests {
         fd_book.add(fd, 10.0);
         let f = fd_book.pnl_attribution(&m);
 
-        assert!((a.actual - f.actual).abs() < 0.05 * a.actual.abs().max(1.0),
-            "analytic actual {} vs fd actual {}", a.actual, f.actual);
+        assert!(
+            (a.actual - f.actual).abs() < 0.05 * a.actual.abs().max(1.0),
+            "analytic actual {} vs fd actual {}",
+            a.actual,
+            f.actual
+        );
         assert!((a.delta_pnl - f.delta_pnl).abs() < 0.05 * a.delta_pnl.abs().max(1.0));
     }
 }

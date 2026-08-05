@@ -14,9 +14,9 @@
 //!   vanna/charm/zomma/volga, the Black-76 futures family).
 //! - **Bump**: everything else (Monte Carlo, Barone-Adesi-Whaley,
 //!   Bjerksund-Stensland, analytic Heston) shares the *one* set of
-//!   central-difference stencils below over
-//!   [`EquityOption::price_with`] — the engine's repricing kernel, which
-//!   guarantees common random numbers under Monte Carlo. What used to be
+//!   central-difference stencils below over bumped-market reprices
+//!   ([`EquityOption::price_bumped`]), which guarantee common random
+//!   numbers under Monte Carlo. What used to be
 //!   four hand-written copies of every stencil now differs only in a
 //!   [`BumpPolicy`]: a per-engine table of bump sizes (preserved exactly,
 //!   so values are bit-identical to the former per-engine code).
@@ -43,6 +43,7 @@ use std::collections::HashMap;
 
 use crate::core::results::{Greeks, PricingResult};
 use crate::equity::blackscholes::BlackScholesPricer;
+use crate::equity::bump::{Bump, BumpedMarket};
 use crate::equity::utils::PricingEngine;
 use crate::equity::vanilla_option::EquityOption;
 use crate::equity::{baw, binomial, finite_difference, heston, montecarlo};
@@ -128,8 +129,8 @@ fn route(option: &EquityOption) -> Route {
 /// Memoized shifted reprices of one option, in the **maturity-shift**
 /// convention: `reprice(ds, dv, dr, dt)` values the option with maturity
 /// extended by `dt` (the stencils below read like the textbook formulas).
-/// [`EquityOption::price_with`] takes elapsed calendar time, hence the
-/// sign flip.
+/// The [`Bump`] convention is elapsed calendar time, hence the sign flip
+/// when the view is built.
 ///
 /// On the Barone-Adesi-Whaley engine the repricer additionally caches the
 /// spot-independent boundary work per `(dv, dr, dt)` shift
@@ -144,9 +145,13 @@ struct Repricer<'a> {
 
 impl<'a> Repricer<'a> {
     fn new(option: &'a EquityOption) -> Self {
-        let baw_kernels = matches!(option.engine, PricingEngine::BaroneAdesiWhaley)
-            .then(HashMap::new);
-        Repricer { option, cache: HashMap::new(), baw_kernels }
+        let baw_kernels =
+            matches!(option.engine, PricingEngine::BaroneAdesiWhaley).then(HashMap::new);
+        Repricer {
+            option,
+            cache: HashMap::new(),
+            baw_kernels,
+        }
     }
 
     fn reprice(&mut self, ds: f64, dv: f64, dr: f64, dt: f64) -> f64 {
@@ -161,7 +166,18 @@ impl<'a> Repricer<'a> {
                     .or_insert_with(|| baw::SpotKernel::new(self.option, dv, dr, dt));
                 kernel.value(self.option.effective_spot() + ds)
             }
-            None => self.option.price_with(ds, dv, dr, -dt),
+            None => {
+                // the stencils shift the maturity; the bump convention is
+                // elapsed calendar time — the one place the sign flips
+                let bump = Bump {
+                    d_spot: ds,
+                    d_vol: dv,
+                    d_rate: dr,
+                    d_time: -dt,
+                };
+                self.option
+                    .price_bumped(&BumpedMarket::new(&self.option.market, bump))
+            }
         };
         self.cache.insert(key, value);
         value
@@ -200,7 +216,8 @@ fn bump_rho(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
 
 fn bump_vanna(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
     let (hs, hv) = (bumps.spot_bump, bumps.vol_bump);
-    (repricer.reprice(hs, hv, 0.0, 0.0) - repricer.reprice(-hs, hv, 0.0, 0.0)
+    (repricer.reprice(hs, hv, 0.0, 0.0)
+        - repricer.reprice(-hs, hv, 0.0, 0.0)
         - repricer.reprice(hs, -hv, 0.0, 0.0)
         + repricer.reprice(-hs, -hv, 0.0, 0.0))
         / (4.0 * hs * hv)
@@ -209,7 +226,8 @@ fn bump_vanna(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
 fn bump_charm(repricer: &mut Repricer, bumps: &BumpPolicy) -> f64 {
     // charm = d(delta)/dt = -d(delta)/dT
     let (hs, ht) = (bumps.spot_bump, bumps.time_bump);
-    -(repricer.reprice(hs, 0.0, 0.0, ht) - repricer.reprice(-hs, 0.0, 0.0, ht)
+    -(repricer.reprice(hs, 0.0, 0.0, ht)
+        - repricer.reprice(-hs, 0.0, 0.0, ht)
         - repricer.reprice(hs, 0.0, 0.0, -ht)
         + repricer.reprice(-hs, 0.0, 0.0, -ht))
         / (4.0 * hs * ht)
@@ -247,9 +265,27 @@ macro_rules! greek {
     };
 }
 
-greek!(gamma, bump_gamma, finite_difference::gamma, binomial::gamma, gamma);
-greek!(theta, bump_theta, finite_difference::theta, binomial::theta, theta);
-greek!(vanna, bump_vanna, finite_difference::vanna, binomial::vanna, vanna);
+greek!(
+    gamma,
+    bump_gamma,
+    finite_difference::gamma,
+    binomial::gamma,
+    gamma
+);
+greek!(
+    theta,
+    bump_theta,
+    finite_difference::theta,
+    binomial::theta,
+    theta
+);
+greek!(
+    vanna,
+    bump_vanna,
+    finite_difference::vanna,
+    binomial::vanna,
+    vanna
+);
 
 // ── Engine-native fast paths inside the bump route ──────────────────────
 //
@@ -282,9 +318,7 @@ fn native_rho(option: &EquityOption) -> Option<f64> {
     match option.engine {
         // the one-step terminal route keeps the (cheaper) bump stencil;
         // the adjoint sweep covers the path routes
-        PricingEngine::MonteCarlo(_)
-            if montecarlo::pathwise_delta_vega(option).is_none() =>
-        {
+        PricingEngine::MonteCarlo(_) if montecarlo::pathwise_delta_vega(option).is_none() => {
             montecarlo::aad_greeks(option).map(|g| g.rho)
         }
         _ => None,
@@ -296,8 +330,9 @@ pub fn delta(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::delta(option),
         Route::Tree => binomial::delta(option),
         Route::Analytic => BlackScholesPricer::new().delta(option),
-        Route::Bump(bumps) => native_delta(option)
-            .unwrap_or_else(|| bump_delta(&mut Repricer::new(option), &bumps)),
+        Route::Bump(bumps) => {
+            native_delta(option).unwrap_or_else(|| bump_delta(&mut Repricer::new(option), &bumps))
+        }
     }
 }
 
@@ -306,8 +341,9 @@ pub fn vega(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::vega(option),
         Route::Tree => binomial::vega(option),
         Route::Analytic => BlackScholesPricer::new().vega(option),
-        Route::Bump(bumps) => native_vega(option)
-            .unwrap_or_else(|| bump_vega(&mut Repricer::new(option), &bumps)),
+        Route::Bump(bumps) => {
+            native_vega(option).unwrap_or_else(|| bump_vega(&mut Repricer::new(option), &bumps))
+        }
     }
 }
 
@@ -316,13 +352,32 @@ pub fn rho(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::rho(option),
         Route::Tree => binomial::rho(option),
         Route::Analytic => BlackScholesPricer::new().rho(option),
-        Route::Bump(bumps) => native_rho(option)
-            .unwrap_or_else(|| bump_rho(&mut Repricer::new(option), &bumps)),
+        Route::Bump(bumps) => {
+            native_rho(option).unwrap_or_else(|| bump_rho(&mut Repricer::new(option), &bumps))
+        }
     }
 }
-greek!(charm, bump_charm, finite_difference::charm, binomial::charm, charm);
-greek!(zomma, bump_zomma, finite_difference::zomma, binomial::zomma, zomma);
-greek!(volga, bump_volga, finite_difference::volga, binomial::volga, volga);
+greek!(
+    charm,
+    bump_charm,
+    finite_difference::charm,
+    binomial::charm,
+    charm
+);
+greek!(
+    zomma,
+    bump_zomma,
+    finite_difference::zomma,
+    binomial::zomma,
+    zomma
+);
+greek!(
+    volga,
+    bump_volga,
+    finite_difference::volga,
+    binomial::volga,
+    volga
+);
 
 /// Delta elasticity `S * gamma / delta`; `NaN` when delta is zero.
 pub fn gamma_p(option: &EquityOption) -> f64 {
@@ -365,10 +420,13 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
         Route::Bump(bumps) => {
             let (pv, std_err) = match option.engine {
                 PricingEngine::MonteCarlo(_) => {
-                    let stats = montecarlo::npv_with_stats(option);
+                    let stats = montecarlo::stats(option, None);
                     (stats.pv, Some(stats.std_err))
                 }
-                _ => (option.price_with(0.0, 0.0, 0.0, 0.0), None),
+                _ => (
+                    option.price_bumped(&BumpedMarket::base(&option.market)),
+                    None,
+                ),
             };
             // one pathwise pass serves delta and vega under MC; one
             // adjoint sweep serves delta, vega AND rho on the path routes
@@ -387,14 +445,19 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
                 .map(|(delta, _)| delta)
                 .or(adjoint.map(|g| g.delta))
                 .or_else(|| {
-                    option.analytic_heston().then(|| heston::native_vanilla_delta(option)).flatten()
+                    option
+                        .analytic_heston()
+                        .then(|| heston::native_vanilla_delta(option))
+                        .flatten()
                 })
                 .unwrap_or_else(|| bump_delta(repricer, &bumps));
             let vega = pathwise
                 .map(|(_, vega)| vega)
                 .or(adjoint.map(|g| g.vega))
                 .unwrap_or_else(|| bump_vega(repricer, &bumps));
-            let rho = adjoint.map(|g| g.rho).unwrap_or_else(|| bump_rho(repricer, &bumps));
+            let rho = adjoint
+                .map(|g| g.rho)
+                .unwrap_or_else(|| bump_rho(repricer, &bumps));
             let gamma = bump_gamma(repricer, &bumps);
             let gamma_p = if delta == 0.0 {
                 f64::NAN
@@ -429,6 +492,11 @@ mod tests {
     use crate::equity::utils::{Engine, Model};
     use chrono::NaiveDate;
 
+    /// The stencil legs below bump the market themselves and reprice.
+    fn spot_bumped(option: &EquityOption, h: f64) -> f64 {
+        option.price_bumped(&BumpedMarket::new(&option.market, Bump::spot(h)))
+    }
+
     fn option(engine: Engine, put_or_call: PutOrCall) -> EquityOption {
         EquityOptionBuilder::new()
             .symbol("ACME")
@@ -454,8 +522,16 @@ mod tests {
             assert_eq!(d, mc.delta(), "accessor must use the pathwise estimator");
             assert_eq!(v, mc.vega(), "accessor must use the pathwise estimator");
             // and agrees with the closed form (QMC terminal simulation)
-            assert!((d - bs.delta()).abs() < 5e-3, "{pc:?} delta {d} vs {}", bs.delta());
-            assert!((v - bs.vega()).abs() < 0.2, "{pc:?} vega {v} vs {}", bs.vega());
+            assert!(
+                (d - bs.delta()).abs() < 5e-3,
+                "{pc:?} delta {d} vs {}",
+                bs.delta()
+            );
+            assert!(
+                (v - bs.vega()).abs() < 0.2,
+                "{pc:?} vega {v} vs {}",
+                bs.vega()
+            );
             // batch equals accessors exactly
             let result = mc.price().unwrap();
             assert_eq!(result.greeks.delta, d);
@@ -473,14 +549,33 @@ mod tests {
         }
         assert!(montecarlo::pathwise_delta_vega(&mc).is_none());
         let adjoint = montecarlo::aad_greeks(&mc).expect("AAD must cover multi-step vanilla");
-        assert_eq!(mc.delta(), adjoint.delta, "accessor must use the adjoint estimator");
+        assert_eq!(
+            mc.delta(),
+            adjoint.delta,
+            "accessor must use the adjoint estimator"
+        );
         assert_eq!(mc.vega(), adjoint.vega);
         assert_eq!(mc.rho(), adjoint.rho);
         // one sweep agrees with the closed forms
         let bs = option(Engine::BlackScholes, PutOrCall::Call);
-        assert!((adjoint.delta - bs.delta()).abs() < 1e-2, "{} vs {}", adjoint.delta, bs.delta());
-        assert!((adjoint.vega - bs.vega()).abs() < 0.5, "{} vs {}", adjoint.vega, bs.vega());
-        assert!((adjoint.rho - bs.rho()).abs() < 0.5, "{} vs {}", adjoint.rho, bs.rho());
+        assert!(
+            (adjoint.delta - bs.delta()).abs() < 1e-2,
+            "{} vs {}",
+            adjoint.delta,
+            bs.delta()
+        );
+        assert!(
+            (adjoint.vega - bs.vega()).abs() < 0.5,
+            "{} vs {}",
+            adjoint.vega,
+            bs.vega()
+        );
+        assert!(
+            (adjoint.rho - bs.rho()).abs() < 0.5,
+            "{} vs {}",
+            adjoint.rho,
+            bs.rho()
+        );
         // batch equals accessors exactly
         let result = mc.price().unwrap();
         assert_eq!(result.greeks.delta, adjoint.delta);
@@ -505,9 +600,12 @@ mod tests {
         assert_eq!(asian.delta(), adjoint.delta);
         // the adjoint agrees with the CRN bump stencil on the same option
         let h = asian.market.spot.value() * 0.01;
-        let bump = (asian.price_with(h, 0.0, 0.0, 0.0) - asian.price_with(-h, 0.0, 0.0, 0.0))
-            / (2.0 * h);
-        assert!((adjoint.delta - bump).abs() < 0.03, "adjoint {} vs bump {bump}", adjoint.delta);
+        let bump = (spot_bumped(&asian, h) - spot_bumped(&asian, -h)) / (2.0 * h);
+        assert!(
+            (adjoint.delta - bump).abs() < 0.03,
+            "adjoint {} vs bump {bump}",
+            adjoint.delta
+        );
         assert!(adjoint.vega > 0.0 && adjoint.rho > 0.0);
 
         // a barrier's indicator has zero almost-everywhere derivative:
@@ -531,16 +629,20 @@ mod tests {
     #[test]
     fn heston_native_delta_matches_the_bump_stencil() {
         use crate::equity::heston::HestonParams;
-        let params =
-            HestonParams { v0: 0.0625, kappa: 1.5, theta: 0.0625, vol_of_vol: 0.4, rho: -0.6 };
+        let params = HestonParams {
+            v0: 0.0625,
+            kappa: 1.5,
+            theta: 0.0625,
+            vol_of_vol: 0.4,
+            rho: -0.6,
+        };
         let mut call = option(Engine::BlackScholes, PutOrCall::Call);
         call.model = Model::Heston(params);
         let mut put = option(Engine::BlackScholes, PutOrCall::Put);
         put.model = Model::Heston(params);
         // native delta agrees with the old central-difference stencil
         let h = call.market.spot.value() * 1e-4;
-        let stencil =
-            (call.price_with(h, 0.0, 0.0, 0.0) - call.price_with(-h, 0.0, 0.0, 0.0)) / (2.0 * h);
+        let stencil = (spot_bumped(&call, h) - spot_bumped(&call, -h)) / (2.0 * h);
         assert!(
             (call.delta() - stencil).abs() < 1e-6,
             "native {} vs stencil {stencil}",
@@ -569,16 +671,13 @@ mod tests {
             .build()
             .expect("option must build");
         // the kernel path (used by delta/gamma) must reproduce the direct
-        // price_with stencil bit for bit — sharing the boundary solve is a
-        // pure speed optimization
+        // bumped-market stencil bit for bit — sharing the boundary solve
+        // is a pure speed optimization
         let h = baw_put.effective_spot() * 1e-4;
-        let direct_delta = (baw_put.price_with(h, 0.0, 0.0, 0.0)
-            - baw_put.price_with(-h, 0.0, 0.0, 0.0))
-            / (2.0 * h);
+        let direct_delta = (spot_bumped(&baw_put, h) - spot_bumped(&baw_put, -h)) / (2.0 * h);
         assert_eq!(baw_put.delta(), direct_delta);
-        let direct_gamma = (baw_put.price_with(h, 0.0, 0.0, 0.0)
-            - 2.0 * baw_put.price_with(0.0, 0.0, 0.0, 0.0)
-            + baw_put.price_with(-h, 0.0, 0.0, 0.0))
+        let direct_gamma = (spot_bumped(&baw_put, h) - 2.0 * spot_bumped(&baw_put, 0.0)
+            + spot_bumped(&baw_put, -h))
             / (h * h);
         assert_eq!(baw_put.gamma(), direct_gamma);
     }

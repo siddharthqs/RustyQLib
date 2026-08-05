@@ -135,7 +135,11 @@ impl Smile {
 #[derive(Debug, Clone, Serialize)]
 enum SurfaceData {
     Flat(f64),
-    Term { times: Vec<f64>, smiles: Vec<Smile>, coord: SmileCoord },
+    Term {
+        times: Vec<f64>,
+        smiles: Vec<Smile>,
+        coord: SmileCoord,
+    },
 }
 
 // manual impl so SmileCoord needn't be public-serializable
@@ -180,7 +184,11 @@ impl VolSurface {
         if vol <= 0.0 {
             return Err(VolError::NonPositiveVol(vol));
         }
-        Ok(VolSurface { reference_date, day_count, data: SurfaceData::Flat(vol) })
+        Ok(VolSurface {
+            reference_date,
+            day_count,
+            data: SurfaceData::Flat(vol),
+        })
     }
 
     /// Absolute strike x expiry grid.
@@ -191,7 +199,14 @@ impl VolSurface {
         reference_date: NaiveDate,
         day_count: DayCountConvention,
     ) -> Result<Self, VolError> {
-        Self::from_grid(expiries, strikes, vols, reference_date, day_count, SmileCoord::Strike)
+        Self::from_grid(
+            expiries,
+            strikes,
+            vols,
+            reference_date,
+            day_count,
+            SmileCoord::Strike,
+        )
     }
 
     /// Forward moneyness (K/F) x expiry grid.
@@ -202,7 +217,14 @@ impl VolSurface {
         reference_date: NaiveDate,
         day_count: DayCountConvention,
     ) -> Result<Self, VolError> {
-        Self::from_grid(expiries, moneyness, vols, reference_date, day_count, SmileCoord::Moneyness)
+        Self::from_grid(
+            expiries,
+            moneyness,
+            vols,
+            reference_date,
+            day_count,
+            SmileCoord::Moneyness,
+        )
     }
 
     /// Forward call delta x expiry grid (FX convention). Each pillar is
@@ -241,7 +263,11 @@ impl VolSurface {
         Ok(VolSurface {
             reference_date,
             day_count,
-            data: SurfaceData::Term { times, smiles, coord: SmileCoord::LogMoneyness },
+            data: SurfaceData::Term {
+                times,
+                smiles,
+                coord: SmileCoord::LogMoneyness,
+            },
         })
     }
 
@@ -256,7 +282,10 @@ impl VolSurface {
     ) -> Result<Self, VolError> {
         let times = Self::resolve_expiries(expiries, reference_date, day_count)?;
         if smiles.len() != times.len() {
-            return Err(VolError::LengthMismatch { expected: times.len(), got: smiles.len() });
+            return Err(VolError::LengthMismatch {
+                expected: times.len(),
+                got: smiles.len(),
+            });
         }
         for smile in smiles {
             if smile.is_empty() {
@@ -271,11 +300,20 @@ impl VolSurface {
                 return Err(VolError::NonIncreasingAxis);
             }
         }
-        let smiles = smiles.iter().map(|points| Smile { points: points.clone() }).collect();
+        let smiles = smiles
+            .iter()
+            .map(|points| Smile {
+                points: points.clone(),
+            })
+            .collect();
         Ok(VolSurface {
             reference_date,
             day_count,
-            data: SurfaceData::Term { times, smiles, coord: SmileCoord::Strike },
+            data: SurfaceData::Term {
+                times,
+                smiles,
+                coord: SmileCoord::Strike,
+            },
         })
     }
 
@@ -283,15 +321,24 @@ impl VolSurface {
     pub fn from_input(input: &VolInput, reference_date: NaiveDate) -> Result<Self, VolError> {
         match input {
             VolInput::Flat { vol, day_count } => Self::flat(*vol, reference_date, *day_count),
-            VolInput::StrikeExpiry { expiries, strikes, vols, day_count } => {
-                Self::from_strike_grid(expiries, strikes, vols, reference_date, *day_count)
-            }
-            VolInput::MoneynessExpiry { expiries, moneyness, vols, day_count } => {
-                Self::from_moneyness_grid(expiries, moneyness, vols, reference_date, *day_count)
-            }
-            VolInput::DeltaExpiry { expiries, deltas, vols, day_count } => {
-                Self::from_delta_grid(expiries, deltas, vols, reference_date, *day_count)
-            }
+            VolInput::StrikeExpiry {
+                expiries,
+                strikes,
+                vols,
+                day_count,
+            } => Self::from_strike_grid(expiries, strikes, vols, reference_date, *day_count),
+            VolInput::MoneynessExpiry {
+                expiries,
+                moneyness,
+                vols,
+                day_count,
+            } => Self::from_moneyness_grid(expiries, moneyness, vols, reference_date, *day_count),
+            VolInput::DeltaExpiry {
+                expiries,
+                deltas,
+                vols,
+                day_count,
+            } => Self::from_delta_grid(expiries, deltas, vols, reference_date, *day_count),
         }
     }
 
@@ -306,7 +353,11 @@ impl VolSurface {
     pub fn vol(&self, strike: f64, forward: f64, t: f64) -> f64 {
         match &self.data {
             SurfaceData::Flat(v) => *v,
-            SurfaceData::Term { times, smiles, coord } => {
+            SurfaceData::Term {
+                times,
+                smiles,
+                coord,
+            } => {
                 let x = match coord {
                     SmileCoord::Strike => strike,
                     SmileCoord::Moneyness => strike / forward,
@@ -392,9 +443,19 @@ impl VolSurface {
         }
         let smiles = vols
             .iter()
-            .map(|row| Smile { points: axis.iter().copied().zip(row.iter().copied()).collect() })
+            .map(|row| Smile {
+                points: axis.iter().copied().zip(row.iter().copied()).collect(),
+            })
             .collect();
-        Ok(VolSurface { reference_date, day_count, data: SurfaceData::Term { times, smiles, coord } })
+        Ok(VolSurface {
+            reference_date,
+            day_count,
+            data: SurfaceData::Term {
+                times,
+                smiles,
+                coord,
+            },
+        })
     }
 
     fn resolve_expiries(
@@ -428,11 +489,17 @@ impl VolSurface {
             return Err(VolError::Empty);
         }
         if vols.len() != times.len() {
-            return Err(VolError::LengthMismatch { expected: times.len(), got: vols.len() });
+            return Err(VolError::LengthMismatch {
+                expected: times.len(),
+                got: vols.len(),
+            });
         }
         for row in vols {
             if row.len() != axis.len() {
-                return Err(VolError::LengthMismatch { expected: axis.len(), got: row.len() });
+                return Err(VolError::LengthMismatch {
+                    expected: axis.len(),
+                    got: row.len(),
+                });
             }
             for &v in row {
                 if v <= 0.0 {
@@ -446,10 +513,18 @@ impl VolSurface {
 
 impl fmt::Display for VolSurface {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "VolSurface (ref {}, {:?})", self.reference_date, self.day_count)?;
+        writeln!(
+            f,
+            "VolSurface (ref {}, {:?})",
+            self.reference_date, self.day_count
+        )?;
         match &self.data {
             SurfaceData::Flat(v) => writeln!(f, "  flat vol: {v}"),
-            SurfaceData::Term { times, smiles, coord } => {
+            SurfaceData::Term {
+                times,
+                smiles,
+                coord,
+            } => {
                 writeln!(f, "  smile coordinate: {coord:?}")?;
                 for (t, smile) in times.iter().zip(smiles) {
                     write!(f, "  t={t:<8.4}")?;
@@ -524,7 +599,10 @@ mod tests {
         assert!((up.vol(90.0, 100.0, 2.0) - 0.28).abs() < 1e-14);
         let skew_base = s.vol(90.0, 100.0, 1.0) - s.vol(110.0, 100.0, 1.0);
         let skew_up = up.vol(90.0, 100.0, 1.0) - up.vol(110.0, 100.0, 1.0);
-        assert!((skew_base - skew_up).abs() < 1e-14, "parallel shift must keep the skew");
+        assert!(
+            (skew_base - skew_up).abs() < 1e-14,
+            "parallel shift must keep the skew"
+        );
         // the original is untouched
         assert!((s.vol(100.0, 100.0, 1.0) - 0.20).abs() < 1e-14);
     }
@@ -661,7 +739,10 @@ mod tests {
     #[test]
     fn validation_errors() {
         let dc = DayCountConvention::Act365;
-        assert_eq!(VolSurface::flat(0.0, asof(), dc).unwrap_err(), VolError::NonPositiveVol(0.0));
+        assert_eq!(
+            VolSurface::flat(0.0, asof(), dc).unwrap_err(),
+            VolError::NonPositiveVol(0.0)
+        );
         assert_eq!(
             VolSurface::from_strike_grid(&[], &[100.0], &[], asof(), dc).unwrap_err(),
             VolError::Empty

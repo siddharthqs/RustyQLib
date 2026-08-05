@@ -82,16 +82,22 @@ mod tests {
         let mut eps = vec![0.0; n];
         path_normals(11, 0, &mut c);
         path_normals(11, 1, &mut eps);
-        let payoffs: Vec<f64> =
-            c.iter().zip(&eps).map(|(ci, ei)| 3.0 + 2.0 * ci + 0.1 * ei).collect();
+        let payoffs: Vec<f64> = c
+            .iter()
+            .zip(&eps)
+            .map(|(ci, ei)| 3.0 + 2.0 * ci + 0.1 * ei)
+            .collect();
 
         let (est, se, beta) = control_variate_estimate(&payoffs, &c, 0.0);
         assert!((beta - 2.0).abs() < 0.05, "beta {beta}");
         assert!((est - 3.0).abs() < 0.01, "estimate {est}");
         // raw standard error of the payoffs for comparison
         let mean_y: f64 = payoffs.iter().sum::<f64>() / n as f64;
-        let var_y: f64 =
-            payoffs.iter().map(|y| (y - mean_y) * (y - mean_y)).sum::<f64>() / n as f64;
+        let var_y: f64 = payoffs
+            .iter()
+            .map(|y| (y - mean_y) * (y - mean_y))
+            .sum::<f64>()
+            / n as f64;
         let raw_se = (var_y / n as f64).sqrt();
         assert!(se < 0.1 * raw_se, "cv se {se} vs raw {raw_se}");
     }

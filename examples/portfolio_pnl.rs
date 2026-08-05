@@ -39,7 +39,8 @@ fn option(put_or_call: PutOrCall, strike: f64, months: u32) -> EquityOption {
         .maturity_date(maturity)
         .vanilla(put_or_call)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build")
+        .build()
+        .expect("option must build")
 }
 
 fn print_attribution(a: &PnlAttribution) {
@@ -52,9 +53,16 @@ fn print_attribution(a: &PnlAttribution) {
     println!("  {:<14} {:>12.4}", "rho", a.rho_pnl);
     println!("  {:<14} {:>12.4}", "explained", a.explained);
     println!("  {:<14} {:>12.4}", "actual", a.actual);
-    println!("  {:<14} {:>12.4}  ({:.2}% of actual)",
-        "unexplained", a.unexplained,
-        if a.actual.abs() > 1e-12 { 100.0 * a.unexplained / a.actual } else { 0.0 });
+    println!(
+        "  {:<14} {:>12.4}  ({:.2}% of actual)",
+        "unexplained",
+        a.unexplained,
+        if a.actual.abs() > 1e-12 {
+            100.0 * a.unexplained / a.actual
+        } else {
+            0.0
+        }
+    );
 }
 
 fn main() {
@@ -68,16 +76,20 @@ fn main() {
     book.add(option(PutOrCall::Put, 90.0, 3), 80.0);
 
     common::section("Positions");
-    println!("  {:>8}  {:<6} {:>8} {:>10}  {:>12} {:>10}",
-        "qty", "type", "strike", "expiry", "npv", "delta");
+    println!(
+        "  {:>8}  {:<6} {:>8} {:>10}  {:>12} {:>10}",
+        "qty", "type", "strike", "expiry", "npv", "delta"
+    );
     for p in &book.positions {
-        println!("  {:>8.0}  {:<6} {:>8.2} {:>10}  {:>12.4} {:>10.4}",
+        println!(
+            "  {:>8.0}  {:<6} {:>8.2} {:>10}  {:>12.4} {:>10.4}",
             p.quantity,
             format!("{:?}", p.option.payoff.put_or_call()),
             p.option.base.strike_price,
             p.option.base.maturity_date,
             p.option.npv(),
-            p.option.delta());
+            p.option.delta()
+        );
     }
 
     common::section("Aggregated book Greeks (quantity-weighted)");
@@ -94,12 +106,22 @@ fn main() {
     println!("  {:<10} {:>14.4}", "volga", g.volga);
 
     common::section("Scenario 1: quiet day — spot +0.5, vol -25bp, one day");
-    let quiet = MarketMove { d_spot: 0.5, d_vol: -0.0025, d_rate: 0.0, d_time: 1.0 / 365.0 };
+    let quiet = MarketMove {
+        d_spot: 0.5,
+        d_vol: -0.0025,
+        d_rate: 0.0,
+        d_time: 1.0 / 365.0,
+    };
     let a1 = book.pnl_attribution(&quiet);
     print_attribution(&a1);
 
     common::section("Scenario 2: risk-off — spot -5, vol +4pts, one day");
-    let riskoff = MarketMove { d_spot: -5.0, d_vol: 0.04, d_rate: -0.001, d_time: 1.0 / 365.0 };
+    let riskoff = MarketMove {
+        d_spot: -5.0,
+        d_vol: 0.04,
+        d_rate: -0.001,
+        d_time: 1.0 / 365.0,
+    };
     let a2 = book.pnl_attribution(&riskoff);
     print_attribution(&a2);
     common::note("larger moves leave more in unexplained: the Taylor expansion");

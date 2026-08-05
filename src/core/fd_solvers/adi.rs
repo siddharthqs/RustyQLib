@@ -21,11 +21,15 @@
 
 use super::axis_operator::{AxisOperator, TensorGrid};
 
+/// The explicitly-treated operator `A_0` (typically the mixed
+/// derivatives), applied to the flat grid vector.
+pub type MixedTerm<'a> = &'a dyn Fn(&[f64]) -> Vec<f64>;
+
 /// `sum_k A_k u + A_0 u`: the full spatial operator applied explicitly.
 fn apply_full(
     grid: &TensorGrid,
     ops: &[AxisOperator],
-    mixed: Option<&dyn Fn(&[f64]) -> Vec<f64>>,
+    mixed: Option<MixedTerm>,
     u: &[f64],
 ) -> Vec<f64> {
     let mut out = vec![0.0; u.len()];
@@ -53,7 +57,7 @@ fn apply_full(
 pub fn douglas_step(
     grid: &TensorGrid,
     ops: &[AxisOperator],
-    mixed: Option<&dyn Fn(&[f64]) -> Vec<f64>>,
+    mixed: Option<MixedTerm>,
     u: &[f64],
     dt: f64,
     theta: f64,
@@ -86,7 +90,7 @@ pub fn douglas_step(
 pub fn hundsdorfer_verwer_step(
     grid: &TensorGrid,
     ops: &[AxisOperator],
-    mixed: Option<&dyn Fn(&[f64]) -> Vec<f64>>,
+    mixed: Option<MixedTerm>,
     u: &[f64],
     dt: f64,
     theta: f64,
@@ -160,7 +164,10 @@ mod tests {
     }
 
     fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
-        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max)
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f64::max)
     }
 
     /// Heat equation decay test in `ndim` dimensions: u0 = prod sin(pi x_k)
@@ -180,10 +187,10 @@ mod tests {
         let exact = (-(ndim as f64) * PI * PI * (steps as f64 * dt)).exp();
         let u0 = sine_product(&grid, h);
         // relative error at the grid maximum of the exact solution
-        let (imax, _) = u0
-            .iter()
-            .enumerate()
-            .fold((0, 0.0), |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc });
+        let (imax, _) = u0.iter().enumerate().fold(
+            (0, 0.0),
+            |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc },
+        );
         (u[imax] / (exact * u0[imax]) - 1.0).abs()
     }
 
@@ -253,7 +260,10 @@ mod tests {
             douglas = douglas_step(&grid, &ops, Some(&mixed), &douglas, dt, 0.5);
             hv = hundsdorfer_verwer_step(&grid, &ops, Some(&mixed), &hv, dt, 0.5, 0.5);
         }
-        assert!(max_abs_diff(&douglas, &reference) < 1e-2, "douglas vs reference");
+        assert!(
+            max_abs_diff(&douglas, &reference) < 1e-2,
+            "douglas vs reference"
+        );
         assert!(max_abs_diff(&hv, &reference) < 1e-2, "hv vs reference");
 
         // and the mixed term genuinely matters: dropping it moves the answer
@@ -261,6 +271,9 @@ mod tests {
         for _ in 0..steps {
             no_mixed = douglas_step(&grid, &ops, None, &no_mixed, dt, 0.5);
         }
-        assert!(max_abs_diff(&no_mixed, &reference) > 1e-3, "mixed term had no effect");
+        assert!(
+            max_abs_diff(&no_mixed, &reference) > 1e-3,
+            "mixed term had no effect"
+        );
     }
 }

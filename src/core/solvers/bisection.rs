@@ -15,11 +15,19 @@ pub fn bisection(
     let (mut lo, mut hi) = (lo.min(hi), lo.max(hi));
     let f_lo = f(lo);
     if f_lo.abs() <= cfg.tol {
-        return Ok(Root { x: lo, iterations: 0, converged: true });
+        return Ok(Root {
+            x: lo,
+            iterations: 0,
+            converged: true,
+        });
     }
     let f_hi = f(hi);
     if f_hi.abs() <= cfg.tol {
-        return Ok(Root { x: hi, iterations: 0, converged: true });
+        return Ok(Root {
+            x: hi,
+            iterations: 0,
+            converged: true,
+        });
     }
     if f_lo * f_hi > 0.0 {
         return Err(RustyQLibError::NumericalError(format!(
@@ -30,7 +38,11 @@ pub fn bisection(
     for i in 1..=cfg.max_iter {
         let fx = f(x);
         if fx.abs() <= cfg.tol {
-            return Ok(Root { x, iterations: i, converged: true });
+            return Ok(Root {
+                x,
+                iterations: i,
+                converged: true,
+            });
         }
         if fx * f_lo < 0.0 {
             hi = x;
@@ -39,10 +51,18 @@ pub fn bisection(
         }
         x = 0.5 * (lo + hi);
         if hi - lo <= f64::EPSILON * (1.0 + x.abs()) {
-            return Ok(Root { x, iterations: i, converged: f(x).abs() <= cfg.tol });
+            return Ok(Root {
+                x,
+                iterations: i,
+                converged: f(x).abs() <= cfg.tol,
+            });
         }
     }
-    Ok(Root { x, iterations: cfg.max_iter, converged: false })
+    Ok(Root {
+        x,
+        iterations: cfg.max_iter,
+        converged: false,
+    })
 }
 
 #[cfg(test)]
@@ -52,7 +72,10 @@ mod tests {
     #[test]
     fn finds_sqrt_two() {
         let r = bisection(&Solver1d::default(), |x| x * x - 2.0, 0.0, 2.0).unwrap();
-        assert!(r.converged && (r.x - std::f64::consts::SQRT_2).abs() < 1e-9, "{r:?}");
+        assert!(
+            r.converged && (r.x - std::f64::consts::SQRT_2).abs() < 1e-9,
+            "{r:?}"
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
-use chrono::NaiveDate;
 use crate::core::errors::RustyQLibError;
 use crate::core::results::PricingResult;
 use crate::rates::utils::DayCountConvention;
 use crate::rates::utils::TermStructure;
+use chrono::NaiveDate;
 
 pub trait Instrument {
     /// Present value, or a typed error when the instrument cannot be priced
@@ -30,21 +30,20 @@ pub trait Instrument {
     }
 }
 
-
 pub trait Rates {
     fn get_implied_rates(&self) -> f64;
     fn get_maturity_date(&self) -> NaiveDate;
     fn get_rate(&self) -> f64;
     fn get_maturity_discount_factor(&self) -> f64;
     fn get_day_count(&self) -> &DayCountConvention;
-    fn set_term_structure(&mut self,term_structure:TermStructure)->();
+    fn set_term_structure(&mut self, term_structure: TermStructure) -> ();
 }
 
-pub trait Observer{
+pub trait Observer {
     fn update(&mut self);
     fn reset(&mut self);
 }
-pub trait Observable{
+pub trait Observable {
     fn update(&mut self);
     fn reset(&mut self);
 }

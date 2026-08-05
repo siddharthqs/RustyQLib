@@ -28,13 +28,22 @@ pub fn linspace(a: f64, b: f64, n: usize) -> Vec<f64> {
     if n <= 1 {
         return vec![a];
     }
-    (0..n).map(|i| a + (b - a) * i as f64 / (n - 1) as f64).collect()
+    (0..n)
+        .map(|i| a + (b - a) * i as f64 / (n - 1) as f64)
+        .collect()
 }
 
 /// Sample `f(x, y)` on the `xs` x `ys` grid (x = moneyness, y = maturity).
 pub fn greek_surface(xs: &[f64], ys: &[f64], f: impl Fn(f64, f64) -> f64) -> GreekSurface {
-    let z = xs.iter().map(|&x| ys.iter().map(|&y| f(x, y)).collect()).collect();
-    GreekSurface { xs: xs.to_vec(), ys: ys.to_vec(), z }
+    let z = xs
+        .iter()
+        .map(|&x| ys.iter().map(|&y| f(x, y)).collect())
+        .collect();
+    GreekSurface {
+        xs: xs.to_vec(),
+        ys: ys.to_vec(),
+        z,
+    }
 }
 
 /// Axis and title labels.
@@ -53,8 +62,9 @@ pub fn save_surface_html(surface: &GreekSurface, path: &str, labels: &Labels) {
     // plotly wants z indexed [row = y][col = x]; our grid is [x][y]
     let nx = surface.xs.len();
     let ny = surface.ys.len();
-    let z: Vec<Vec<f64>> =
-        (0..ny).map(|j| (0..nx).map(|i| surface.z[i][j]).collect()).collect();
+    let z: Vec<Vec<f64>> = (0..ny)
+        .map(|j| (0..nx).map(|i| surface.z[i][j]).collect())
+        .collect();
 
     let data = json!([{
         "type": "surface",

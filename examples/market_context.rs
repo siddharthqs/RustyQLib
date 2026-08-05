@@ -25,6 +25,7 @@ use chrono::NaiveDate;
 use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::core::traits::Instrument;
 use rustyqlib::equity::builder::EquityOptionBuilder;
+use rustyqlib::equity::bump::{Bump, BumpedMarket};
 use rustyqlib::equity::heston::HestonParams;
 use rustyqlib::equity::utils::{Engine, Model};
 use rustyqlib::equity::vanilla_option::EquityOption;
@@ -47,7 +48,14 @@ fn option(symbol: &str, strike: f64, engine: Engine) -> EquityOption {
 }
 
 fn shock(factor: RiskFactor, mode: BumpMode, size: f64) -> Shock {
-    Shock { factor, mode, size, underlying: None, tenors: None, shifts: None }
+    Shock {
+        factor,
+        mode,
+        size,
+        underlying: None,
+        tenors: None,
+        shifts: None,
+    }
 }
 
 fn main() {
@@ -59,27 +67,42 @@ fn main() {
     let tree = option("ACME", 110.0, Engine::Binomial);
 
     let market = call.snapshot_market();
-    println!("  Market {{ valuation_date: {}, entries: {} }}", market.valuation_date(), market.len());
+    println!(
+        "  Market {{ valuation_date: {}, entries: {} }}",
+        market.valuation_date(),
+        market.len()
+    );
     // typed lookups: the KEY pins the return type at compile time
     let spot = market.get(&Spot("ACME".into())).unwrap(); // -> &Quote
     let surf = market.get(&Vol("ACME".into())).unwrap(); // -> &VolSurface
     let curve = market.get(&Discount("USD".into())).unwrap(); // -> &YieldCurve
-    println!("  Spot(\"ACME\")     -> Quote {{ value: {} }}", spot.value());
-    println!("  Vol(\"ACME\")      -> VolSurface, atm 1y vol = {:.4}", surf.vol(100.0, 100.0, 1.0));
+    println!(
+        "  Spot(\"ACME\")     -> Quote {{ value: {} }}",
+        spot.value()
+    );
+    println!(
+        "  Vol(\"ACME\")      -> VolSurface, atm 1y vol = {:.4}",
+        surf.vol(100.0, 100.0, 1.0)
+    );
     println!(
         "  Discount(\"USD\")  -> YieldCurve, 1y zero = {:.4}",
         curve.zero_rate_with(1.0, Compounding::Continuous)
     );
     // a key with no entry is a typed error naming the key, not a panic
-    println!("  Vol(\"ZENO\")      -> {}", market.get(&Vol("ZENO".into())).unwrap_err());
+    println!(
+        "  Vol(\"ZENO\")      -> {}",
+        market.get(&Vol("ZENO".into())).unwrap_err()
+    );
 
     // ── 2. rebinding reproduces npv() exactly ──────────────────────────
     common::section("2. Reprice under the snapshot: npv_in == npv, on any engine");
     for (label, opt) in [("BlackScholes K=100", &call), ("Binomial     K=110", &tree)] {
         let direct = opt.npv();
         let rebound = opt.npv_in(&market).unwrap();
-        println!("  {label}:  npv() = {direct:.6}   npv_in(&market) = {rebound:.6}   diff = {:.1e}",
-            (rebound - direct).abs());
+        println!(
+            "  {label}:  npv() = {direct:.6}   npv_in(&market) = {rebound:.6}   diff = {:.1e}",
+            (rebound - direct).abs()
+        );
     }
 
     // ── 3. bump the MARKET, not the instruments ────────────────────────
@@ -100,7 +123,10 @@ fn main() {
     for (label, opt) in [("BlackScholes K=100", &call), ("Binomial     K=110", &tree)] {
         let base = opt.npv_in(&market).unwrap();
         let stressed = opt.npv_in(&crash).unwrap();
-        println!("  {label}:  base = {base:>9.4}   crash = {stressed:>9.4}   P&L = {:>+9.4}", stressed - base);
+        println!(
+            "  {label}:  base = {base:>9.4}   crash = {stressed:>9.4}   P&L = {:>+9.4}",
+            stressed - base
+        );
     }
     // the instruments were never touched: their embedded copy still says 100
     println!(
@@ -139,7 +165,9 @@ fn main() {
     );
     println!(
         "  Correlation(\"ACME\", \"OTHER\") -> {}",
-        market.get(&Correlation("ACME".into(), "OTHER".into())).unwrap_err()
+        market
+            .get(&Correlation("ACME".into(), "OTHER".into()))
+            .unwrap_err()
     );
 
     // ── 5. models follow the market: Heston vega convention ────────────
@@ -152,11 +180,16 @@ fn main() {
         vol_of_vol: 0.4,
         rho: -0.6,
     });
-    let vols_up = market.bumped(&[shock(RiskFactor::Vol, BumpMode::Absolute, 0.02)]).unwrap();
+    let vols_up = market
+        .bumped(&[shock(RiskFactor::Vol, BumpMode::Absolute, 0.02)])
+        .unwrap();
     let base = heston.npv_in(&market).unwrap();
     let bumped = heston.npv_in(&vols_up).unwrap();
-    println!("  heston npv: base = {base:.6}, vols +2pts = {bumped:.6}  (params moved with the surface)");
-    println!("  reference scalar path price_with(0, 0.02, 0, 0) = {:.6}", heston.price_with(0.0, 0.02, 0.0, 0.0));
+    println!(
+        "  heston npv: base = {base:.6}, vols +2pts = {bumped:.6}  (params moved with the surface)"
+    );
+    let scalar = heston.price_bumped(&BumpedMarket::new(&heston.market, Bump::vol(0.02)));
+    println!("  reference scalar path (vol bump +2pts) = {scalar:.6}");
 
     println!();
     common::note("EquityOption = base (contract terms, immutable) + market (EquityMarketData, the");

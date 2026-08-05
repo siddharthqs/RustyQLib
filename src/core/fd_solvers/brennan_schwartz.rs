@@ -45,11 +45,11 @@ fn brennan_schwartz_sweep(
     let mut c_ = c.to_vec();
     let mut d_ = d.to_vec();
     let mut x = vec![0.0; n];
-    c_[0] = c_[0] / b[0];
-    d_[0] = d_[0] / b[0];
+    c_[0] /= b[0];
+    d_[0] /= b[0];
     for i in 1..n - 1 {
         let id = 1.0 / (b[i] - a[i - 1] * c_[i - 1]);
-        c_[i] = c_[i] * id;
+        c_[i] *= id;
         d_[i] = (d_[i] - a[i - 1] * d_[i - 1]) * id;
     }
     d_[n - 1] = (d_[n - 1] - a[n - 2] * d_[n - 2]) / (b[n - 1] - a[n - 2] * c_[n - 2]);

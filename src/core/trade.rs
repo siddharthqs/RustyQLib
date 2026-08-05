@@ -1,4 +1,4 @@
-#[derive(PartialEq,Debug,Clone)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum Transection {
     Buy,
     Sell,
@@ -8,5 +8,4 @@ pub enum Transection {
 pub enum PutOrCall {
     Call,
     Put,
-
 }

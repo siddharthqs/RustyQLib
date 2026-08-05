@@ -4,18 +4,13 @@
 
 use super::line_search::backtracking;
 use super::numerics::{dot, norm_inf, numeric_gradient};
-use super::{OptimConfig, OptimResult};
+use super::{ObjectiveFn, OptimConfig, OptimResult, VectorFn};
 
 /// Minimize `f` from `x0` by BFGS. `grad` falls back to central finite
 /// differences when absent. The inverse-Hessian update is skipped
 /// whenever the curvature condition `s.y > 0` fails, which keeps the
 /// approximation positive definite under the Armijo-only line search.
-pub fn bfgs(
-    cfg: &OptimConfig,
-    f: &dyn Fn(&[f64]) -> f64,
-    grad: Option<&dyn Fn(&[f64]) -> Vec<f64>>,
-    x0: &[f64],
-) -> OptimResult {
+pub fn bfgs(cfg: &OptimConfig, f: ObjectiveFn, grad: Option<VectorFn>, x0: &[f64]) -> OptimResult {
     let g_of = |x: &[f64]| match grad {
         Some(g) => g(x),
         None => numeric_gradient(f, x),
@@ -31,7 +26,12 @@ pub fn bfgs(
 
     for it in 0..cfg.max_iter {
         if norm_inf(&g) <= cfg.tol {
-            return OptimResult { x, value: fx, iterations: it, converged: true };
+            return OptimResult {
+                x,
+                value: fx,
+                iterations: it,
+                converged: true,
+            };
         }
         // d = -H g
         let mut dir: Vec<f64> = (0..n).map(|i| -dot(&h[i], &g)).collect();
@@ -48,7 +48,14 @@ pub fn bfgs(
         }
         let (x_new, f_new) = match backtracking(f, &x, fx, &dir, slope, 1.0) {
             Some(step) => step,
-            None => return OptimResult { x, value: fx, iterations: it, converged: false },
+            None => {
+                return OptimResult {
+                    x,
+                    value: fx,
+                    iterations: it,
+                    converged: false,
+                }
+            }
         };
         let g_new = g_of(&x_new);
         let s: Vec<f64> = x_new.iter().zip(&x).map(|(a, b)| a - b).collect();
@@ -71,7 +78,12 @@ pub fn bfgs(
         fx = f_new;
         g = g_new;
     }
-    OptimResult { x, value: fx, iterations: cfg.max_iter, converged: norm_inf(&g) <= cfg.tol }
+    OptimResult {
+        x,
+        value: fx,
+        iterations: cfg.max_iter,
+        converged: norm_inf(&g) <= cfg.tol,
+    }
 }
 
 #[cfg(test)]
@@ -86,7 +98,10 @@ mod tests {
     fn minimizes_rosenbrock_quickly() {
         let f = |x: &[f64]| rosenbrock(x);
         let r = bfgs(&OptimConfig::new(1e-8, 500), &f, None, &[-1.2, 1.0]);
-        assert!((r.x[0] - 1.0).abs() < 1e-5 && (r.x[1] - 1.0).abs() < 1e-5, "{r:?}");
+        assert!(
+            (r.x[0] - 1.0).abs() < 1e-5 && (r.x[1] - 1.0).abs() < 1e-5,
+            "{r:?}"
+        );
         assert!(r.iterations < 200, "took {} iterations", r.iterations);
     }
 
@@ -96,13 +111,21 @@ mod tests {
         let cfg = OptimConfig::new(1e-6, 20_000);
         let b = bfgs(&cfg, &f, None, &[-1.2, 1.0]);
         let cg = super::super::conjugate_gradient::conjugate_gradient(&cfg, &f, None, &[-1.2, 1.0]);
-        assert!(b.iterations < cg.iterations, "bfgs {} vs cg {}", b.iterations, cg.iterations);
+        assert!(
+            b.iterations < cg.iterations,
+            "bfgs {} vs cg {}",
+            b.iterations,
+            cg.iterations
+        );
     }
 
     #[test]
     fn four_dimensional_quadratic_converges() {
         let f = |x: &[f64]| {
-            x.iter().enumerate().map(|(i, xi)| (i + 1) as f64 * (xi - i as f64).powi(2)).sum()
+            x.iter()
+                .enumerate()
+                .map(|(i, xi)| (i + 1) as f64 * (xi - i as f64).powi(2))
+                .sum()
         };
         let r = bfgs(&OptimConfig::default(), &f, None, &[5.0; 4]);
         assert!(r.converged, "{r:?}");

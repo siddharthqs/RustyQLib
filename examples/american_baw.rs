@@ -41,29 +41,61 @@ fn contract() -> EquityOptionBuilder {
 }
 
 fn american(put_or_call: PutOrCall, engine: Engine) -> EquityOption {
-    contract().american().vanilla(put_or_call).engine(engine).build().expect("option must build")
+    contract()
+        .american()
+        .vanilla(put_or_call)
+        .engine(engine)
+        .build()
+        .expect("option must build")
 }
 
 fn european(put_or_call: PutOrCall) -> EquityOption {
-    contract().vanilla(put_or_call).engine(Engine::BlackScholes).build().expect("option must build")
+    contract()
+        .vanilla(put_or_call)
+        .engine(Engine::BlackScholes)
+        .build()
+        .expect("option must build")
 }
 
 fn main() {
     common::title("AMERICAN OPTIONS, ANALYTIC: BAW & BJERKSUND-STENSLAND 2002 — S=100 K=100 sigma=25% r=8% q=4% T=0.5y");
 
     for pc in [PutOrCall::Put, PutOrCall::Call] {
-        common::section(&format!("American {pc:?}: analytic approximations vs the exact engines"));
+        common::section(&format!(
+            "American {pc:?}: analytic approximations vs the exact engines"
+        ));
         common::table_header();
-        common::row("Barone-Adesi-Whaley (analytic)", &american(pc, Engine::BaroneAdesiWhaley));
-        common::row("Bjerksund-Stensland 2002", &american(pc, Engine::BjerksundStensland));
+        common::row(
+            "Barone-Adesi-Whaley (analytic)",
+            &american(pc, Engine::BaroneAdesiWhaley),
+        );
+        common::row(
+            "Bjerksund-Stensland 2002",
+            &american(pc, Engine::BjerksundStensland),
+        );
         common::row("Binomial (CRR tree)", &american(pc, Engine::Binomial));
-        common::row("Finite difference (Brennan-Schwartz)", &american(pc, Engine::FiniteDifference));
-        common::row("Monte Carlo (Longstaff-Schwartz)",
-            &contract().american().vanilla(pc).engine(Engine::MonteCarlo).paths(50_000).build().expect("option must build"));
+        common::row(
+            "Finite difference (Brennan-Schwartz)",
+            &american(pc, Engine::FiniteDifference),
+        );
+        common::row(
+            "Monte Carlo (Longstaff-Schwartz)",
+            &contract()
+                .american()
+                .vanilla(pc)
+                .engine(Engine::MonteCarlo)
+                .paths(50_000)
+                .build()
+                .expect("option must build"),
+        );
         // the analytic Black-Scholes engine has no American method and says so
         common::row_or_refusal(
             "Black-Scholes (rejects American)",
-            contract().american().vanilla(pc).engine(Engine::BlackScholes).build(),
+            contract()
+                .american()
+                .vanilla(pc)
+                .engine(Engine::BlackScholes)
+                .build(),
         );
 
         // early-exercise premium and the exercise boundary
@@ -72,28 +104,49 @@ fn main() {
         let premium = baw_opt.npv() - european;
         let boundary = baw::critical_spot(&baw_opt);
         common::note(&format!("European price {european:.6}"));
-        common::note(&format!("early-exercise premium (BAW - European) = {premium:.6}"));
+        common::note(&format!(
+            "early-exercise premium (BAW - European) = {premium:.6}"
+        ));
         common::note(&format!(
             "critical exercise spot S* = {boundary:.4}  (exercise once spot {} it)",
-            if matches!(pc, PutOrCall::Put) { "falls below" } else { "rises above" }
+            if matches!(pc, PutOrCall::Put) {
+                "falls below"
+            } else {
+                "rises above"
+            }
         ));
     }
 
     common::section("Accuracy: both approximations within a few cents of a fine tree");
     common::table_header();
     for k in [80.0, 90.0, 100.0, 110.0, 120.0] {
-        let baw_opt = contract().strike(k).american().vanilla(PutOrCall::Put)
-            .engine(Engine::BaroneAdesiWhaley).build().expect("option must build");
+        let baw_opt = contract()
+            .strike(k)
+            .american()
+            .vanilla(PutOrCall::Put)
+            .engine(Engine::BaroneAdesiWhaley)
+            .build()
+            .expect("option must build");
         common::row(&format!("BAW    put K={k}"), &baw_opt);
     }
     for k in [80.0, 90.0, 100.0, 110.0, 120.0] {
-        let bs = contract().strike(k).american().vanilla(PutOrCall::Put)
-            .engine(Engine::BjerksundStensland).build().expect("option must build");
+        let bs = contract()
+            .strike(k)
+            .american()
+            .vanilla(PutOrCall::Put)
+            .engine(Engine::BjerksundStensland)
+            .build()
+            .expect("option must build");
         common::row(&format!("BS2002 put K={k}"), &bs);
     }
     for k in [80.0, 90.0, 100.0, 110.0, 120.0] {
-        let tree = contract().strike(k).american().vanilla(PutOrCall::Put)
-            .engine(Engine::Binomial).build().expect("option must build");
+        let tree = contract()
+            .strike(k)
+            .american()
+            .vanilla(PutOrCall::Put)
+            .engine(Engine::Binomial)
+            .build()
+            .expect("option must build");
         common::row(&format!("tree   put K={k}"), &tree);
     }
     common::note("BS2002 uses a feasible two-step exercise boundary, so it is a lower");
@@ -117,8 +170,11 @@ fn main() {
     std::hint::black_box(acc);
     println!("  BAW    : {baw_ns:>10.0} ns / price");
     println!("  tree   : {tree_ns:>10.0} ns / price");
-    println!("  BAW is ~{:.0}x faster for ~{:.3} of price error",
-        tree_ns / baw_ns, (baw_opt.npv() - tree.npv()).abs());
+    println!(
+        "  BAW is ~{:.0}x faster for ~{:.3} of price error",
+        tree_ns / baw_ns,
+        (baw_opt.npv() - tree.npv()).abs()
+    );
 
     common::section("Perpetual limit: T -> infinity has an exact closed form (Merton)");
     {
@@ -141,18 +197,45 @@ fn main() {
     common::section("Checks");
     let put = american(PutOrCall::Put, Engine::BaroneAdesiWhaley);
     let tree_put = american(PutOrCall::Put, Engine::Binomial);
-    common::check("BAW American put ~= binomial", put.npv(), tree_put.npv(), 0.05);
+    common::check(
+        "BAW American put ~= binomial",
+        put.npv(),
+        tree_put.npv(),
+        0.05,
+    );
     // a non-dividend American call is never exercised early -> equals European
     let call_no_div = EquityOptionBuilder::new()
-        .symbol("ACME").spot(SPOT).strike(STRIKE).flat_vol(VOL).flat_rate(RATE)
+        .symbol("ACME")
+        .spot(SPOT)
+        .strike(STRIKE)
+        .flat_vol(VOL)
+        .flat_rate(RATE)
         .dividend_yield(0.0)
-        .valuation_date(asof()).maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
-        .american().vanilla(PutOrCall::Call).engine(Engine::BaroneAdesiWhaley).build().expect("option must build");
+        .valuation_date(asof())
+        .maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
+        .american()
+        .vanilla(PutOrCall::Call)
+        .engine(Engine::BaroneAdesiWhaley)
+        .build()
+        .expect("option must build");
     let euro_call = EquityOptionBuilder::new()
-        .symbol("ACME").spot(SPOT).strike(STRIKE).flat_vol(VOL).flat_rate(RATE)
+        .symbol("ACME")
+        .spot(SPOT)
+        .strike(STRIKE)
+        .flat_vol(VOL)
+        .flat_rate(RATE)
         .dividend_yield(0.0)
-        .valuation_date(asof()).maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
-        .vanilla(PutOrCall::Call).engine(Engine::BlackScholes).build().expect("option must build");
-    common::check("non-dividend American call = European", call_no_div.npv(), euro_call.npv(), 1e-9);
+        .valuation_date(asof())
+        .maturity_date(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap())
+        .vanilla(PutOrCall::Call)
+        .engine(Engine::BlackScholes)
+        .build()
+        .expect("option must build");
+    common::check(
+        "non-dividend American call = European",
+        call_no_div.npv(),
+        euro_call.npv(),
+        1e-9,
+    );
     println!();
 }

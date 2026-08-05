@@ -32,14 +32,18 @@ fn futures_option(pc: PutOrCall, settlement: FuturesSettlement) -> EquityOption 
         .vanilla(pc)
         .on_future(settlement)
         .engine(Engine::BlackScholes)
-        .build().expect("option must build")
+        .build()
+        .expect("option must build")
 }
 
 fn main() {
     common::title("OPTIONS ON FUTURES (Black-76) — F=100 K=100 sigma=30% r=5% T=1y");
 
     for (name, settlement) in [
-        ("Discounted (standard Black-76)", FuturesSettlement::Discounted),
+        (
+            "Discounted (standard Black-76)",
+            FuturesSettlement::Discounted,
+        ),
         ("Margined (futures-style)", FuturesSettlement::Margined),
     ] {
         common::section(name);
@@ -52,8 +56,11 @@ fn main() {
     common::section("Settlement effect: margined = discounted / e^{-rT}");
     let disc = futures_option(PutOrCall::Call, FuturesSettlement::Discounted).npv();
     let marg = futures_option(PutOrCall::Call, FuturesSettlement::Margined).npv();
-    println!("  discounted call {disc:.6}   margined call {marg:.6}   ratio {:.6} (= e^rT {:.6})",
-        marg / disc, (R * T).exp());
+    println!(
+        "  discounted call {disc:.6}   margined call {marg:.6}   ratio {:.6} (= e^rT {:.6})",
+        marg / disc,
+        (R * T).exp()
+    );
 
     common::section("Identities");
     let dc = futures_option(PutOrCall::Call, FuturesSettlement::Discounted);
@@ -66,7 +73,12 @@ fn main() {
     );
     let mc = futures_option(PutOrCall::Call, FuturesSettlement::Margined);
     let mp = futures_option(PutOrCall::Put, FuturesSettlement::Margined);
-    common::check("margined parity C - P = F - K", mc.npv() - mp.npv(), F - K, 1e-10);
+    common::check(
+        "margined parity C - P = F - K",
+        mc.npv() - mp.npv(),
+        F - K,
+        1e-10,
+    );
     common::check(
         "margined rho is exactly zero",
         futures_option(PutOrCall::Call, FuturesSettlement::Margined).rho(),
@@ -78,9 +90,22 @@ fn main() {
     // an option on F = S e^{(r-q)T} equals the equivalent spot option
     let (s, q) = (100.0, 0.02);
     let fwd = s * ((R - q) * T).exp();
-    let on_forward = price(fwd, K, R, VOL, T, PutOrCall::Call, FuturesSettlement::Discounted);
+    let on_forward = price(
+        fwd,
+        K,
+        R,
+        VOL,
+        T,
+        PutOrCall::Call,
+        FuturesSettlement::Discounted,
+    );
     let spot_bsm = bs_price(s, K, R, q, VOL, T, PutOrCall::Call);
-    common::check("black76(F = S e^{(r-q)T}) = BSM(S, q)", on_forward, spot_bsm, 1e-10);
+    common::check(
+        "black76(F = S e^{(r-q)T}) = BSM(S, q)",
+        on_forward,
+        spot_bsm,
+        1e-10,
+    );
 
     common::section("Skew across strikes (discounted put)");
     common::table_header();
@@ -97,7 +122,8 @@ fn main() {
                 .vanilla(PutOrCall::Put)
                 .on_future(FuturesSettlement::Discounted)
                 .engine(Engine::BlackScholes)
-                .build().expect("option must build"),
+                .build()
+                .expect("option must build"),
         );
     }
     println!();

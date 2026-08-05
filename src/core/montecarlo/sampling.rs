@@ -12,7 +12,9 @@ struct Counter {
 
 impl Counter {
     fn new(seed: u64) -> Self {
-        Self { state: splitmix64(seed) }
+        Self {
+            state: splitmix64(seed),
+        }
     }
     fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(1);
@@ -28,7 +30,9 @@ impl Counter {
 /// O(1/n) to O(1/n^3). Deterministic per seed.
 pub fn stratified_uniforms(n: usize, seed: u64) -> Vec<f64> {
     let mut rng = Counter::new(seed);
-    (0..n).map(|i| (i as f64 + rng.uniform()) / n as f64).collect()
+    (0..n)
+        .map(|i| (i as f64 + rng.uniform()) / n as f64)
+        .collect()
 }
 
 /// `n` stratified standard normals (stratified uniforms through the
@@ -48,8 +52,9 @@ pub fn latin_hypercube(n: usize, dims: usize, seed: u64) -> Vec<Vec<f64>> {
     // one stratified, independently shuffled column per dimension
     let mut columns: Vec<Vec<f64>> = Vec::with_capacity(dims);
     for _ in 0..dims {
-        let mut column: Vec<f64> =
-            (0..n).map(|i| (i as f64 + rng.uniform()) / n as f64).collect();
+        let mut column: Vec<f64> = (0..n)
+            .map(|i| (i as f64 + rng.uniform()) / n as f64)
+            .collect();
         // Fisher-Yates
         for i in (1..n).rev() {
             let j = (rng.next_u64() % (i as u64 + 1)) as usize;
@@ -57,7 +62,9 @@ pub fn latin_hypercube(n: usize, dims: usize, seed: u64) -> Vec<Vec<f64>> {
         }
         columns.push(column);
     }
-    (0..n).map(|i| columns.iter().map(|c| c[i]).collect()).collect()
+    (0..n)
+        .map(|i| columns.iter().map(|c| c[i]).collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -98,7 +105,9 @@ mod tests {
             assert!(hits.iter().all(|&c| c == 1), "dimension {d}");
         }
         // different dimensions are paired differently (not comonotone)
-        let same_order = points.windows(2).all(|w| (w[0][0] < w[1][0]) == (w[0][1] < w[1][1]));
+        let same_order = points
+            .windows(2)
+            .all(|w| (w[0][0] < w[1][0]) == (w[0][1] < w[1][1]));
         assert!(!same_order, "columns appear perfectly rank-correlated");
     }
 }

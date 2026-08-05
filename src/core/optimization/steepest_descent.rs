@@ -4,14 +4,14 @@
 
 use super::line_search::backtracking;
 use super::numerics::{dot, norm_inf, numeric_gradient};
-use super::{OptimConfig, OptimResult};
+use super::{ObjectiveFn, OptimConfig, OptimResult, VectorFn};
 
 /// Minimize `f` from `x0` by steepest descent. `grad` falls back to
 /// central finite differences when absent.
 pub fn steepest_descent(
     cfg: &OptimConfig,
-    f: &dyn Fn(&[f64]) -> f64,
-    grad: Option<&dyn Fn(&[f64]) -> Vec<f64>>,
+    f: ObjectiveFn,
+    grad: Option<VectorFn>,
     x0: &[f64],
 ) -> OptimResult {
     let g_of = |x: &[f64]| match grad {
@@ -23,7 +23,12 @@ pub fn steepest_descent(
     for it in 0..cfg.max_iter {
         let g = g_of(&x);
         if norm_inf(&g) <= cfg.tol {
-            return OptimResult { x, value: fx, iterations: it, converged: true };
+            return OptimResult {
+                x,
+                value: fx,
+                iterations: it,
+                converged: true,
+            };
         }
         let dir: Vec<f64> = g.iter().map(|gi| -gi).collect();
         let slope = dot(&g, &dir);
@@ -34,11 +39,23 @@ pub fn steepest_descent(
                 x = x_new;
                 fx = f_new;
             }
-            None => return OptimResult { x, value: fx, iterations: it, converged: false },
+            None => {
+                return OptimResult {
+                    x,
+                    value: fx,
+                    iterations: it,
+                    converged: false,
+                }
+            }
         }
     }
     let g = g_of(&x);
-    OptimResult { x, value: fx, iterations: cfg.max_iter, converged: norm_inf(&g) <= cfg.tol }
+    OptimResult {
+        x,
+        value: fx,
+        iterations: cfg.max_iter,
+        converged: norm_inf(&g) <= cfg.tol,
+    }
 }
 
 #[cfg(test)]
@@ -50,7 +67,11 @@ mod tests {
         let f = |x: &[f64]| 2.0 * (x[0] - 3.0).powi(2) + (x[1] + 1.0).powi(2);
         let r = steepest_descent(&OptimConfig::new(1e-8, 5000), &f, None, &[10.0, -10.0]);
         assert!(r.converged, "{r:?}");
-        assert!((r.x[0] - 3.0).abs() < 1e-6 && (r.x[1] + 1.0).abs() < 1e-6, "{:?}", r.x);
+        assert!(
+            (r.x[0] - 3.0).abs() < 1e-6 && (r.x[1] + 1.0).abs() < 1e-6,
+            "{:?}",
+            r.x
+        );
     }
 
     #[test]
