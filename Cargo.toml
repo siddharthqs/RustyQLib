@@ -40,7 +40,18 @@ xml = ["dep:quick-xml"]
 # TOML stress-scenario configuration files
 stress-config = ["dep:toml"]
 # the `rustyqlib` command-line binary and its file plumbing
-cli = ["dep:clap", "dep:csv", "dep:env_logger", "xml", "stress-config"]
+cli = [
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:csv",
+    "dep:env_logger",
+    "dep:anyhow",
+    "dep:inquire",
+    "dep:anstream",
+    "dep:anstyle",
+    "xml",
+    "stress-config",
+]
 
 [dependencies]
 rand = "0.8.4"
@@ -59,7 +70,13 @@ rayon = "1.5.1"
 log = "0.4"
 
 # feature-gated: CLI and alternative formats
-clap = { version = "4.5", optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
+clap_complete = { version = "4.5", optional = true }
+anyhow = { version = "1", optional = true }
+inquire = { version = "0.7", optional = true }
+# already in the tree via clap's default color support
+anstream = { version = "0.6", optional = true }
+anstyle = { version = "1", optional = true }
 env_logger = { version = "0.11", optional = true }
 csv = { version = "1.1", optional = true }
 quick-xml = { version = "0.41.0", default-features = false, optional = true }
@@ -68,6 +85,14 @@ toml = { version = "0.8", optional = true }
 [dev-dependencies]
 assert_approx_eq = "1.1.0"
 criterion = "0.5"
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+# integration tests for the `rustyqlib` binary
+[[test]]
+name = "cli"
+required-features = ["cli"]
 
 [[bench]]
 name = "engines"

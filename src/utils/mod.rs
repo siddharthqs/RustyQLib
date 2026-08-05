@@ -4,5 +4,7 @@ pub mod build_cli;
 pub mod interactive;
 #[cfg(feature = "cli")]
 pub mod parse_contracts;
+#[cfg(feature = "cli")]
+pub mod style;
 pub mod rng;
 pub mod stochastic_processes;

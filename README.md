@@ -215,7 +215,7 @@ transitive dependencies. Opt in to what you need:
 | *(default)* | pricing, calibration, risk, JSON contracts | — |
 | `xml` | XML contract input/output | `quick-xml` |
 | `stress-config` | TOML stress-scenario files | `toml` |
-| `cli` | the `rustyqlib` binary (implies `xml`, `stress-config`) | `clap`, `csv` |
+| `cli` | the `rustyqlib` binary (implies `xml`, `stress-config`) | `clap`, `clap_complete`, `csv`, `anyhow`, `inquire` |
 
 ```bash
 cargo add rustyqlib                    # library only
@@ -239,15 +239,41 @@ an American put on a Leisen-Reimer 101-step tree prices in ~26 µs vs
 
 ```bash
 cargo build --release --features cli
-# price a single JSON file of contracts
-rustyqlib file --input contracts.json --output results.json
-# price every JSON file in a directory (parallel)
-rustyqlib dir --input contracts/ --output results/
+# price a JSON/XML file of contracts (omit --output to print to stdout)
+rustyqlib price --input contracts.json --output results.json
+# price every contract file in a directory (parallel)
+rustyqlib price --input contracts/ --output results/
+# compose with pipes: '-' reads stdin, stdout is the default output
+cat contracts.json | rustyqlib price -i - | jq '.[].output.pv'
+# force the output format regardless of extensions
+rustyqlib price -i contracts.json --format xml
 # build an implied vol surface from quoted options
 rustyqlib build --input quotes.json --output out/
+# stress MtM: revalue a one-underlying options book under TOML scenarios
+rustyqlib stress -i portfolio.json -c scenarios.toml
+# VaR / Expected Shortfall by scenario simulation (delta-gamma and full revaluation)
+rustyqlib risk -i portfolio.json --confidence 0.99 --horizon-days 1
+# implied Black-Scholes vol from a quoted price
+rustyqlib implied-vol --spot 100 --strike 105 --price 4.2 --maturity 0.5 -p C --rate 0.05
 # guided pricing in the terminal
 rustyqlib interactive
+# shell completions (bash, zsh, fish, powershell, elvish)
+rustyqlib completions bash > /etc/bash_completion.d/rustyqlib
 ```
+
+Every command reads files or stdin (`-i -`) and writes to `--output` or
+stdout, so results pipe cleanly into `jq` and friends; diagnostics go to
+stderr — tune them with `-v`/`-vv` (info/debug), `-q`/`-qq` (errors
+only/silent), or `RUST_LOG`. Errors and confirmations are color-coded in
+a terminal; `--color always|never` overrides the auto-detection (which
+also honors `NO_COLOR`), and piped output is always plain. Errors exit non-zero with
+a one-line message; in a batch, a bad contract is reported in its own
+result's `error` field without aborting the rest. For `stress` and `risk`
+the portfolio is a contracts document of options on one underlying, with
+the signed position quantity taken from each contract's `long_short`
+(default 1; see `src/examples/stress_config.toml` for the scenario
+format). The pre-0.0.4 `file` and `dir` subcommands remain as hidden
+aliases of `price`.
 
 ### Contract examples
 

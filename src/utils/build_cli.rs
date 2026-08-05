@@ -1,208 +1,545 @@
+use crate::core::serialization::Format;
+use crate::core::trade::PutOrCall;
+use crate::equity::blackscholes::implied_vol_from_price;
+use crate::risk::{delta_gamma_var, full_revaluation_var, stress_mtm, RiskConfig, StressConfig};
 use crate::utils::interactive;
 use crate::utils::parse_contracts;
-use clap::{Arg, ArgMatches, Command};
+use anyhow::{bail, Context, Result};
+use chrono::{Local, NaiveDate};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use std::fs;
-use std::fs::File;
 use std::io;
-use std::io::Write;
+use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
-pub fn build_cli() -> Command {
-    Command::new("RustyQLib Quant Library for Option Pricing")
-        .version(env!("CARGO_PKG_VERSION"))
-        .author("Siddharth Singh <siddharth_qs@outlook.com>")
-        .about("Pricing and risk management of financial derivatives")
-        .subcommand(
-            Command::new("build")
-                .about("Building the curve / Vol surface")
-                .arg(
-                    Arg::new("input")
-                        .short('i')
-                        .long("input")
-                        .value_name("FILE")
-                        .help("Input financial contracts to use in construction")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new("output")
-                        .short('o')
-                        .long("output")
-                        .value_name("FILE")
-                        .help("Output file name")
-                        .required(true),
-                ),
-        )
-        .subcommand(
-            Command::new("file")
-                .about("Pricing a single contract")
-                .arg(
-                    Arg::new("input")
-                        .short('i')
-                        .long("input")
-                        .value_name("FILE")
-                        .help("Pricing a single contract")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new("output")
-                        .short('o')
-                        .long("output")
-                        .value_name("FILE")
-                        .help("Output file name")
-                        .required(true),
-                ),
-        )
-        .subcommand(
-            Command::new("dir")
-                .about("Pricing all contracts in a directory")
-                .arg(
-                    Arg::new("input")
-                        .short('i')
-                        .long("input")
-                        .value_name("DIR")
-                        .help("Pricing all contracts in a directory")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new("output")
-                        .short('o')
-                        .long("output")
-                        .value_name("DIR")
-                        .help("Output priced contracts to a directory")
-                        .required(true),
-                ),
-        )
-        .subcommand(Command::new("interactive").about("Interactive mode"))
+
+/// Pricing and risk management of financial derivatives.
+#[derive(Parser)]
+#[command(
+    name = "rustyqlib",
+    version,
+    author = "Siddharth Singh <siddharth_qs@outlook.com>",
+    about = "Pricing and risk management of financial derivatives",
+    subcommand_required = true,
+    arg_required_else_help = true
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+
+    /// More diagnostics on stderr (-v info, -vv debug, -vvv trace)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
+
+    /// Fewer diagnostics on stderr (-q errors only, -qq silent)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true, conflicts_with = "verbose")]
+    pub quiet: u8,
+
+    /// When to color output ('auto' detects a terminal and honors NO_COLOR)
+    #[arg(long, value_enum, default_value_t = ColorWhen::Auto, global = true)]
+    pub color: ColorWhen,
 }
 
-/// Handle the "build" subcommand.
-pub fn handle_build(matches: &ArgMatches) {
-    let input_file = matches.get_one::<String>("input").unwrap();
-    let output_file = matches.get_one::<String>("output").unwrap();
-
-    // We measure the time of the operation
-    measure_time("build_curve", || {
-        let mut file = File::open(input_file).expect("Failed to open JSON file");
-        parse_contracts::build_curve(&mut file, output_file);
-    });
+/// Color policy for the CLI's own messages and log diagnostics.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ColorWhen {
+    Auto,
+    Always,
+    Never,
 }
 
-/// Handle the "file" subcommand.
-pub fn handle_file(matches: &ArgMatches) {
-    let input_file = matches.get_one::<String>("input").unwrap();
-    let output_file = matches.get_one::<String>("output").unwrap();
-
-    measure_time("parse_contract (single file)", || {
-        let mut file = File::open(input_file).expect("Failed to open JSON file");
-        parse_contracts::parse_contract(&mut file, output_file);
-    });
-}
-
-/// Handle the "dir" subcommand.
-pub fn handle_dir(matches: &ArgMatches) {
-    let input_dir = matches.get_one::<String>("input").unwrap();
-    let output_dir = matches.get_one::<String>("output").unwrap();
-
-    let input_path = Path::new(input_dir);
-    let output_path = Path::new(output_dir);
-
-    measure_time("parse_contract (directory)", || {
-        // Read the directory
-        let files = fs::read_dir(input_path).expect("Failed to read input directory");
-
-        for file_result in files {
-            let dir_entry = file_result.expect("Failed to read entry");
-            let path = dir_entry.path();
-
-            let is_contract_file = path.is_file()
-                && matches!(
-                    path.extension()
-                        .and_then(|s| s.to_str())
-                        .map(|e| e.to_lowercase())
-                        .as_deref(),
-                    Some("json") | Some("xml")
-                );
-            if is_contract_file {
-                let mut file = File::open(&path).expect("Failed to open contract file");
-
-                // Construct the corresponding output file path
-                let output_file_path =
-                    output_path.join(path.file_name().expect("Failed to get file name"));
-
-                parse_contracts::parse_contract(&mut file, output_file_path.to_str().unwrap());
-                log::debug!("priced contracts {:?} -> {:?}", path, output_file_path);
-            }
-        }
-    });
-}
-
-/// Handle the "interactive" subcommand.
-pub fn handle_interactive() {
-    println!("Welcome to Option pricing CLI");
-    loop {
-        println!(
-            "Do you want to price an option (1), calculate implied volatility (2), or exit (3)?"
-        );
-
-        // Prompt user
-        print!("> ");
-        io::stdout().flush().expect("Failed to flush stdout");
-
-        // Read user input
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .expect("Failed to read line");
-
-        let selection: u8 = match input.trim().parse() {
-            Ok(num) => num,
-            Err(_) => {
-                eprintln!("Please enter a valid number!");
-                continue;
-            }
-        };
-
-        match selection {
-            1 => {
-                println!("Do you want to use the Black-Scholes (1) or Monte-Carlo (2) model?");
-                print!("> ");
-                io::stdout().flush().expect("Failed to flush stdout");
-
-                let mut model_input = String::new();
-                io::stdin()
-                    .read_line(&mut model_input)
-                    .expect("Failed to read line");
-
-                let model_num: u8 = match model_input.trim().parse() {
-                    Ok(num) => num,
-                    Err(_) => {
-                        eprintln!("Please enter a valid number!");
-                        continue;
-                    }
-                };
-
-                match model_num {
-                    1 => interactive::black_scholes_pricing(),
-                    2 => interactive::monte_carlo_pricing(),
-                    _ => println!("You gave a wrong number! Accepted arguments are 1 and 2."),
-                }
-            }
-            2 => {
-                println!("Implied volatility calculation is not implemented yet.");
-            }
-            3 => {
-                println!("Exiting interactive mode...");
-                break;
-            }
-            _ => println!("You gave a wrong number! Accepted arguments are 1, 2, or 3."),
+impl From<ColorWhen> for anstream::ColorChoice {
+    fn from(when: ColorWhen) -> Self {
+        match when {
+            ColorWhen::Auto => anstream::ColorChoice::Auto,
+            ColorWhen::Always => anstream::ColorChoice::Always,
+            ColorWhen::Never => anstream::ColorChoice::Never,
         }
     }
 }
 
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Price contracts from a file, a directory, or stdin
+    Price(PriceArgs),
+    /// Building the curve / Vol surface
+    Build(BuildArgs),
+    /// Stress MtM: revalue an options book under TOML shock scenarios
+    Stress(StressArgs),
+    /// VaR / Expected Shortfall for an options book by scenario simulation
+    Risk(RiskArgs),
+    /// Implied Black-Scholes volatility from a European vanilla price
+    ImpliedVol(ImpliedVolArgs),
+    /// Interactive mode
+    Interactive,
+    /// Generate shell completions to stdout
+    Completions {
+        /// The shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+    /// Pricing a single contract (deprecated: use `price`)
+    #[command(hide = true)]
+    File(FileArgs),
+    /// Pricing all contracts in a directory (deprecated: use `price`)
+    #[command(hide = true)]
+    Dir(FileArgs),
+}
+
+/// Output document format.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum OutputFormat {
+    Json,
+    Xml,
+}
+
+impl From<OutputFormat> for Format {
+    fn from(format: OutputFormat) -> Format {
+        match format {
+            OutputFormat::Json => Format::Json,
+            OutputFormat::Xml => Format::Xml,
+        }
+    }
+}
+
+/// Option side for `implied-vol`.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum SideArg {
+    #[value(name = "C", alias = "call")]
+    Call,
+    #[value(name = "P", alias = "put")]
+    Put,
+}
+
+impl From<SideArg> for PutOrCall {
+    fn from(side: SideArg) -> PutOrCall {
+        match side {
+            SideArg::Call => PutOrCall::Call,
+            SideArg::Put => PutOrCall::Put,
+        }
+    }
+}
+
+/// VaR estimator selection for `risk`.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RiskMethod {
+    DeltaGamma,
+    Full,
+    Both,
+}
+
+#[derive(Args)]
+pub struct PriceArgs {
+    /// Contracts file or directory ('-' reads from stdin)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::AnyPath)]
+    pub input: String,
+    /// Output file or directory (default: stdout for file/stdin input)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::AnyPath)]
+    pub output: Option<String>,
+    /// Output format (default: the output file extension, else the input format)
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
+}
+
+#[derive(Args)]
+pub struct BuildArgs {
+    /// Input financial contracts to use in construction ('-' reads from stdin)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub input: String,
+    /// Output directory
+    #[arg(short, long, value_name = "DIR", value_hint = ValueHint::DirPath)]
+    pub output: String,
+}
+
+#[derive(Args)]
+pub struct StressArgs {
+    /// Portfolio of option contracts, one underlying ('-' reads from stdin);
+    /// signed quantity comes from each contract's `long_short` (default 1)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub input: String,
+    /// TOML stress-scenario configuration
+    #[arg(short, long, value_name = "TOML", value_hint = ValueHint::FilePath)]
+    pub config: String,
+    /// Output JSON file (default: stdout)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub output: Option<String>,
+}
+
+#[derive(Args)]
+pub struct RiskArgs {
+    /// Portfolio of option contracts, one underlying ('-' reads from stdin);
+    /// signed quantity comes from each contract's `long_short` (default 1)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub input: String,
+    /// Output JSON file (default: stdout)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub output: Option<String>,
+    /// Delta-gamma Taylor VaR, full revaluation, or both
+    #[arg(long, value_enum, default_value_t = RiskMethod::Both)]
+    pub method: RiskMethod,
+    /// One-sided confidence level in (0, 1)
+    #[arg(long, default_value_t = 0.99)]
+    pub confidence: f64,
+    /// Risk horizon in trading days (252 per year)
+    #[arg(long, default_value_t = 1.0)]
+    pub horizon_days: f64,
+    /// Number of simulated scenarios
+    #[arg(long, default_value_t = 20_000)]
+    pub scenarios: usize,
+    /// Annualized volatility of the underlying's return
+    #[arg(long, default_value_t = 0.2)]
+    pub spot_vol: f64,
+    /// Annualized absolute volatility of the implied-vol move
+    #[arg(long, default_value_t = 0.0)]
+    pub vol_of_vol: f64,
+    /// Spot-vol move correlation in [-1, 1]
+    #[arg(long, default_value_t = -0.5, allow_negative_numbers = true)]
+    pub corr: f64,
+    /// Random seed (runs are deterministic per seed)
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+}
+
+#[derive(Args)]
+pub struct ImpliedVolArgs {
+    /// Current price of the underlying
+    #[arg(long)]
+    pub spot: f64,
+    /// Strike price
+    #[arg(long)]
+    pub strike: f64,
+    /// Observed option price to invert
+    #[arg(long)]
+    pub price: f64,
+    /// Time to expiry in years (e.g. 0.5) or a YYYY-MM-DD date
+    #[arg(long, value_name = "T|DATE")]
+    pub maturity: String,
+    /// Option side
+    #[arg(short = 'p', long, value_enum)]
+    pub put_or_call: SideArg,
+    /// Continuously compounded risk-free rate
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+    pub rate: f64,
+    /// Continuous dividend yield
+    #[arg(long, default_value_t = 0.0)]
+    pub dividend: f64,
+    /// Output JSON file (default: stdout)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub output: Option<String>,
+}
+
+/// The deprecated `file` / `dir` argument shape (input and output both
+/// required).
+#[derive(Args)]
+pub struct FileArgs {
+    /// Input contracts file or directory
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::AnyPath)]
+    pub input: String,
+    /// Output file or directory
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::AnyPath)]
+    pub output: String,
+}
+
+/// The full clap command, for completion generation and compatibility.
+pub fn build_cli() -> clap::Command {
+    Cli::command()
+}
+
+/// Read the whole input: stdin when `path` is `-`, the file otherwise.
+fn read_input(path: &str) -> Result<String> {
+    if path == "-" {
+        let mut contents = String::new();
+        io::stdin()
+            .read_to_string(&mut contents)
+            .context("failed to read stdin")?;
+        Ok(contents)
+    } else {
+        fs::read_to_string(path).with_context(|| format!("failed to read {path}"))
+    }
+}
+
+/// How the input is named in messages: "stdin" for `-`, the path otherwise.
+fn input_label(path: &str) -> &str {
+    if path == "-" {
+        "stdin"
+    } else {
+        path
+    }
+}
+
+/// Write to the file when given (and not `-`), stdout otherwise.
+fn write_output(path: Option<&String>, content: &str) -> Result<()> {
+    match path.map(String::as_str) {
+        Some("-") | None => {
+            println!("{content}");
+            Ok(())
+        }
+        Some(p) => fs::write(p, content).with_context(|| format!("failed to write {p}")),
+    }
+}
+
+/// Handle the "price" subcommand: a single file, stdin, or a directory.
+pub fn handle_price(args: &PriceArgs) -> Result<()> {
+    let input = &args.input;
+    let output = args.output.as_ref();
+    let format = args.format.map(Format::from);
+
+    let input_path = Path::new(input);
+    if input != "-" && input_path.is_dir() {
+        let output_dir =
+            output.context("--output <DIR> is required when the input is a directory")?;
+        return measure_time("price (directory)", || {
+            price_directory(input_path, Path::new(output_dir), format)
+        });
+    }
+
+    measure_time("price", || {
+        let contents = read_input(input)?;
+        // output format precedence: --format, output extension, input format
+        let out_format = format.or_else(|| output.and_then(Format::from_path));
+        let rendered = parse_contracts::price_document(&contents, out_format)
+            .with_context(|| format!("failed to price {}", input_label(input)))?;
+        match rendered {
+            Some(output_str) => write_output(output, &output_str),
+            None => {
+                log::warn!(
+                    "no contracts found in {}; nothing written",
+                    input_label(input)
+                );
+                Ok(())
+            }
+        }
+    })
+}
+
+/// Price every contract document in `input_path` into `output_path`.
+fn price_directory(input_path: &Path, output_path: &Path, format: Option<Format>) -> Result<()> {
+    fs::create_dir_all(output_path).with_context(|| {
+        format!(
+            "failed to create output directory {}",
+            output_path.display()
+        )
+    })?;
+    let files = fs::read_dir(input_path)
+        .with_context(|| format!("failed to read input directory {}", input_path.display()))?;
+
+    for file_result in files {
+        let dir_entry = file_result
+            .with_context(|| format!("failed to read entry in {}", input_path.display()))?;
+        let path = dir_entry.path();
+
+        let is_contract_file = path.is_file()
+            && matches!(
+                path.extension()
+                    .and_then(|s| s.to_str())
+                    .map(|e| e.to_lowercase())
+                    .as_deref(),
+                Some("json") | Some("xml")
+            );
+        if is_contract_file {
+            // Construct the corresponding output file path
+            let file_name = path
+                .file_name()
+                .with_context(|| format!("no file name in {}", path.display()))?;
+            let output_file_path = output_path.join(file_name);
+
+            parse_contracts::parse_contract(&path, &output_file_path, format)?;
+            log::debug!("priced contracts {:?} -> {:?}", path, output_file_path);
+        }
+    }
+    Ok(())
+}
+
+/// Handle the "build" subcommand.
+pub fn handle_build(args: &BuildArgs) -> Result<()> {
+    // We measure the time of the operation
+    measure_time("build_curve", || {
+        let contents = read_input(&args.input)?;
+        parse_contracts::build_curve(&contents, input_label(&args.input), Path::new(&args.output))
+    })
+}
+
+/// Handle the "stress" subcommand.
+pub fn handle_stress(args: &StressArgs) -> Result<()> {
+    if args.input == "-" && args.config == "-" {
+        bail!("only one of --input and --config can read from stdin");
+    }
+
+    measure_time("stress_mtm", || {
+        let book = parse_contracts::build_portfolio(&read_input(&args.input)?).with_context(
+            || format!("failed to load portfolio from {}", input_label(&args.input)),
+        )?;
+        let config =
+            StressConfig::from_toml_str(&read_input(&args.config)?).with_context(|| {
+                format!(
+                    "failed to load stress config from {}",
+                    input_label(&args.config)
+                )
+            })?;
+        let results = stress_mtm(&book, &config).context("stress run failed")?;
+        let rendered =
+            serde_json::to_string_pretty(&results).context("failed to serialize stress results")?;
+        write_output(args.output.as_ref(), &rendered)
+    })
+}
+
+/// Handle the "risk" subcommand.
+pub fn handle_risk(args: &RiskArgs) -> Result<()> {
+    if !(0.0..1.0).contains(&args.confidence) || args.confidence == 0.0 {
+        bail!(
+            "--confidence must be strictly between 0 and 1, got {}",
+            args.confidence
+        );
+    }
+    if args.horizon_days <= 0.0 {
+        bail!("--horizon-days must be positive, got {}", args.horizon_days);
+    }
+    if !(-1.0..=1.0).contains(&args.corr) {
+        bail!("--corr must be in [-1, 1], got {}", args.corr);
+    }
+    let cfg = RiskConfig {
+        horizon: args.horizon_days / 252.0,
+        spot_vol: args.spot_vol,
+        vol_of_vol: args.vol_of_vol,
+        spot_vol_corr: args.corr,
+        scenarios: args.scenarios,
+        confidence: args.confidence,
+        seed: args.seed,
+    };
+
+    measure_time("portfolio_risk", || {
+        let book = parse_contracts::build_portfolio(&read_input(&args.input)?).with_context(
+            || format!("failed to load portfolio from {}", input_label(&args.input)),
+        )?;
+        let spot = book.positions[0].option.market.spot.value();
+
+        let mut report = serde_json::Map::new();
+        report.insert("spot".into(), serde_json::json!(spot));
+        report.insert("config".into(), serde_json::to_value(cfg)?);
+        if matches!(args.method, RiskMethod::DeltaGamma | RiskMethod::Both) {
+            let dg = delta_gamma_var(&book, spot, &cfg);
+            report.insert("delta_gamma".into(), serde_json::to_value(&dg)?);
+        }
+        if matches!(args.method, RiskMethod::Full | RiskMethod::Both) {
+            let full = full_revaluation_var(&book, spot, &cfg);
+            report.insert("full_revaluation".into(), serde_json::to_value(&full)?);
+        }
+        let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(report))
+            .context("failed to serialize risk report")?;
+        write_output(args.output.as_ref(), &rendered)
+    })
+}
+
+/// Handle the "implied-vol" subcommand.
+pub fn handle_implied_vol(args: &ImpliedVolArgs) -> Result<()> {
+    let put_or_call = PutOrCall::from(args.put_or_call);
+    // years as a number, or a date measured Act/365 from today
+    let t = match args.maturity.parse::<f64>() {
+        Ok(years) => years,
+        Err(_) => {
+            let date = NaiveDate::parse_from_str(&args.maturity, "%Y-%m-%d").with_context(|| {
+                format!(
+                    "--maturity must be a year fraction or YYYY-MM-DD date, got '{}'",
+                    args.maturity
+                )
+            })?;
+            (date - Local::now().date_naive()).num_days() as f64 / 365.0
+        }
+    };
+    if t <= 0.0 {
+        bail!("maturity must be in the future (t = {t:.4} years)");
+    }
+
+    let vol = implied_vol_from_price(
+        args.spot,
+        args.strike,
+        args.rate,
+        args.dividend,
+        t,
+        args.price,
+        put_or_call,
+    )
+    .context("implied vol solve failed")?;
+    let rendered = serde_json::to_string_pretty(&serde_json::json!({
+        "spot": args.spot,
+        "strike": args.strike,
+        "rate": args.rate,
+        "dividend": args.dividend,
+        "t": t,
+        "price": args.price,
+        "put_or_call": format!("{put_or_call:?}"),
+        "implied_vol": vol,
+    }))?;
+    write_output(args.output.as_ref(), &rendered)
+}
+
+/// Handle the "completions" subcommand.
+pub fn handle_completions(shell: clap_complete::Shell) -> Result<()> {
+    let mut cmd = Cli::command();
+    clap_complete::generate(shell, &mut cmd, "rustyqlib", &mut io::stdout());
+    Ok(())
+}
+
+/// Handle the deprecated "file" subcommand.
+pub fn handle_file(args: &FileArgs) -> Result<()> {
+    measure_time("parse_contract (single file)", || {
+        parse_contracts::parse_contract(Path::new(&args.input), Path::new(&args.output), None)
+    })
+}
+
+/// Handle the deprecated "dir" subcommand.
+pub fn handle_dir(args: &FileArgs) -> Result<()> {
+    measure_time("parse_contract (directory)", || {
+        price_directory(Path::new(&args.input), Path::new(&args.output), None)
+    })
+}
+
+/// Handle the "interactive" subcommand: a menu-driven session. Esc backs
+/// out of the current wizard, Ctrl-C (or "Exit") ends the session; a bad
+/// pricing input reports its error and returns to the menu.
+pub fn handle_interactive() -> Result<()> {
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() {
+        bail!("interactive mode needs a terminal; pipe contracts into `price -i -` instead");
+    }
+    println!("Welcome to the RustyQLib pricing CLI (Esc cancels a wizard, Ctrl-C exits)");
+    loop {
+        let choice = match inquire::Select::new(
+            "What would you like to do?",
+            vec!["Price an option", "Implied volatility", "Exit"],
+        )
+        .prompt()
+        {
+            Ok(choice) => choice,
+            Err(
+                inquire::InquireError::OperationCanceled
+                | inquire::InquireError::OperationInterrupted,
+            ) => break,
+            Err(e) => return Err(e.into()),
+        };
+
+        let result = match choice {
+            "Price an option" => interactive::price_option_wizard(),
+            "Implied volatility" => interactive::implied_vol_wizard(),
+            _ => break,
+        };
+        match result {
+            Ok(()) => {}
+            Err(e) if interactive::is_cancelled(&e) => println!("(cancelled)"),
+            Err(e) => {
+                use crate::utils::style::ERROR;
+                anstream::eprintln!("{ERROR}error:{ERROR:#} {e:#}");
+            }
+        }
+    }
+    println!("Goodbye!");
+    Ok(())
+}
+
 /// Helper function to measure the time taken by a closure.
-fn measure_time<F: FnOnce()>(label: &str, f: F) {
+fn measure_time<T, F: FnOnce() -> T>(label: &str, f: F) -> T {
     let start_time = Instant::now();
-    f();
+    let result = f();
     let elapsed_time = start_time.elapsed();
     log::debug!("time taken for {}: {:?}", label, elapsed_time);
+    result
 }

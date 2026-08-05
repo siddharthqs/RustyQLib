@@ -3,7 +3,9 @@
 One runnable JSON file per product. Price any of them with:
 
 ```bash
-rustyqlib file --input src/examples/EQ/<file>.json --output out.json
+rustyqlib price --input src/examples/EQ/<file>.json --output out.json
+# or straight to stdout:
+rustyqlib price -i src/examples/EQ/<file>.json
 ```
 
 ## Equity (`EQ/`)
@@ -43,7 +45,8 @@ Any of these files can be written in either format. The input format is
 detected from the content, the output format from the output extension:
 
 ```bash
-rustyqlib file --input contracts.xml  --output results.json   # XML in, JSON out
-rustyqlib file --input contracts.json --output results.xml    # JSON in, XML out
+rustyqlib price --input contracts.xml  --output results.json   # XML in, JSON out
+rustyqlib price --input contracts.json --output results.xml    # JSON in, XML out
+rustyqlib price --input contracts.json --format xml            # JSON in, XML to stdout
 cargo run --release --example convert_format -- in.json out.xml
 ```

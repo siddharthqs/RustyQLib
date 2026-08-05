@@ -190,7 +190,7 @@ impl StressConfig {
 }
 
 /// One trade's stress result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TradeStress {
     /// Human-readable trade tag: symbol, payoff kind, strike, quantity.
     pub label: String,
@@ -202,7 +202,7 @@ pub struct TradeStress {
 }
 
 /// One scenario's book-level result with the per-trade breakdown.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ScenarioResult {
     pub scenario: String,
     pub trades: Vec<TradeStress>,

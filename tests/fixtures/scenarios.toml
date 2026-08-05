@@ -1,0 +1,22 @@
+# Minimal stress config for the CLI integration tests.
+
+[[scenarios]]
+name = "equity_crash"
+
+[[scenarios.shocks]]
+factor = "spot"
+mode = "relative"
+size = -0.20
+
+[[scenarios.shocks]]
+factor = "vol"
+mode = "absolute"
+size = 0.10
+
+[[scenarios]]
+name = "one_week_decay"
+
+[[scenarios.shocks]]
+factor = "time"
+mode = "absolute"
+size = 7.0

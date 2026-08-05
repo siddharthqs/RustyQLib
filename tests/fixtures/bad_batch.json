@@ -1,0 +1,39 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "GOOD",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "vanilla",
+        "strike_price": 100.0,
+        "volatility": 0.25,
+        "maturity": "2027-01-01",
+        "risk_free_rate": 0.03,
+        "valuation_date": "2026-01-01",
+        "pricer": "Analytical"
+      }
+    },
+    {
+      "action": "DELTA_HEDGE",
+      "asset": "ZZ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "BAD",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "vanilla",
+        "strike_price": 100.0,
+        "volatility": 0.25,
+        "maturity": "2027-01-01",
+        "risk_free_rate": 0.03,
+        "valuation_date": "2026-01-01",
+        "pricer": "Analytical"
+      }
+    }
+  ]
+}

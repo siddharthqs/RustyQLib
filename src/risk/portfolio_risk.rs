@@ -23,7 +23,7 @@ use rand_distr::StandardNormal;
 use super::measures::{historical_expected_shortfall, historical_var};
 
 /// Scenario-generation settings for portfolio VaR.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct RiskConfig {
     /// Horizon in years (1 trading day = 1/252).
     pub horizon: f64,
@@ -54,7 +54,7 @@ impl Default for RiskConfig {
 }
 
 /// VaR / ES output with the scenario P&L retained for inspection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PortfolioRisk {
     pub var: f64,
     pub expected_shortfall: f64,
