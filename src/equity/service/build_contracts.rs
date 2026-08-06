@@ -1,6 +1,3 @@
-//use crate::rates;
-//use crate::rates::deposits::Deposit;
-
 use crate::core::data_models::ProductData;
 use crate::core::utils::Contract;
 use crate::equity::vanilla_option::EquityOption;
@@ -9,7 +6,7 @@ pub fn build_eq_contracts_from_json(data: Vec<Contract>) -> Vec<Box<EquityOption
     let derivatives: Vec<Box<EquityOption>> = data
         .iter()
         .map(|x| {
-            let ProductData::Option(opt_data) = &x.product_type else {
+            let Some(ProductData::Option(opt_data)) = &x.product_type else {
                 panic!("Not an option!");
             };
             // quotes used for implied vol calibration carry a market price but

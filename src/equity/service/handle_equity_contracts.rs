@@ -36,7 +36,12 @@ pub fn handle_equity_contract(data: &Contract) -> serde_json::Value {
 }
 
 fn price_equity_contract(data: &Contract) -> Result<ContractOutput, RustyQLibError> {
-    match &data.product_type {
+    let Some(product_type) = &data.product_type else {
+        return Err(RustyQLibError::ParseError(
+            "missing product_type for asset EQ".to_string(),
+        ));
+    };
+    match product_type {
         ProductData::Option(opt) => {
             let option = EquityOption::try_from_json(opt)?;
             let contract_output = ContractOutput::from(option.price()?);
@@ -92,7 +97,7 @@ fn price_equity_contract(data: &Contract) -> Result<ContractOutput, RustyQLibErr
         }
         #[allow(unreachable_patterns)]
         _ => Err(RustyQLibError::ParseError(
-            "unsupported or missing product_type for asset EQ".to_string(),
+            "unsupported product_type for asset EQ".to_string(),
         )),
     }
 }

@@ -88,12 +88,74 @@ pub struct RateData {
     pub business_day_adjustment: i8,
 }
 
+/// Fixed-income contract data: a fixed-coupon bond ("Bond") or a
+/// discount bill ("Bill"), priced and quoted US-Treasury style.
+///
+/// Dates are ISO (`"2028-05-15"`) or tenors relative to the valuation
+/// date (`"10Y"`, `"26W"`). US Treasury conventions fill every gap:
+/// face 100, semiannual Act/Act ICMA coupons, SIFMA calendar, T+1
+/// settlement, end-of-month rule when maturity is a month-end, and a
+/// dated date defaulting to the coupon anchor at or before settlement.
+///
+/// For pricing, provide exactly one of `clean_price`, `yield_rate` or
+/// `curve` (bonds), or one of `discount_rate` / `clean_price` (bills).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BondData {
+    /// `"Bond"` (fixed coupon) or `"Bill"` (discount instrument).
+    pub instrument: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Face amount (prices are per 100 regardless). Default 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_value: Option<f64>,
+    /// Annual coupon rate, e.g. `0.0425` (bonds only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coupon_rate: Option<f64>,
+    /// `"semiannual"` (default), `"annual"`, `"quarterly"` or `"monthly"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<String>,
+    /// Interest accrual start. Default: the coupon anchor at or before
+    /// settlement (a seasoned bond mid-period).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dated_date: Option<String>,
+    pub maturity_date: String,
+    /// Trade date; settlement follows `settlement_days` after it.
+    /// Default: today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valuation_date: Option<String>,
+    /// Business days to settlement. Default 1 (US Treasuries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_days: Option<i64>,
+    /// Default `"Act/Act ICMA"` for bonds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day_count: Option<String>,
+    /// Clean price per 100 face (also accepted as a bill's price).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_price: Option<f64>,
+    /// Street-convention yield (bonds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yield_rate: Option<f64>,
+    /// Act/360 discount rate (bills).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discount_rate: Option<f64>,
+    /// Price off an explicit discount curve instead of a quote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<crate::core::curves::CurveInput>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Contract {
     pub action: String,
     pub asset: String,
-    pub product_type: ProductData,
+    /// The equity/commodity product block; absent for IR contracts,
+    /// which carry `rate_data` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_type: Option<ProductData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_data: Option<RateData>,
+    /// Fixed-income block (bonds and bills) for IR contracts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bond_data: Option<BondData>,
 }
 #[derive(Deserialize, Serialize)]
 pub struct CombinedContract {

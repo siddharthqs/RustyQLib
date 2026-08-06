@@ -6,13 +6,19 @@
 //! The crate is organised into asset-class modules:
 //!
 //! - [`core`] — shared building blocks: traits ([`core::traits::Instrument`]),
-//!   quotes, term structures, interpolation and data models
+//!   quotes, discount curves, calendars, interpolation and data models
 //! - [`equity`] — equity options, forwards and futures with Black-Scholes,
 //!   binomial, Monte Carlo and finite-difference engines
-//! - [`rates`] — interest-rate instruments (deposits, FRAs) and curve building
+//! - [`bonds`] — fixed income: US Treasury notes/bonds and bills with
+//!   street-convention analytics (accrued interest, price/yield,
+//!   duration, convexity, DV01), money-market instruments (deposits,
+//!   FRAs) and discount-curve bootstrapping
 //! - [`risk`] — VaR / Expected Shortfall, portfolio scenario risk, volatility
 //!   estimation, performance statistics and VaR backtesting
 //! - [`cmdty`] — commodity options
+//! - `data` *(feature `fetch`)* — free official end-of-day market data:
+//!   the US Treasury daily par yield curve, passed through as published
+//!   with provenance metadata
 //! - [`utils`] — random number generation, stochastic processes and the
 //!   JSON/CLI plumbing used by the `rustyqlib` binary
 //!
@@ -22,17 +28,25 @@
 //! directory in the repository); the same types can be constructed directly
 //! and priced through the [`core::traits::Instrument`] trait.
 
+pub mod bonds;
 pub mod cmdty;
 pub mod core;
+#[cfg(feature = "fetch")]
+pub mod data;
 pub mod equity;
-pub mod rates;
 pub mod risk;
 pub mod utils;
 
+pub use crate::bonds::{
+    bootstrap_curve, BillQuote, BondQuote, CurveInstrument, Deposit, FixedRateBond, Fra, Frequency,
+    TreasuryBill,
+};
 pub use crate::core::calendar::{
     BusinessDayConvention, Calendar, DateGeneration, Period, Schedule,
 };
-pub use crate::core::curves::{Compounding, CurveInput, InterpolationMethod, Tenor, YieldCurve};
+pub use crate::core::curves::{
+    Compounding, CurveInput, InterpolationMethod, RateShift, Tenor, YieldCurve,
+};
 pub use crate::core::daycount::DayCountConvention;
 pub use crate::core::depth::{DepthLevel, MarketDepth};
 pub use crate::core::errors::RustyQLibError;

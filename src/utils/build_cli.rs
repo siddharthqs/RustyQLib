@@ -1,17 +1,35 @@
-use crate::core::serialization::Format;
+use crate::core::serialization::{self, Format};
 use crate::core::trade::PutOrCall;
+use crate::data::nyfed;
+use crate::data::treasury;
 use crate::equity::blackscholes::implied_vol_from_price;
 use crate::risk::{delta_gamma_var, full_revaluation_var, stress_mtm, RiskConfig, StressConfig};
 use crate::utils::interactive;
 use crate::utils::parse_contracts;
 use anyhow::{bail, Context, Result};
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use std::fs;
 use std::io;
 use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
+
+/// Palette for `--help` output: headers and usage in bold yellow,
+/// command/flag literals in green, value placeholders in cyan. Clap
+/// strips the colors automatically when stdout is not a terminal or
+/// `NO_COLOR` is set.
+const HELP_STYLES: clap::builder::styling::Styles = {
+    use clap::builder::styling::{AnsiColor, Effects, Styles};
+    Styles::styled()
+        .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+        .usage(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+        .literal(AnsiColor::Green.on_default())
+        .placeholder(AnsiColor::Cyan.on_default())
+        .error(AnsiColor::Red.on_default().effects(Effects::BOLD))
+        .valid(AnsiColor::Green.on_default())
+        .invalid(AnsiColor::Red.on_default())
+};
 
 /// Pricing and risk management of financial derivatives.
 #[derive(Parser)]
@@ -21,7 +39,8 @@ use std::time::Instant;
     author = "Siddharth Singh <siddharth_qs@outlook.com>",
     about = "Pricing and risk management of financial derivatives",
     subcommand_required = true,
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    styles = HELP_STYLES
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -64,6 +83,8 @@ pub enum Commands {
     Price(PriceArgs),
     /// Building the curve / Vol surface
     Build(BuildArgs),
+    /// Fetch a free official end-of-day curve (as published, with metadata)
+    Fetch(FetchArgs),
     /// Stress MtM: revalue an options book under TOML shock scenarios
     Stress(StressArgs),
     /// VaR / Expected Shortfall for an options book by scenario simulation
@@ -148,6 +169,39 @@ pub struct BuildArgs {
     /// Output directory
     #[arg(short, long, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub output: String,
+}
+
+/// Free official end-of-day data sources for `fetch`.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum FetchSource {
+    /// US Treasury daily par yield curve (home.treasury.gov)
+    #[value(name = "ust", alias = "ust-par-yields")]
+    UstParYields,
+    /// Secured Overnight Financing Rate (markets.newyorkfed.org)
+    #[value(name = "sofr")]
+    Sofr,
+    /// Effective Federal Funds Rate (markets.newyorkfed.org)
+    #[value(name = "effr")]
+    Effr,
+}
+
+#[derive(Args)]
+pub struct FetchArgs {
+    /// Data source
+    #[arg(value_enum)]
+    pub source: FetchSource,
+    /// Curve date, YYYY-MM-DD (default: the latest published business day)
+    #[arg(long, value_name = "DATE")]
+    pub date: Option<String>,
+    /// Parse a previously downloaded CSV instead of hitting the network
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub from_file: Option<String>,
+    /// Output file (default: stdout)
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub output: Option<String>,
+    /// Output format (default: the output file extension, else JSON)
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 #[derive(Args)]
@@ -358,6 +412,131 @@ pub fn handle_build(args: &BuildArgs) -> Result<()> {
     })
 }
 
+/// Handle the "fetch" subcommand: download (or read) a free official
+/// end-of-day curve and emit it exactly as published — tenor labels and
+/// yields untouched — under a `metadata` block recording what the curve
+/// is and where it came from. The network is confined to this command,
+/// so anything downstream is reproducible from the emitted file alone.
+pub fn handle_fetch(args: &FetchArgs) -> Result<()> {
+    let date = args
+        .date
+        .as_deref()
+        .map(|s| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .with_context(|| format!("--date must be YYYY-MM-DD, got '{s}'"))
+        })
+        .transpose()?;
+    measure_time("fetch", || match args.source {
+        FetchSource::UstParYields => fetch_ust_par_yields(args, date),
+        FetchSource::Sofr => fetch_nyfed_rate(args, date, nyfed::ReferenceRate::Sofr),
+        FetchSource::Effr => fetch_nyfed_rate(args, date, nyfed::ReferenceRate::Effr),
+    })
+}
+
+fn fetch_ust_par_yields(args: &FetchArgs, date: Option<NaiveDate>) -> Result<()> {
+    // provenance of the raw CSV, merged into the document metadata
+    let (rows, origin) = match &args.from_file {
+        Some(path) => {
+            let text = read_input(path)?;
+            let rows = treasury::parse_csv(&text)
+                .with_context(|| format!("failed to parse {}", input_label(path)))?;
+            (rows, serde_json::json!({ "file": input_label(path) }))
+        }
+        None => {
+            let mut year = date.map_or_else(|| Local::now().date_naive().year(), |d| d.year());
+            let mut rows = treasury::parse_csv(&treasury::fetch_year_csv(year)?)?;
+            if rows.is_empty() && date.is_none() {
+                // early January: nothing published for the year yet
+                year -= 1;
+                rows = treasury::parse_csv(&treasury::fetch_year_csv(year)?)?;
+            }
+            let origin = serde_json::json!({
+                "url": treasury::csv_url(year),
+                "fetched_at": Local::now().to_rfc3339(),
+            });
+            (rows, origin)
+        }
+    };
+
+    let row = treasury::select_row(&rows, date)?;
+    log::info!(
+        "US Treasury par yields for {}: {} curve points",
+        row.date,
+        row.points.len()
+    );
+    emit_document(args, treasury::to_document(row), origin, "curve")
+}
+
+fn fetch_nyfed_rate(
+    args: &FetchArgs,
+    date: Option<NaiveDate>,
+    rate: nyfed::ReferenceRate,
+) -> Result<()> {
+    let (observations, origin) = match &args.from_file {
+        Some(path) => {
+            let text = read_input(path)?;
+            let observations = nyfed::parse_response(&text)
+                .with_context(|| format!("failed to parse {}", input_label(path)))?;
+            (observations, serde_json::json!({ "file": input_label(path) }))
+        }
+        None => {
+            let (text, url) = match date {
+                // fetch a window back from the requested date, so a
+                // holiday can name the nearest earlier published day
+                Some(d) => {
+                    let start = d - chrono::Days::new(10);
+                    let url = nyfed::search_url(rate, start, d);
+                    (nyfed::fetch_range(rate, start, d)?, url)
+                }
+                None => (nyfed::fetch_last(rate, 5)?, nyfed::last_url(rate, 5)),
+            };
+            let origin = serde_json::json!({
+                "url": url,
+                "fetched_at": Local::now().to_rfc3339(),
+            });
+            (nyfed::parse_response(&text)?, origin)
+        }
+    };
+    let observation = nyfed::select_observation(&observations, date)?;
+    log::info!(
+        "{} for {}: {}%",
+        rate.name(),
+        observation.date,
+        observation.record["percentRate"]
+    );
+    emit_document(
+        args,
+        nyfed::to_document(observation, rate),
+        origin,
+        "reference_rate",
+    )
+}
+
+/// Merge fetch provenance into the document's `metadata` block and write
+/// it in the requested format (`--format`, then the output file
+/// extension, then JSON).
+fn emit_document(
+    args: &FetchArgs,
+    mut document: serde_json::Value,
+    origin: serde_json::Value,
+    root: &str,
+) -> Result<()> {
+    if let (Some(serde_json::Value::Object(meta)), serde_json::Value::Object(origin)) =
+        (document.get_mut("metadata"), origin)
+    {
+        meta.extend(origin);
+    }
+    let format = args
+        .format
+        .map(Format::from)
+        .or_else(|| args.output.as_ref().and_then(Format::from_path))
+        .unwrap_or(Format::Json);
+    write_output(
+        args.output.as_ref(),
+        &serialization::render_value(&document, format, root),
+    )
+}
+
 /// Handle the "stress" subcommand.
 pub fn handle_stress(args: &StressArgs) -> Result<()> {
     if args.input == "-" && args.config == "-" {
@@ -365,9 +544,10 @@ pub fn handle_stress(args: &StressArgs) -> Result<()> {
     }
 
     measure_time("stress_mtm", || {
-        let book = parse_contracts::build_portfolio(&read_input(&args.input)?).with_context(
-            || format!("failed to load portfolio from {}", input_label(&args.input)),
-        )?;
+        let book =
+            parse_contracts::build_portfolio(&read_input(&args.input)?).with_context(|| {
+                format!("failed to load portfolio from {}", input_label(&args.input))
+            })?;
         let config =
             StressConfig::from_toml_str(&read_input(&args.config)?).with_context(|| {
                 format!(
@@ -407,9 +587,10 @@ pub fn handle_risk(args: &RiskArgs) -> Result<()> {
     };
 
     measure_time("portfolio_risk", || {
-        let book = parse_contracts::build_portfolio(&read_input(&args.input)?).with_context(
-            || format!("failed to load portfolio from {}", input_label(&args.input)),
-        )?;
+        let book =
+            parse_contracts::build_portfolio(&read_input(&args.input)?).with_context(|| {
+                format!("failed to load portfolio from {}", input_label(&args.input))
+            })?;
         let spot = book.positions[0].option.market.spot.value();
 
         let mut report = serde_json::Map::new();
@@ -436,12 +617,13 @@ pub fn handle_implied_vol(args: &ImpliedVolArgs) -> Result<()> {
     let t = match args.maturity.parse::<f64>() {
         Ok(years) => years,
         Err(_) => {
-            let date = NaiveDate::parse_from_str(&args.maturity, "%Y-%m-%d").with_context(|| {
-                format!(
-                    "--maturity must be a year fraction or YYYY-MM-DD date, got '{}'",
-                    args.maturity
-                )
-            })?;
+            let date =
+                NaiveDate::parse_from_str(&args.maturity, "%Y-%m-%d").with_context(|| {
+                    format!(
+                        "--maturity must be a year fraction or YYYY-MM-DD date, got '{}'",
+                        args.maturity
+                    )
+                })?;
             (date - Local::now().date_naive()).num_days() as f64 / 365.0
         }
     };
@@ -505,7 +687,12 @@ pub fn handle_interactive() -> Result<()> {
     loop {
         let choice = match inquire::Select::new(
             "What would you like to do?",
-            vec!["Price an option", "Implied volatility", "Exit"],
+            vec![
+                "Price an option",
+                "Price a bond",
+                "Implied volatility",
+                "Exit",
+            ],
         )
         .prompt()
         {
@@ -519,6 +706,7 @@ pub fn handle_interactive() -> Result<()> {
 
         let result = match choice {
             "Price an option" => interactive::price_option_wizard(),
+            "Price a bond" => interactive::price_bond_wizard(),
             "Implied volatility" => interactive::implied_vol_wizard(),
             _ => break,
         };

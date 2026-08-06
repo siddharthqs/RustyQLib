@@ -64,6 +64,10 @@ pub enum Calendar {
     Target,
     /// New York Stock Exchange trading calendar.
     UsNyse,
+    /// US government bond market (SIFMA recommended full-close holidays):
+    /// the NYSE set plus Columbus Day and Veterans Day. SIFMA early
+    /// closes and its occasional Good Friday exceptions are not modelled.
+    UsGovernmentBond,
     /// England-and-Wales bank holidays (regular rules; one-off royal or
     /// millennium holidays are not modelled).
     UkSettlement,
@@ -86,6 +90,7 @@ impl Calendar {
             Calendar::WeekendsOnly => false,
             Calendar::Target => is_target_holiday(date),
             Calendar::UsNyse => is_nyse_holiday(date),
+            Calendar::UsGovernmentBond => is_us_government_bond_holiday(date),
             Calendar::UkSettlement => is_uk_holiday(date),
             Calendar::Custom { holidays } => holidays.contains(&date),
         }
@@ -318,6 +323,26 @@ fn is_nyse_holiday(date: NaiveDate) -> bool {
     }
     // Christmas: Dec 25 (Fri if Sat, Mon if Sun)
     if observed_on(date, 12, 25) {
+        return true;
+    }
+    false
+}
+
+/// US bond-market holidays (SIFMA recommended full closes): the NYSE set
+/// plus Columbus Day (second Monday of October) and Veterans Day
+/// (November 11, observed). The bond market closes on both while the
+/// NYSE trades.
+fn is_us_government_bond_holiday(date: NaiveDate) -> bool {
+    if is_nyse_holiday(date) {
+        return true;
+    }
+    let (y, m) = (date.year(), date.month());
+    // Columbus Day: second Monday of October
+    if m == 10 && date == nth_weekday(y, 10, Weekday::Mon, 2) {
+        return true;
+    }
+    // Veterans Day: November 11 (Fri if Sat, Mon if Sun)
+    if observed_on(date, 11, 11) {
         return true;
     }
     false
@@ -731,6 +756,27 @@ mod tests {
         }
         // Apr 3 anchor (Jun 3 - 2M) is Good Friday -> moved to Apr 6
         assert!(s.dates.contains(&d(2026, 4, 6)));
+    }
+
+    #[test]
+    fn us_government_bond_calendar_extends_nyse() {
+        let bond = Calendar::UsGovernmentBond;
+        // Columbus Day 2026: Mon Oct 12 — bond market closed, NYSE open
+        let columbus = d(2026, 10, 12);
+        assert!(!bond.is_business_day(columbus));
+        assert!(Calendar::UsNyse.is_business_day(columbus));
+        // Veterans Day 2026: Wed Nov 11 — bond market closed, NYSE open
+        let veterans = d(2026, 11, 11);
+        assert!(!bond.is_business_day(veterans));
+        assert!(Calendar::UsNyse.is_business_day(veterans));
+        // Veterans Day 2028 falls on Saturday -> observed Friday Nov 10
+        assert!(!bond.is_business_day(d(2028, 11, 10)));
+        // NYSE holidays carry over (Good Friday 2026: Apr 3)
+        assert!(!bond.is_business_day(d(2026, 4, 3)));
+        // an ordinary Tuesday is open
+        assert!(bond.is_business_day(d(2026, 10, 13)));
+        // T+1 settlement over Columbus Day weekend: Fri Oct 9 -> Tue Oct 13
+        assert_eq!(bond.add_business_days(d(2026, 10, 9), 1), d(2026, 10, 13));
     }
 
     #[test]

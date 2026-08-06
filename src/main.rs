@@ -43,6 +43,7 @@ fn main() -> ExitCode {
     let result = match &cli.command {
         Commands::Price(args) => build_cli::handle_price(args),
         Commands::Build(args) => build_cli::handle_build(args),
+        Commands::Fetch(args) => build_cli::handle_fetch(args),
         Commands::Stress(args) => build_cli::handle_stress(args),
         Commands::Risk(args) => build_cli::handle_risk(args),
         Commands::ImpliedVol(args) => build_cli::handle_implied_vol(args),

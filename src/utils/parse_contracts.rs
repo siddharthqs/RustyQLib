@@ -1,13 +1,10 @@
+use crate::bonds::build_contracts::bootstrap_from_contracts;
 use crate::core::data_models::ProductData;
-use crate::core::traits::Rates;
 use crate::core::utils::{CombinedContract, Contract, ContractOutput, Contracts};
 use crate::equity::build_contracts::build_eq_contracts_from_json;
 use crate::equity::handle_equity_contracts::handle_equity_contract;
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::vanilla_option::EquityOption;
-use crate::rates;
-use crate::rates::build_contracts::{build_ir_contracts_from_json, build_term_structure};
-use crate::rates::deposits::Deposit;
 use anyhow::{bail, Context, Result};
 use chrono::Local;
 use std::fs;
@@ -74,15 +71,17 @@ pub fn build_curve(contents: &str, source: &str, output_folder: &Path) -> Result
             saved_note("Volatility surface", &out_path);
         }
         "IR" => {
-            let contracts: Vec<Box<dyn Rates>> =
-                build_ir_contracts_from_json(list_contracts.contracts);
-            let ts = build_term_structure(contracts);
-            let mut output: String = String::new();
-            for i in 0..ts.date.len() {
-                output.push_str(&format!(
-                    "{},{},{}\n",
-                    ts.date[i], ts.discount_factor[i], ts.rate[i]
-                ));
+            log::info!("bootstrapping discount curve");
+            let today = Local::now().date_naive();
+            let curve = bootstrap_from_contracts(&list_contracts.contracts, today)
+                .context("failed to bootstrap discount curve")?;
+            log::debug!("bootstrapped curve:\n{curve}");
+            let mut output = String::from("date,discount_factor,zero_rate_continuous\n");
+            for pillar in curve.pillars() {
+                let date = pillar
+                    .date
+                    .map_or_else(|| pillar.time.to_string(), |d| d.to_string());
+                output.push_str(&format!("{},{},{}\n", date, pillar.df, pillar.zero_rate));
             }
 
             let out_path = save_to_file(
@@ -164,7 +163,7 @@ pub fn build_portfolio(contents: &str) -> Result<EquityPortfolio> {
     }
     let mut book = EquityPortfolio::new();
     for (index, contract) in list_contracts.contracts.iter().enumerate() {
-        let ProductData::Option(data) = &contract.product_type else {
+        let Some(ProductData::Option(data)) = &contract.product_type else {
             bail!("contract {index}: only option contracts can go into a risk/stress portfolio");
         };
         let option = *EquityOption::try_from_json(data)
@@ -193,53 +192,15 @@ pub fn process_contract(data: &Contract) -> Value {
     match (data.action.as_str(), data.asset.as_str()) {
         ("PV", "EQ") => handle_equity_contract(data),
         ("PV", "IR") => {
-            price_ir_contract(data).unwrap_or_else(|e| error_result(data, format!("{e:#}")))
+            let today = Local::now().date_naive();
+            crate::bonds::service::price_ir_contract(data, today)
+                .unwrap_or_else(|e| error_result(data, e.to_string()))
         }
         (action, asset) => error_result(
             data,
             format!("unsupported action/asset combination `{action}`/`{asset}`"),
         ),
     }
-}
-
-fn price_ir_contract(data: &Contract) -> Result<Value> {
-    let rate_data = data
-        .rate_data
-        .clone()
-        .context("IR contract is missing `rate_data`")?;
-    let start_date_str = rate_data.start_date; // Only for 0M case
-    let maturity_date_str = rate_data.maturity_date;
-    let current_date = Local::now().date_naive();
-    let maturity_date = rates::utils::convert_mm_to_date(maturity_date_str);
-    let start_date = rates::utils::convert_mm_to_date(start_date_str);
-    log::debug!("deposit maturity date {:?}", maturity_date);
-    let mut deposit = Deposit {
-        start_date,
-        maturity_date,
-        valuation_date: current_date,
-        notional: rate_data.notional,
-        fix_rate: rate_data.fix_rate,
-        day_count: rates::utils::DayCountConvention::Act360,
-        business_day_adjustment: 0,
-        term_structure: None,
-    };
-    match rate_data.day_count.as_str() {
-        "Act360" | "A360" => {
-            deposit.day_count = rates::utils::DayCountConvention::Act360;
-        }
-        "Act365" | "A365" => {
-            deposit.day_count = rates::utils::DayCountConvention::Act365;
-        }
-        "Thirty360" | "30/360" => {
-            deposit.day_count = rates::utils::DayCountConvention::Thirty360;
-        }
-        other => {
-            log::warn!("unrecognized day count `{other}`; defaulting to Act360");
-        }
-    }
-    let df = deposit.get_discount_factor();
-    log::debug!("deposit discount factor {:?}", df);
-    Ok(Value::String("Work in progress".to_string()))
 }
 
 /// Render a failed contract in the same `{contract, output}` shape as a

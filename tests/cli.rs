@@ -70,7 +70,10 @@ fn price_file_to_stdout_matches_golden() {
     let results = stdout_json(cli().args(["price", "-i"]).arg(fixture("vanilla.json")));
     let output = &results[0]["output"];
     let pv = output["pv"].as_f64().expect("pv must be a number");
-    assert!((pv - GOLDEN_PV).abs() < 1e-9, "pv {pv} vs golden {GOLDEN_PV}");
+    assert!(
+        (pv - GOLDEN_PV).abs() < 1e-9,
+        "pv {pv} vs golden {GOLDEN_PV}"
+    );
     assert!(output["delta"].as_f64().unwrap() > 0.5, "ATM call delta");
 }
 
@@ -243,7 +246,14 @@ fn risk_reports_both_methods_by_default() {
 fn risk_method_flag_selects_one_estimator() {
     let report = stdout_json(
         cli()
-            .args(["risk", "--scenarios", "500", "--method", "delta-gamma", "-i"])
+            .args([
+                "risk",
+                "--scenarios",
+                "500",
+                "--method",
+                "delta-gamma",
+                "-i",
+            ])
             .arg(fixture("portfolio.json")),
     );
     assert!(report.get("delta_gamma").is_some());
@@ -445,4 +455,232 @@ fn deprecated_file_and_dir_subcommands_still_work() {
         .assert()
         .success();
     assert!(out_dir.join("v.json").exists());
+}
+
+// ------------------------------------------------------------- fixed income
+
+#[test]
+fn price_ust_bonds_and_bill_reports_full_analytics() {
+    let results = stdout_json(cli().args(["price", "-i"]).arg(fixture("ust_bond.json")));
+    assert_eq!(results.as_array().unwrap().len(), 4);
+
+    // contract 0: 4.5% 2028 note quoted at a clean 99.50
+    let note = &results[0]["output"];
+    assert_eq!(note["instrument"], "Bond");
+    assert_eq!(note["settlement_date"], "2026-08-06"); // T+1 from Wed Aug 5
+    assert_eq!(note["clean_price"].as_f64().unwrap(), 99.50);
+    let y = note["yield"].as_f64().unwrap();
+    assert!(
+        y > 0.045 && y < 0.055,
+        "discount to par: yield {y} above coupon"
+    );
+    let accrued = note["accrued_interest"].as_f64().unwrap();
+    // May 15 -> Aug 6 is 83 days of a 184-day period at 2.25 per half
+    assert!(
+        (accrued - 2.25 * 83.0 / 184.0).abs() < 1e-9,
+        "accrued {accrued}"
+    );
+    assert!(note["modified_duration"].as_f64().unwrap() > 1.5);
+    assert!(note["dv01"].as_f64().unwrap() > 0.0);
+
+    // contract 1: 10y from a 4.1% yield -> premium over its 4.25% coupon
+    let ten_year = &results[1]["output"];
+    let clean = ten_year["clean_price"].as_f64().unwrap();
+    assert!(clean > 100.0 && clean < 105.0, "clean {clean}");
+
+    // contract 2: priced off a flat 4% curve
+    let on_curve = &results[2]["output"];
+    assert!(on_curve["clean_price"].as_f64().unwrap() > 100.0);
+
+    // contract 3: 13-week bill at a 4.8% discount rate
+    let bill = &results[3]["output"];
+    assert_eq!(bill["instrument"], "Bill");
+    assert_eq!(bill["days_to_maturity"].as_i64().unwrap(), 91);
+    let expected_price = 100.0 * (1.0 - 0.048 * 91.0 / 360.0);
+    assert!((bill["price"].as_f64().unwrap() - expected_price).abs() < 1e-9);
+    assert!(bill["bond_equivalent_yield"].as_f64().unwrap() > 0.048);
+}
+
+// ---------------------------------------------------------------------- fetch
+
+#[test]
+fn fetch_from_file_emits_the_curve_as_published() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "ust", "--date", "2026-08-05", "--from-file"])
+            .arg(fixture("ust_par_yields_2026.csv")),
+    );
+    // provenance and identity live in the metadata block
+    let meta = &doc["metadata"];
+    assert!(meta["source"].as_str().unwrap().contains("Treasury"));
+    assert_eq!(meta["curve_date"], "2026-08-05");
+    assert_eq!(meta["unit"], "percent");
+    assert!(meta["file"].as_str().unwrap().contains("ust_par_yields"));
+
+    // the points are the feed verbatim: tenor label + percent yield only
+    let points = doc["points"].as_array().unwrap();
+    assert_eq!(points.len(), 14);
+    assert_eq!(points[0]["tenor"], "1 Mo");
+    assert_eq!(points[0]["yield"], 3.77);
+    assert_eq!(points[13]["tenor"], "30 Yr");
+    assert_eq!(points[13]["yield"], 5.17);
+    assert_eq!(points[0].as_object().unwrap().len(), 2, "nothing invented");
+}
+
+#[test]
+fn fetch_without_date_picks_the_latest_published_row() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "ust", "--from-file"])
+            .arg(fixture("ust_par_yields_2026.csv")),
+    );
+    assert_eq!(doc["metadata"]["curve_date"], "2026-08-05");
+}
+
+#[test]
+fn fetch_missing_date_names_the_nearest_published_day() {
+    // Sunday Aug 2: nearest earlier row in the fixture is Friday Jul 31
+    cli()
+        .args(["fetch", "ust", "--date", "2026-08-02", "--from-file"])
+        .arg(fixture("ust_par_yields_2026.csv"))
+        .assert()
+        .code(1)
+        .stdout(predicates::str::is_empty())
+        .stderr(contains("2026-07-31"));
+}
+
+#[test]
+fn fetch_rejects_a_malformed_date() {
+    cli()
+        .args(["fetch", "ust", "--date", "08/05/2026", "--from-file"])
+        .arg(fixture("ust_par_yields_2026.csv"))
+        .assert()
+        .code(1)
+        .stderr(contains("--date must be YYYY-MM-DD"));
+}
+
+#[test]
+fn fetch_xml_output_follows_the_file_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let doc_path = dir.path().join("ust.xml");
+    cli()
+        .args(["fetch", "ust", "--date", "2026-08-05", "--from-file"])
+        .arg(fixture("ust_par_yields_2026.csv"))
+        .arg("-o")
+        .arg(&doc_path)
+        .assert()
+        .success();
+    let xml = std::fs::read_to_string(&doc_path).unwrap();
+    assert!(xml.starts_with("<?xml"), "not XML: {}", &xml[..40]);
+    assert!(xml.contains("<curve>"));
+    assert!(xml.contains("<tenor>1 Mo</tenor>"));
+    assert!(xml.contains("<yield>3.77</yield>"));
+    assert!(xml.contains("<curve_date>2026-08-05</curve_date>"));
+}
+
+#[test]
+fn fetch_sofr_emits_the_observation_as_published() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "sofr", "--from-file"])
+            .arg(fixture("nyfed_sofr.json")),
+    );
+    let meta = &doc["metadata"];
+    assert_eq!(meta["rate_type"], "SOFR");
+    assert_eq!(meta["effective_date"], "2026-08-05", "latest of the two");
+    assert_eq!(meta["unit"], "percent");
+    assert!(meta["source"].as_str().unwrap().contains("New York"));
+    assert!(meta["file"].as_str().unwrap().contains("nyfed_sofr"));
+    // the record is the feed verbatim
+    assert_eq!(doc["rate"]["percentRate"], 3.64);
+    assert_eq!(doc["rate"]["volumeInBillions"], 2989);
+    assert_eq!(doc["rate"]["type"], "SOFR");
+}
+
+#[test]
+fn fetch_effr_keeps_the_target_range_and_honors_date() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "effr", "--date", "2026-08-04", "--from-file"])
+            .arg(fixture("nyfed_effr.json")),
+    );
+    assert_eq!(doc["metadata"]["rate_type"], "EFFR");
+    assert_eq!(doc["metadata"]["effective_date"], "2026-08-04");
+    assert_eq!(doc["rate"]["percentRate"], 3.63);
+    assert_eq!(doc["rate"]["targetRateFrom"], 3.50);
+    assert_eq!(doc["rate"]["targetRateTo"], 3.75);
+}
+
+#[test]
+fn fetch_rate_missing_date_names_the_nearest_published_day() {
+    // Sunday Aug 9: nearest earlier observation is Wednesday Aug 5
+    cli()
+        .args(["fetch", "sofr", "--date", "2026-08-09", "--from-file"])
+        .arg(fixture("nyfed_sofr.json"))
+        .assert()
+        .code(1)
+        .stdout(predicates::str::is_empty())
+        .stderr(contains("2026-08-05"));
+}
+
+#[test]
+fn fetch_rate_xml_output_works() {
+    cli()
+        .args(["fetch", "effr", "--format", "xml", "--from-file"])
+        .arg(fixture("nyfed_effr.json"))
+        .assert()
+        .success()
+        .stdout(contains("<?xml"))
+        .stdout(contains("<reference_rate>"))
+        .stdout(contains("<percentRate>3.63</percentRate>"));
+}
+
+#[test]
+fn fetch_format_flag_forces_xml_on_stdout() {
+    cli()
+        .args(["fetch", "ust", "--format", "xml", "--from-file"])
+        .arg(fixture("ust_par_yields_2026.csv"))
+        .assert()
+        .success()
+        .stdout(contains("<?xml"))
+        .stdout(contains("<curve>"));
+}
+
+#[test]
+fn build_bootstraps_a_treasury_curve_from_quotes() {
+    let dir = tempfile::tempdir().unwrap();
+    cli()
+        .args(["build", "-i"])
+        .arg(fixture("build_ust_curve.json"))
+        .arg("-o")
+        .arg(dir.path())
+        .assert()
+        .success();
+    let csv = std::fs::read_to_string(dir.path().join("term_structure").join("term_structure.csv"))
+        .expect("curve csv is written");
+    let mut lines = csv.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        "date,discount_factor,zero_rate_continuous"
+    );
+    let rows: Vec<(String, f64, f64)> = lines
+        .map(|line| {
+            let mut parts = line.split(',');
+            (
+                parts.next().unwrap().to_string(),
+                parts.next().unwrap().parse().unwrap(),
+                parts.next().unwrap().parse().unwrap(),
+            )
+        })
+        .collect();
+    // five pillars: two bills, three notes, in maturity order
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0].0, "2026-11-05");
+    assert_eq!(rows[4].0, "2036-05-15");
+    // discount factors strictly decreasing, zeros in a sane Treasury range
+    assert!(rows.windows(2).all(|w| w[1].1 < w[0].1), "{rows:?}");
+    assert!(
+        rows.iter().all(|r| r.2 > 0.03 && r.2 < 0.06),
+        "zeros out of range: {rows:?}"
+    );
 }

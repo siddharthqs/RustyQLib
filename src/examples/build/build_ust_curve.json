@@ -1,0 +1,60 @@
+{"asset":"IR",
+"contracts" : [
+{
+    "action":"PV",
+    "asset":"IR",
+    "bond_data":{
+        "instrument": "Bill",
+        "maturity_date": "2026-11-05",
+        "valuation_date": "2026-08-05",
+        "discount_rate": 0.048
+    }
+},
+{
+    "action":"PV",
+    "asset":"IR",
+    "bond_data":{
+        "instrument": "Bill",
+        "maturity_date": "2027-02-04",
+        "valuation_date": "2026-08-05",
+        "discount_rate": 0.047
+    }
+},
+{
+    "action":"PV",
+    "asset":"IR",
+    "bond_data":{
+        "instrument": "Bond",
+        "coupon_rate": 0.045,
+        "dated_date": "2026-05-15",
+        "maturity_date": "2028-05-15",
+        "valuation_date": "2026-08-05",
+        "clean_price": 99.50
+    }
+},
+{
+    "action":"PV",
+    "asset":"IR",
+    "bond_data":{
+        "instrument": "Bond",
+        "coupon_rate": 0.0425,
+        "dated_date": "2026-05-15",
+        "maturity_date": "2031-05-15",
+        "valuation_date": "2026-08-05",
+        "clean_price": 101.25
+    }
+},
+{
+    "action":"PV",
+    "asset":"IR",
+    "bond_data":{
+        "instrument": "Bond",
+        "coupon_rate": 0.044,
+        "dated_date": "2026-05-15",
+        "maturity_date": "2036-05-15",
+        "valuation_date": "2026-08-05",
+        "clean_price": 102.10
+    }
+}
+]
+}

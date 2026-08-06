@@ -53,6 +53,11 @@ pub enum RustyQLibError {
     #[error("parse error: {0}")]
     ParseError(String),
 
+    /// A remote data source could not be reached or answered with an
+    /// error (used by the `fetch` feature).
+    #[error("network error: {0}")]
+    Network(String),
+
     /// A [`Market`](crate::core::market::Market) lookup found no datum at
     /// the given key. `key` is the debug rendering of the typed key, e.g.
     /// `Spot("ACME")`.

@@ -215,7 +215,8 @@ transitive dependencies. Opt in to what you need:
 | *(default)* | pricing, calibration, risk, JSON contracts | — |
 | `xml` | XML contract input/output | `quick-xml` |
 | `stress-config` | TOML stress-scenario files | `toml` |
-| `cli` | the `rustyqlib` binary (implies `xml`, `stress-config`) | `clap`, `clap_complete`, `csv`, `anyhow`, `inquire` |
+| `fetch` | free official EOD market data (US Treasury par yields) | `ureq`, `csv` |
+| `cli` | the `rustyqlib` binary (implies `xml`, `stress-config`, `fetch`) | `clap`, `clap_complete`, `csv`, `anyhow`, `inquire` |
 
 ```bash
 cargo add rustyqlib                    # library only
@@ -249,6 +250,13 @@ cat contracts.json | rustyqlib price -i - | jq '.[].output.pv'
 rustyqlib price -i contracts.json --format xml
 # build an implied vol surface from quoted options
 rustyqlib build --input quotes.json --output out/
+# fetch the latest US Treasury par yield curve, as published
+rustyqlib fetch ust -o ust.json
+# a specific business day, or XML output
+rustyqlib fetch ust --date 2026-08-05 --format xml
+# NY Fed reference rates: SOFR / EFFR
+rustyqlib fetch sofr
+rustyqlib fetch effr --date 2026-08-04
 # stress MtM: revalue a one-underlying options book under TOML scenarios
 rustyqlib stress -i portfolio.json -c scenarios.toml
 # VaR / Expected Shortfall by scenario simulation (delta-gamma and full revaluation)
@@ -274,6 +282,38 @@ the signed position quantity taken from each contract's `long_short`
 (default 1; see `src/examples/stress_config.toml` for the scenario
 format). The pre-0.0.4 `file` and `dir` subcommands remain as hidden
 aliases of `price`.
+
+### Free market data (`fetch`)
+
+`fetch` pulls free, keyless, official US data and emits it (JSON or XML)
+exactly as published — nothing reinterpreted. Three sources so far:
+`ust`, the [US Treasury daily par yield curve](https://home.treasury.gov/resource-center/data-chart-center/interest-rates)
+(relative tenor labels and percent yields, verbatim), and the
+[NY Fed reference rates](https://www.newyorkfed.org/markets/reference-rates/)
+`sofr` and `effr` (one observation per business day — rate, percentiles,
+volume, and for EFFR the FOMC target range, passed through as the feed's
+own record). The `ust` curve is Treasury's *fitted* end-of-day curve
+(par yields read off a spline through the on-the-run quotes), and the
+document says so: every fetched document carries a `metadata` block
+recording the source, what the data is, its date, units, quote basis
+and fetch time, so any downstream use is auditable and reproducible
+from the file alone. `--date` pins a business day
+(naming the nearest published day when markets were closed) and
+`--from-file` re-reads a saved CSV offline; the network never touches
+anything else in the library.
+
+```json
+{
+  "metadata": {
+    "source": "US Treasury daily par yield curve rates (home.treasury.gov)",
+    "curve_type": "par yield curve (fitted by the Treasury from on-the-run quotes)",
+    "curve_date": "2026-08-05", "unit": "percent",
+    "quote_basis": "bond-equivalent yield, semiannual coupon convention",
+    "url": "https://home.treasury.gov/...", "fetched_at": "..."
+  },
+  "points": [ {"tenor": "1 Mo", "yield": 3.77}, {"tenor": "30 Yr", "yield": 5.17} ]
+}
+```
 
 ### Contract examples
 
@@ -485,6 +525,9 @@ the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo
 - Barrier rebates, double/window barriers, seasoned Asians
 - Rates: curve bootstrapping from deposits/FRAs/swaps onto the core curve type,
   swaps and swaptions; FX (Garman-Kohlhagen)
+- Market data: mapping fetched par yields onto bootstrap inputs; the
+  Treasury bill-rates feed; a `compare` command diffing a fetched fitted
+  curve against a quote-bootstrapped curve pillar by pillar
 - Stulz closed forms for two-asset best-of/worst-of; per-asset smiles and
   path-dependent multi-asset payoffs; SVI smile parameterization with
   no-arbitrage checks; pathwise / likelihood-ratio Greeks
