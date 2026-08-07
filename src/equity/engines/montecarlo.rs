@@ -35,6 +35,7 @@ use rayon::prelude::*;
 
 use crate::core::data_models::EquityOptionData;
 use crate::core::errors::RustyQLibError;
+use crate::core::fft::Complex;
 use crate::core::montecarlo::process::{StochasticProcess, StochasticProcess1D};
 use crate::core::montecarlo::{path_normals, pseudo_normals, sobol_normals, PathDraws};
 use crate::core::trade::PutOrCall;
@@ -47,7 +48,6 @@ use crate::equity::bump::BumpedMarket;
 use crate::equity::heston::HestonParams;
 use crate::equity::local_vol::LocalVol;
 use crate::equity::processes::{BlackScholesProcess, HestonProcess, HestonScheme, VolDynamics};
-use crate::core::fft::Complex;
 use crate::equity::rbergomi::{black_on_forward, RBergomiGenerator, RBergomiParams};
 use crate::equity::utils::Model;
 use crate::equity::vanilla_option::{AsianPayoff, BarrierPayoff, EquityOption, VanillaPayoff};

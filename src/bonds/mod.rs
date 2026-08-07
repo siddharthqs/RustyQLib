@@ -11,7 +11,10 @@
 //!   DV01, curve pricing) and the discount-quoted [`TreasuryBill`];
 //! - quoted-instrument pillars ([`BillQuote`], [`BondQuote`]) that
 //!   bootstrap a Treasury discount curve which exactly reprices its
-//!   input quotes.
+//!   input quotes;
+//! - Treasury bond futures ([`BondFuture`]): CME conversion factors,
+//!   invoice prices, gross/net basis, implied repo and the
+//!   cheapest-to-deliver.
 //!
 //! Conventions follow the rest of the library: instruments carry their own
 //! [`DayCountConvention`](crate::core::daycount::DayCountConvention) for
@@ -24,6 +27,7 @@ pub mod build_contracts;
 pub mod deposit;
 pub mod fixed_rate_bond;
 pub mod fra;
+pub mod futures;
 pub mod quotes;
 pub mod schedule;
 pub mod service;
@@ -33,6 +37,7 @@ pub use bootstrap::bootstrap_curve;
 pub use deposit::Deposit;
 pub use fixed_rate_bond::{Cashflow, FixedRateBond};
 pub use fra::Fra;
+pub use futures::{conversion_factor, BondFuture, DeliverableBond, FactorRounding};
 pub use quotes::{BillQuote, BondQuote};
 pub use schedule::CouponSchedule;
 

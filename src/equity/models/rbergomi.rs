@@ -194,7 +194,10 @@ pub(crate) fn volterra_cov(hurst: f64, s: f64, t: f64) -> f64 {
     let i2 = if s > m {
         let (a, b) = (m.ln(), s.ln());
         // resolution scales with the number of decades spanned
-        let n = (((b - a) * 48.0).ceil() as usize).clamp(64, 512).div_ceil(2) * 2;
+        let n = (((b - a) * 48.0).ceil() as usize)
+            .clamp(64, 512)
+            .div_ceil(2)
+            * 2;
         simpson(a, b, n, |y| {
             let u = y.exp();
             (delta + u).powf(-gamma) * u.powf(1.0 - gamma)
@@ -399,7 +402,10 @@ impl RBergomiHybrid {
         // Cov[dW, W2] = dt^{a+1}/(a+1), Var[W2] = dt^{2a+1}/(2a+1)
         let l11 = dt.sqrt();
         let l21 = dt.powf(hurst) / alpha;
-        let l22 = dt.powf(hurst) * (1.0 / (2.0 * hurst) - 1.0 / (alpha * alpha)).max(0.0).sqrt();
+        let l22 = dt.powf(hurst)
+            * (1.0 / (2.0 * hurst) - 1.0 / (alpha * alpha))
+                .max(0.0)
+                .sqrt();
         let g: Vec<f64> = (0..n).map(|l| hybrid_lag_weight(hurst, dt, l)).collect();
         Ok(RBergomiHybrid {
             n,
@@ -1130,7 +1136,11 @@ mod tests {
             Err(RustyQLibError::UnsupportedEngine(_))
         ));
         // non-Monte-Carlo engines have no non-Markovian route
-        for engine in [Engine::BlackScholes, Engine::Binomial, Engine::FiniteDifference] {
+        for engine in [
+            Engine::BlackScholes,
+            Engine::Binomial,
+            Engine::FiniteDifference,
+        ] {
             let built = EquityOptionBuilder::new()
                 .spot(100.0)
                 .strike(100.0)

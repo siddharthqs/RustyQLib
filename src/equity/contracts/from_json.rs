@@ -432,13 +432,11 @@ impl EquityOption {
             }
             _ => builder,
         };
-        builder = builder
-            .engine(engine_kind)
-            .model(Model::from_contract(
-                data.mc_model.as_deref(),
-                data.heston,
-                data.rbergomi,
-            )?);
+        builder = builder.engine(engine_kind).model(Model::from_contract(
+            data.mc_model.as_deref(),
+            data.heston,
+            data.rbergomi,
+        )?);
 
         let mut option = builder.build()?;
 

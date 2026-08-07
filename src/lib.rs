@@ -42,8 +42,8 @@ pub mod risk;
 pub mod utils;
 
 pub use crate::bonds::{
-    bootstrap_curve, BillQuote, BondQuote, CurveInstrument, Deposit, FixedRateBond, Fra, Frequency,
-    TreasuryBill,
+    bootstrap_curve, conversion_factor, BillQuote, BondFuture, BondQuote, CurveInstrument,
+    DeliverableBond, Deposit, FactorRounding, FixedRateBond, Fra, Frequency, TreasuryBill,
 };
 pub use crate::core::calendar::{
     BusinessDayConvention, Calendar, DateGeneration, Period, Schedule,
@@ -63,4 +63,7 @@ pub use crate::core::traits::Instrument;
 pub use crate::core::vols::{VolInput, VolSurface};
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;
-pub use crate::rates::{BasisSwap, BasisSwapLeg, OvernightIndexSwap, PayerReceiver, VanillaSwap};
+pub use crate::rates::{
+    BasisSwap, BasisSwapLeg, FedFundsFuture, OvernightIndexSwap, PayerReceiver, RateFixings,
+    SofrContract, SofrFuture, VanillaSwap,
+};

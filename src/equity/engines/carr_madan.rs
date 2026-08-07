@@ -241,9 +241,7 @@ impl CarrMadanSmile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::equity::bates::{
-        bates_double_exp_price, bates_price, KouJumps, MertonJumps,
-    };
+    use crate::equity::bates::{bates_double_exp_price, bates_price, KouJumps, MertonJumps};
     use crate::equity::blackscholes::bs_price;
     use crate::equity::heston::heston_price;
 

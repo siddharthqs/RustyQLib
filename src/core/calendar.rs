@@ -274,6 +274,13 @@ fn nth_weekday(year: i32, month: u32, weekday: Weekday, n: u32) -> NaiveDate {
     first + Duration::days(offset + 7 * (n as i64 - 1))
 }
 
+/// The IMM date for `year`/`month`: the third Wednesday, on which the
+/// quarterly futures and swap cycle rolls (March, June, September and
+/// December are the quarterly months).
+pub fn imm_date(year: i32, month: u32) -> NaiveDate {
+    nth_weekday(year, month, Weekday::Wed, 3)
+}
+
 /// The last given weekday of a month.
 fn last_weekday(year: i32, month: u32, weekday: Weekday) -> NaiveDate {
     let first_next = if month == 12 {
@@ -784,6 +791,23 @@ mod tests {
         }
         // Apr 3 anchor (Jun 3 - 2M) is Good Friday -> moved to Apr 6
         assert!(s.dates.contains(&d(2026, 4, 6)));
+    }
+
+    #[test]
+    fn imm_dates_are_third_wednesdays() {
+        // Sep 1 2026 is a Tuesday -> first Wednesday the 2nd, third the 16th
+        assert_eq!(imm_date(2026, 9), d(2026, 9, 16));
+        assert_eq!(imm_date(2026, 12), d(2026, 12, 16));
+        // Mar 2027: Mar 1 is a Monday -> third Wednesday the 17th
+        assert_eq!(imm_date(2027, 3), d(2027, 3, 17));
+        for (year, month) in [(2026, 3), (2026, 6), (2026, 9), (2027, 12)] {
+            let imm = imm_date(year, month);
+            assert_eq!(imm.weekday(), Weekday::Wed);
+            assert!(
+                (15..=21).contains(&imm.day()),
+                "{imm} is not a third Wednesday"
+            );
+        }
     }
 
     #[test]
