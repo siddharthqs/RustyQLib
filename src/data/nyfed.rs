@@ -101,8 +101,7 @@ pub fn parse_response(text: &str) -> Result<Vec<RateObservation>, RustyQLibError
         .and_then(|r| r.as_array())
         .ok_or_else(|| {
             RustyQLibError::ParseError(
-                "no `refRates` array — this does not look like a NY Fed rates response"
-                    .to_string(),
+                "no `refRates` array — this does not look like a NY Fed rates response".to_string(),
             )
         })?;
     let mut observations = Vec::with_capacity(records.len());
@@ -116,9 +115,7 @@ pub fn parse_response(text: &str) -> Result<Vec<RateObservation>, RustyQLibError
                 ))
             })?;
         let date = NaiveDate::parse_from_str(date_field, "%Y-%m-%d").map_err(|_| {
-            RustyQLibError::ParseError(format!(
-                "`{date_field}` is not a YYYY-MM-DD effective date"
-            ))
+            RustyQLibError::ParseError(format!("`{date_field}` is not a YYYY-MM-DD effective date"))
         })?;
         let rate = record
             .get("percentRate")
@@ -283,7 +280,10 @@ mod tests {
         assert_eq!(doc["metadata"]["rate_type"], "EFFR");
         assert_eq!(doc["metadata"]["effective_date"], "2026-08-05");
         assert_eq!(doc["metadata"]["unit"], "percent");
-        assert!(doc["metadata"]["source"].as_str().unwrap().contains("New York"));
+        assert!(doc["metadata"]["source"]
+            .as_str()
+            .unwrap()
+            .contains("New York"));
         // nothing invented, nothing dropped: the record as the feed sent it
         assert_eq!(doc["rate"], observations[0].record);
     }

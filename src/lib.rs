@@ -13,6 +13,9 @@
 //!   street-convention analytics (accrued interest, price/yield,
 //!   duration, convexity, DV01), money-market instruments (deposits,
 //!   FRAs) and discount-curve bootstrapping
+//! - [`rates`] — linear interest-rate products: vanilla swaps (IRS),
+//!   overnight indexed swaps (OIS) and basis swaps, priced by dual-curve
+//!   discounting
 //! - [`risk`] — VaR / Expected Shortfall, portfolio scenario risk, volatility
 //!   estimation, performance statistics and VaR backtesting
 //! - [`cmdty`] — commodity options
@@ -34,6 +37,7 @@ pub mod core;
 #[cfg(feature = "fetch")]
 pub mod data;
 pub mod equity;
+pub mod rates;
 pub mod risk;
 pub mod utils;
 
@@ -59,3 +63,4 @@ pub use crate::core::traits::Instrument;
 pub use crate::core::vols::{VolInput, VolSurface};
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;
+pub use crate::rates::{BasisSwap, BasisSwapLeg, OvernightIndexSwap, PayerReceiver, VanillaSwap};

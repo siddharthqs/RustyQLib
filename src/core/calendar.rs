@@ -208,6 +208,34 @@ pub enum Period {
     Years(i32),
 }
 
+/// Payment frequency for periodic legs and coupons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Frequency {
+    Annual,
+    /// The US Treasury note/bond convention.
+    Semiannual,
+    Quarterly,
+    Monthly,
+}
+
+impl Frequency {
+    /// Payments per year.
+    pub fn per_year(self) -> u32 {
+        match self {
+            Frequency::Annual => 1,
+            Frequency::Semiannual => 2,
+            Frequency::Quarterly => 4,
+            Frequency::Monthly => 12,
+        }
+    }
+
+    /// Months in one period.
+    pub fn months(self) -> u32 {
+        12 / self.per_year()
+    }
+}
+
 fn add_months_signed(date: NaiveDate, n: i32) -> NaiveDate {
     if n >= 0 {
         date + Months::new(n as u32)

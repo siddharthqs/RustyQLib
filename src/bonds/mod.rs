@@ -36,39 +36,14 @@ pub use fra::Fra;
 pub use quotes::{BillQuote, BondQuote};
 pub use schedule::CouponSchedule;
 
+// Frequency moved to `core::calendar` (shared with the swaps in
+// [`crate::rates`]); re-exported here so existing paths keep working.
+pub use crate::core::calendar::Frequency;
+
 use chrono::NaiveDate;
-use serde::{Deserialize, Serialize};
 
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
-
-/// Coupon payment frequency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Frequency {
-    Annual,
-    /// The US Treasury note/bond convention.
-    Semiannual,
-    Quarterly,
-    Monthly,
-}
-
-impl Frequency {
-    /// Coupon payments per year.
-    pub fn per_year(self) -> u32 {
-        match self {
-            Frequency::Annual => 1,
-            Frequency::Semiannual => 2,
-            Frequency::Quarterly => 4,
-            Frequency::Monthly => 12,
-        }
-    }
-
-    /// Months in one coupon period.
-    pub fn months(self) -> u32 {
-        12 / self.per_year()
-    }
-}
 
 /// An instrument that pins one pillar of a discount curve.
 ///

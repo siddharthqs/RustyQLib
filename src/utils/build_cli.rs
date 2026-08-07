@@ -477,7 +477,10 @@ fn fetch_nyfed_rate(
             let text = read_input(path)?;
             let observations = nyfed::parse_response(&text)
                 .with_context(|| format!("failed to parse {}", input_label(path)))?;
-            (observations, serde_json::json!({ "file": input_label(path) }))
+            (
+                observations,
+                serde_json::json!({ "file": input_label(path) }),
+            )
         }
         None => {
             let (text, url) = match date {

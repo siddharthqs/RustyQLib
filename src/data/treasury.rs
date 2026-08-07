@@ -120,8 +120,9 @@ pub fn parse_csv(text: &str) -> Result<Vec<ParYieldRow>, RustyQLibError> {
 
     let mut rows = Vec::new();
     for (line, record) in reader.records().enumerate() {
-        let record = record
-            .map_err(|e| RustyQLibError::ParseError(format!("invalid CSV row {}: {e}", line + 2)))?;
+        let record = record.map_err(|e| {
+            RustyQLibError::ParseError(format!("invalid CSV row {}: {e}", line + 2))
+        })?;
         let Some(date_field) = record.get(0).filter(|s| !s.is_empty()) else {
             continue;
         };
@@ -326,7 +327,9 @@ Date,\"1 Mo\",\"Mystery\",\"10 Yr\"
             d(2026, 8, 4)
         );
         // a gap names the nearest earlier published date
-        let err = select_row(&rows, Some(d(2026, 8, 9))).unwrap_err().to_string();
+        let err = select_row(&rows, Some(d(2026, 8, 9)))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("2026-08-05"), "{err}");
         assert!(select_row(&rows, Some(d(2026, 1, 1))).is_err());
         assert!(select_row(&[], None).is_err());
