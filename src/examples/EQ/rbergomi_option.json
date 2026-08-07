@@ -1,0 +1,67 @@
+{
+  "asset": "EQ",
+  "contracts": [
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "C",
+        "payoff_type": "vanilla",
+        "strike_price": 100.0,
+        "volatility": 0.235,
+        "maturity": "2027-08-06",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "mc_model": "rbergomi",
+        "rbergomi": { "xi0": 0.055225, "eta": 1.9, "hurst": 0.07, "rho": -0.9 },
+        "pricer": "MC"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "P",
+        "payoff_type": "vanilla",
+        "strike_price": 90.0,
+        "volatility": 0.235,
+        "maturity": "2027-02-05",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "mc_model": "rbergomi",
+        "rbergomi": { "xi0": 0.055225, "eta": 1.9, "hurst": 0.07, "rho": -0.9 },
+        "pricer": "MC"
+      }
+    },
+    {
+      "action": "PV",
+      "asset": "EQ",
+      "product_type": {
+        "product_type": "option",
+        "symbol": "ABC",
+        "underlying_price": 100.0,
+        "put_or_call": "P",
+        "payoff_type": "barrier",
+        "barrier_type": "down_in",
+        "barrier_level": 85.0,
+        "strike_price": 100.0,
+        "volatility": 0.235,
+        "maturity": "2027-08-06",
+        "dividend": 0.02,
+        "risk_free_rate": 0.05,
+        "simulation": 100000,
+        "mc_model": "rbergomi",
+        "rbergomi": { "xi0": 0.055225, "eta": 1.9, "hurst": 0.07, "rho": -0.9 },
+        "pricer": "MC"
+      }
+    }
+  ]
+}

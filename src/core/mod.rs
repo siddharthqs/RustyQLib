@@ -7,6 +7,7 @@ pub mod daycount;
 pub mod depth;
 pub mod errors;
 pub mod fd_solvers;
+pub mod fft;
 pub mod interpolation;
 pub mod lattice;
 pub mod linalg;

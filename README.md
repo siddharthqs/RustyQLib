@@ -19,13 +19,19 @@ put-call parity, replication identities and cross-engine agreement in the test s
   tree, finite difference (log-spot Crank-Nicolson with Rannacher smoothing),
   and parallel Monte Carlo — behind one dispatch, so the same contract prices
   on any suitable engine.
-- **Four volatility frameworks** — Black-Scholes, **Dupire local volatility**
+- **Five volatility frameworks** — Black-Scholes, **Dupire local volatility**
   (calibrated non-parametrically from an implied vol surface), **Heston
   stochastic volatility** (semi-analytic characteristic-function pricing +
   Monte Carlo) with **Bates jump-diffusion extensions** (Heston + lognormal
   Merton jumps, and Heston + Kou double-exponential jumps, both priced
   semi-analytically through the shared characteristic-function machinery and
   calibrated by the same Levenberg-Marquardt transform-space pattern),
+  **rough Bergomi** (Bayer-Friz-Gatheral rough volatility: non-Markovian
+  Volterra variance simulated by the exact joint-Gaussian scheme on
+  moderate grids and the FFT-accelerated Bennedsen-Lunde-Pakkanen hybrid
+  scheme on fine ones, European vanillas priced on the conditional
+  Romano-Touzi estimator — captures the `T^{H-1/2}` short-dated skew
+  explosion diffusive models cannot),
   **stochastic local volatility** (Heston-style variance times a leverage
   function calibrated to the Dupire surface by the particle / binning
   method, so vanillas reprice while forward smiles stay stochastic),
@@ -97,7 +103,9 @@ put-call parity, replication identities and cross-engine agreement in the test s
 
 Model availability: local vol runs on the FD and MC engines; Heston runs on the
 analytic (vanilla + binary) and MC engines (all payoffs above except American
-and rainbow). Rainbow options are a separate product type
+and rainbow); rough Bergomi runs on the MC engine only (European exercise —
+the non-Markovian variance has no characteristic function, PDE state, or
+LSMC-compatible exercise state). Rainbow options are a separate product type
 (`"product_type": "rainbow_option"`) with per-asset spots/vols/dividends and a
 correlation matrix; outputs include per-asset `deltas` and `vegas`.
 
@@ -166,6 +174,12 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   ITM prices recover via put-call parity from the CF-implied forward, and
   the legacy P1/P2 integration is kept as the independent cross-check
   oracle — the two methods agree to ~1e-6 across the test grid.
+  Alongside COS, the **Carr-Madan FFT** engine (`equity::carr_madan`)
+  prices a dense ~0.4%-spaced log-strike grid from one FFT of the
+  Heston / Bates characteristic function (damped-call transform, Simpson
+  weights, 4-point Lagrange readout) — the natural tool for generating
+  whole implied-vol surfaces from fitted parameters; the two Fourier
+  methods cross-check each other in the tests.
 - **Risk analytics** (`risk`): Value-at-Risk and Expected Shortfall in the
   standard flavors — historical, parametric normal, Cornish-Fisher
   higher-moment corrected, and delta-normal multi-asset VaR with the exact
@@ -196,7 +210,10 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   machinery (`montecarlo`: reproducible per-path RNG streams, Sobol with
   digital-shift scrambling, Halton with Cranley-Patterson rotation, Brownian
   bridge, stratified / Latin-hypercube sampling, control variates, moment
-  matching, Welford statistics), an interpolation toolkit (`interpolation`:
+  matching, Welford statistics), a fast Fourier transform (`fft`: radix-2 +
+  Bluestein for any length, with a reusable real-convolution plan — the
+  engine of the rough Bergomi hybrid scheme), an interpolation toolkit
+  (`interpolation`:
   linear, cubic splines with natural / clamped / not-a-knot boundaries,
   shape-preserving PCHIP and Akima, bilinear grids and thin-plate splines for
   2-D vol surfaces), and linear algebra (`linalg`: Cholesky / QR / SVD /
@@ -371,7 +388,7 @@ Selected fields (all optional unless noted):
 | `cash_dividends` | discrete dividends `[{"date", "amount"}]`; escrowed model on analytic/tree/terminal-MC, jumps on path-MC and FD |
 | `discount_curve` | `flat`, `zero_rates`, `discount_factors`, `forward_rates` |
 | `vol_surface` | `flat`, `strike_expiry`, `moneyness_expiry`, `delta_expiry` |
-| `mc_model` | `gbm` (default), `local_vol`, `heston` (needs `heston` params) |
+| `mc_model` | `gbm` (default), `local_vol`, `heston` (needs `heston` params), `rbergomi` (needs `rbergomi` params: `xi0`, `eta`, `hurst`, `rho`) |
 | `simulation`, `mc_time_steps`, `mc_scheme`, `mc_sampler`, `mc_seed` | Monte Carlo controls |
 | `fd_spot_steps`, `fd_time_steps` | finite difference grid |
 | `tree_type`, `tree_steps` | binomial lattice: `LeisenReimer` (default), `CRR`, `JarrowRudd`, `Tian`, `Trigeorgis`, `EQP`; steps default 1000 |

@@ -5,6 +5,7 @@ pub mod bates;
 pub mod heston;
 pub mod local_vol;
 pub mod processes;
+pub mod rbergomi;
 pub mod slv;
 pub mod svi;
 pub mod vol_surface;

@@ -72,11 +72,19 @@ pub enum Model {
     LocalVol,
     /// Heston stochastic volatility.
     Heston(crate::equity::heston::HestonParams),
+    /// Rough Bergomi stochastic volatility (Monte Carlo only — the
+    /// non-Markovian Volterra variance has no characteristic function
+    /// and no finite-dimensional PDE state).
+    RBergomi(crate::equity::rbergomi::RBergomiParams),
 }
 
 impl Model {
     pub fn is_heston(&self) -> bool {
         matches!(self, Model::Heston(_))
+    }
+
+    pub fn is_rbergomi(&self) -> bool {
+        matches!(self, Model::RBergomi(_))
     }
 
     /// The model under a parallel implied-vol shift — the model is a risk
@@ -85,19 +93,23 @@ impl Model {
     /// unchanged; Heston applies the library's vega convention: shift
     /// `sqrt(v0)` and `sqrt(theta)` in parallel
     /// ([`HestonParams::with_vol_shift`](crate::equity::heston::HestonParams::with_vol_shift)),
-    /// rather than recalibrating to the bumped surface.
+    /// rather than recalibrating to the bumped surface. Rough Bergomi
+    /// shifts its forward vol `sqrt(xi0)` the same way.
     pub fn with_vol_shift(&self, shift: f64) -> Model {
         match self {
             Model::Heston(params) => Model::Heston(params.with_vol_shift(shift)),
+            Model::RBergomi(params) => Model::RBergomi(params.with_vol_shift(shift)),
             other => *other,
         }
     }
 
     /// Parse from contract fields: the `mc_model` string plus the
-    /// `heston` parameter block (required when the model is Heston).
+    /// `heston` / `rbergomi` parameter block (required when the model is
+    /// Heston / rough Bergomi respectively).
     pub fn from_contract(
         mc_model: Option<&str>,
         heston: Option<crate::equity::heston::HestonParams>,
+        rbergomi: Option<crate::equity::rbergomi::RBergomiParams>,
     ) -> Result<Model, crate::core::errors::RustyQLibError> {
         use crate::core::errors::RustyQLibError;
         match mc_model.map(str::trim) {
@@ -115,9 +127,19 @@ impl Model {
                 params.validate()?;
                 Ok(Model::Heston(params))
             }
+            Some("rbergomi") | Some("rBergomi") | Some("RBergomi") | Some("rough_bergomi") => {
+                let params = rbergomi.ok_or_else(|| {
+                    RustyQLibError::invalid_input(
+                        "rbergomi",
+                        "rbergomi parameters are required when mc_model = rbergomi",
+                    )
+                })?;
+                params.validate()?;
+                Ok(Model::RBergomi(params))
+            }
             Some(other) => Err(RustyQLibError::invalid_input(
                 "mc_model",
-                format!("unknown model '{other}' (use gbm, local_vol or heston)"),
+                format!("unknown model '{other}' (use gbm, local_vol, heston or rbergomi)"),
             )),
         }
     }

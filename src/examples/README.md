@@ -19,6 +19,7 @@ rustyqlib price -i src/examples/EQ/<file>.json
 | `forward_start_option.json` | Forward-start options | strike fixed at a future date; **Heston** vs Black-Scholes forward smile |
 | `autocallable_option.json` | Autocallable note with coupon (rebate) | observation schedule, knock-in protection, **local vol** vs GBM |
 | `heston_option.json` | Vanillas + barrier under Heston | semi-analytic CF pricing vs Monte Carlo |
+| `rbergomi_option.json` | Vanillas + barrier under rough Bergomi | exact-scheme Volterra Monte Carlo; conditional (mixed) estimator for vanillas |
 | `rainbow_option.json` | Multi-asset rainbows | worst-of (MC), exchange (Margrabe), spread (Kirk), basket (moment matching) |
 | `dividends_borrow.json` | Carry inputs | cash dividends + borrow cost across analytic, FD (American) and MC (barrier) |
 | `eq2.json`, `equity_forward.json` | Forward / future contracts | linear products |

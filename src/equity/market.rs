@@ -60,11 +60,11 @@ impl EquityOption {
     /// unchanged. Errors name the missing key when the market lacks data
     /// for this option.
     ///
-    /// The model moves with the market where it must: a Heston model's
-    /// parameters follow the surface's parallel shift (measured at this
-    /// contract's strike and maturity) via
+    /// The model moves with the market where it must: a Heston or rough
+    /// Bergomi model's parameters follow the surface's parallel shift
+    /// (measured at this contract's strike and maturity) via
     /// [`Model::with_vol_shift`](crate::equity::utils::Model::with_vol_shift),
-    /// so vol scenarios reach Heston-priced positions without
+    /// so vol scenarios reach stochastic-vol positions without
     /// recalibration.
     ///
     /// The market's objects are expected to be anchored at its valuation
@@ -78,7 +78,7 @@ impl EquityOption {
         option.market.vol_surface = vol.clone();
         option.market.discount_curve = curve.clone();
         option.market.valuation_date = market.valuation_date();
-        if option.model.is_heston() {
+        if option.model.is_heston() || option.model.is_rbergomi() {
             let t = option.time_to_maturity();
             if t > 0.0 {
                 // the surface's parallel shift at this contract's anchor

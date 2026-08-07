@@ -31,8 +31,8 @@ pub use contracts::{
     vanilla_option, variance_swap, worst_of,
 };
 pub use engines::{
-    baw, binomial, bjerksund_stensland, black76, blackscholes, cos, finite_difference, heston_adi,
-    montecarlo,
+    baw, binomial, bjerksund_stensland, black76, blackscholes, carr_madan, cos, finite_difference,
+    heston_adi, montecarlo,
 };
-pub use models::{bates, heston, local_vol, processes, slv, svi, vol_surface};
+pub use models::{bates, heston, local_vol, processes, rbergomi, slv, svi, vol_surface};
 pub use service::{build_contracts, handle_equity_contracts};

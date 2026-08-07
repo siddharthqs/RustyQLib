@@ -970,6 +970,10 @@ impl EquityOptionBuilder {
         self.model = Model::Heston(params);
         self
     }
+    pub fn rbergomi(mut self, params: crate::equity::rbergomi::RBergomiParams) -> Self {
+        self.model = Model::RBergomi(params);
+        self
+    }
     pub fn mc_config(mut self, cfg: MonteCarloConfig) -> Self {
         self.mc = cfg;
         self
@@ -1151,8 +1155,10 @@ impl EquityOptionBuilder {
         }
 
         // ── model configuration ─────────────────────────────────────────
-        if let Model::Heston(params) = &self.model {
-            params.validate()?;
+        match &self.model {
+            Model::Heston(params) => params.validate()?,
+            Model::RBergomi(params) => params.validate()?,
+            Model::Gbm | Model::LocalVol => {}
         }
 
         // ── market objects (curve/surface errors convert via From) ──────

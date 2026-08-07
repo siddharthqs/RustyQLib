@@ -186,6 +186,8 @@ pub struct EquityOptionData {
     pub fd_time_steps: Option<usize>,
     /// Heston parameters; required when `mc_model` is "heston".
     pub heston: Option<crate::equity::heston::HestonParams>,
+    /// Rough Bergomi parameters; required when `mc_model` is "rbergomi".
+    pub rbergomi: Option<crate::equity::rbergomi::RBergomiParams>,
     pub exercise_style: Option<String>, //European, American,
     pub pricer: Option<String>,
     /// Optional discount curve; when absent a flat curve is built from

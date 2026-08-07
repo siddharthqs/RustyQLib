@@ -134,6 +134,15 @@ impl EquityOption {
         }
     }
 
+    /// Rough Bergomi parameters. Invariant: only called on
+    /// rBergomi-model code paths (the model dispatch guarantees it).
+    pub(crate) fn rbergomi_params(&self) -> &crate::equity::rbergomi::RBergomiParams {
+        match &self.model {
+            Model::RBergomi(rp) => rp,
+            _ => unreachable!("rBergomi code path reached on a non-rBergomi model"),
+        }
+    }
+
     pub(crate) fn lattice_cfg(&self) -> &crate::core::lattice::LatticeConfig {
         match &self.engine {
             PricingEngine::Binomial(cfg) => cfg,
@@ -386,6 +395,22 @@ impl EquityOption {
                         );
                     }
                 }
+            }
+        }
+        if self.model.is_rbergomi() {
+            if !matches!(self.engine, PricingEngine::MonteCarlo(_)) {
+                return unsupported(
+                    "The rough Bergomi model prices on the MonteCarlo engine only: the \
+                     non-Markovian Volterra variance has no characteristic function and \
+                     no finite-dimensional PDE or lattice state",
+                );
+            }
+            if american {
+                return unsupported(
+                    "rough Bergomi supports European exercise only: the exercise decision \
+                     depends on the whole variance history, which the (spot, variance) \
+                     LSMC regression cannot represent",
+                );
             }
         }
         let heston = self.model.is_heston();

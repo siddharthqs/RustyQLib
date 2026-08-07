@@ -334,6 +334,8 @@ fn solve(
         )),
         // routed to the 2-D ADI solver in solve_dispatch
         Model::Heston(_) => unreachable!("Heston is dispatched to heston_adi::solve"),
+        // rejected by check_engine_support (Monte Carlo only)
+        Model::RBergomi(_) => unreachable!("rBergomi never reaches the FD engine"),
     };
 
     // ── Grid geometry (log-spot). A knock-out barrier becomes the exact
