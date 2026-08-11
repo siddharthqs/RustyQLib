@@ -28,7 +28,8 @@ use std::fmt;
 
 use crate::core::curves::Tenor;
 use crate::core::daycount::DayCountConvention;
-use crate::core::utils::inv_norm_cdf;
+use crate::core::errors::RustyQLibError;
+use crate::core::utils::{inv_norm_cdf, norm_cdf};
 
 /// The accepted input forms for a volatility surface. Deserializes from
 /// JSON; canonicalized at construction ([`VolSurface::from_input`]).
@@ -68,6 +69,34 @@ pub enum VolInput {
         #[serde(default)]
         day_count: DayCountConvention,
     },
+    /// Per-expiry smiles, each with its own point list (as quoted option
+    /// chains are, no rectangular grid required): `smiles[i]` is a list
+    /// of `[coordinate, vol]` pairs for `expiries[i]`, sorted by
+    /// coordinate. `coordinate` names what the first element means
+    /// (default: absolute strike). This is also the lossless save/load
+    /// form of a built surface ([`VolSurface::to_input`]).
+    StrikeSmiles {
+        expiries: Vec<Tenor>,
+        smiles: Vec<Vec<(f64, f64)>>,
+        #[serde(default)]
+        coordinate: SmileCoordinate,
+        #[serde(default)]
+        day_count: DayCountConvention,
+    },
+}
+
+/// The x-coordinate a smile's points are quoted on (the public,
+/// serializable face of the surface's internal coordinate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmileCoordinate {
+    /// Absolute strike (equity listed convention).
+    #[default]
+    Strike,
+    /// Forward moneyness `K/F`.
+    Moneyness,
+    /// Log forward moneyness `ln(K/F)`.
+    LogMoneyness,
 }
 
 /// Errors from surface construction.
@@ -153,6 +182,26 @@ impl Serialize for SmileCoord {
     }
 }
 
+impl From<SmileCoordinate> for SmileCoord {
+    fn from(c: SmileCoordinate) -> SmileCoord {
+        match c {
+            SmileCoordinate::Strike => SmileCoord::Strike,
+            SmileCoordinate::Moneyness => SmileCoord::Moneyness,
+            SmileCoordinate::LogMoneyness => SmileCoord::LogMoneyness,
+        }
+    }
+}
+
+impl From<SmileCoord> for SmileCoordinate {
+    fn from(c: SmileCoord) -> SmileCoordinate {
+        match c {
+            SmileCoord::Strike => SmileCoordinate::Strike,
+            SmileCoord::Moneyness => SmileCoordinate::Moneyness,
+            SmileCoord::LogMoneyness => SmileCoordinate::LogMoneyness,
+        }
+    }
+}
+
 /// A shift applied to a whole surface by [`VolSurface::bumped`]. The
 /// surface owns the semantics: shifts move every quoted vol, preserving
 /// the smile shape and the surface's coordinate system.
@@ -164,12 +213,107 @@ pub enum VolShift {
     ParallelRelative(f64),
 }
 
+/// One butterfly violation: negative call-price convexity across three
+/// adjacent quoted strikes at one expiry pillar.
+#[derive(Debug, Clone, Serialize)]
+pub struct ButterflyViolation {
+    /// Expiry pillar time (year fraction).
+    pub time: f64,
+    /// The three adjacent strikes whose butterfly prices negative.
+    pub strikes: (f64, f64, f64),
+    /// The butterfly's (negative) undiscounted price.
+    pub magnitude: f64,
+}
+
+/// One calendar violation: total variance `sigma^2 t` decreasing between
+/// two adjacent expiry pillars at a fixed forward moneyness.
+#[derive(Debug, Clone, Serialize)]
+pub struct CalendarViolation {
+    pub earlier_time: f64,
+    pub later_time: f64,
+    /// The forward moneyness `K/F` where the decrease occurs.
+    pub moneyness: f64,
+    /// How much total variance falls (`w_earlier - w_later`, positive).
+    pub magnitude: f64,
+}
+
+/// Static-arbitrage findings on a surface — a report, not a gate (see
+/// [`VolSurface::diagnostics`]).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SurfaceDiagnostics {
+    pub butterfly: Vec<ButterflyViolation>,
+    pub calendar: Vec<CalendarViolation>,
+}
+
+impl SurfaceDiagnostics {
+    pub fn is_clean(&self) -> bool {
+        self.butterfly.is_empty() && self.calendar.is_empty()
+    }
+
+    /// Compact metadata summary: violation counts plus the single worst
+    /// finding of each kind (the full listings stay on the struct).
+    pub fn to_metadata(&self) -> serde_json::Value {
+        let worst_butterfly = self
+            .butterfly
+            .iter()
+            .min_by(|a, b| a.magnitude.partial_cmp(&b.magnitude).unwrap());
+        let worst_calendar = self
+            .calendar
+            .iter()
+            .max_by(|a, b| a.magnitude.partial_cmp(&b.magnitude).unwrap());
+        serde_json::json!({
+            "butterfly_violations": self.butterfly.len(),
+            "calendar_violations": self.calendar.len(),
+            "worst_butterfly": worst_butterfly,
+            "worst_calendar": worst_calendar,
+        })
+    }
+}
+
+/// Butterflies more negative than this (undiscounted price units) are
+/// violations; anything smaller is numerical noise.
+const BUTTERFLY_TOL: f64 = 1e-9;
+/// Total-variance decreases beyond this are calendar violations.
+const CALENDAR_TOL: f64 = 1e-12;
+
+/// Undiscounted Black call price (the forward-measure price the
+/// butterfly check needs; discounting cancels out of the convexity
+/// comparison).
+fn black_call(f: f64, k: f64, sigma: f64, t: f64) -> f64 {
+    if sigma <= 0.0 || t <= 0.0 {
+        return (f - k).max(0.0);
+    }
+    let sq = sigma * t.sqrt();
+    let d1 = ((f / k).ln() + 0.5 * sq * sq) / sq;
+    f * norm_cdf(d1) - k * norm_cdf(d1 - sq)
+}
+
 /// A canonical Black volatility surface anchored at `reference_date`.
 #[derive(Debug, Clone, Serialize)]
 pub struct VolSurface {
     reference_date: NaiveDate,
     day_count: DayCountConvention,
     data: SurfaceData,
+}
+
+/// A saved volatility surface: a [`VolInput`] payload plus the anchor
+/// date and free-form provenance metadata (data source, forwards used,
+/// build settings, ...). Because the payload is an *input* form, a saved
+/// document doubles as a valid `vol` block for pricing contracts — save
+/// once, price against it later, no separate loader path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolSurfaceDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    pub reference_date: NaiveDate,
+    pub surface: VolInput,
+}
+
+impl VolSurfaceDocument {
+    /// Rebuild the canonical surface this document describes.
+    pub fn build(&self) -> Result<VolSurface, VolError> {
+        VolSurface::from_input(&self.surface, self.reference_date)
+    }
 }
 
 impl VolSurface {
@@ -280,6 +424,25 @@ impl VolSurface {
         reference_date: NaiveDate,
         day_count: DayCountConvention,
     ) -> Result<Self, VolError> {
+        Self::from_smiles(
+            expiries,
+            smiles,
+            SmileCoordinate::Strike,
+            reference_date,
+            day_count,
+        )
+    }
+
+    /// [`Self::from_strike_smiles`] generalized to any smile coordinate:
+    /// each point's first element is read as `coordinate` says (absolute
+    /// strike, forward moneyness `K/F`, or `ln(K/F)`).
+    pub fn from_smiles(
+        expiries: &[Tenor],
+        smiles: &[Vec<(f64, f64)>],
+        coordinate: SmileCoordinate,
+        reference_date: NaiveDate,
+        day_count: DayCountConvention,
+    ) -> Result<Self, VolError> {
         let times = Self::resolve_expiries(expiries, reference_date, day_count)?;
         if smiles.len() != times.len() {
             return Err(VolError::LengthMismatch {
@@ -312,7 +475,7 @@ impl VolSurface {
             data: SurfaceData::Term {
                 times,
                 smiles,
-                coord: SmileCoord::Strike,
+                coord: coordinate.into(),
             },
         })
     }
@@ -339,7 +502,150 @@ impl VolSurface {
                 vols,
                 day_count,
             } => Self::from_delta_grid(expiries, deltas, vols, reference_date, *day_count),
+            VolInput::StrikeSmiles {
+                expiries,
+                smiles,
+                coordinate,
+                day_count,
+            } => Self::from_smiles(expiries, smiles, *coordinate, reference_date, *day_count),
         }
+    }
+
+    /// This surface's data as the input form that reconstructs it exactly
+    /// (per-expiry smiles on the surface's own coordinate). Expiries come
+    /// back as year fractions — pillar times are what the surface stores;
+    /// calendar dates used at construction are not retained. A
+    /// delta-quoted surface returns its converted log-moneyness smiles.
+    pub fn to_input(&self) -> VolInput {
+        match &self.data {
+            SurfaceData::Flat(vol) => VolInput::Flat {
+                vol: *vol,
+                day_count: self.day_count,
+            },
+            SurfaceData::Term {
+                times,
+                smiles,
+                coord,
+            } => VolInput::StrikeSmiles {
+                expiries: times.iter().map(|&t| Tenor::YearFraction(t)).collect(),
+                smiles: smiles.iter().map(|s| s.points.clone()).collect(),
+                coordinate: (*coord).into(),
+                day_count: self.day_count,
+            },
+        }
+    }
+
+    /// Static-arbitrage diagnostics: **butterfly** violations (negative
+    /// call-price convexity across adjacent quoted strikes within one
+    /// expiry, priced undiscounted off the pillar vols) and **calendar**
+    /// violations (total variance `sigma^2 t` decreasing between
+    /// adjacent expiries at fixed forward moneyness). `forward` maps an
+    /// expiry time to the underlying's forward price.
+    ///
+    /// A report, not a gate: quoted market snapshots are noisy and the
+    /// surface stays usable regardless — but violations mean the smile
+    /// carries static arbitrage, and the Dupire transformation falls
+    /// back to implied vol wherever they bite. Checks run at the quoted
+    /// pillars, so each finding names the strikes responsible;
+    /// interpolation between pillars is not separately scanned. A flat
+    /// surface is clean by construction.
+    pub fn diagnostics(&self, forward: impl Fn(f64) -> f64) -> SurfaceDiagnostics {
+        let mut report = SurfaceDiagnostics::default();
+        let SurfaceData::Term {
+            times,
+            smiles,
+            coord,
+        } = &self.data
+        else {
+            return report;
+        };
+        let to_strike = |x: f64, f: f64| match coord {
+            SmileCoord::Strike => x,
+            SmileCoord::Moneyness => x * f,
+            SmileCoord::LogMoneyness => x.exp() * f,
+        };
+
+        // butterfly: convexity of undiscounted calls at the pillar strikes
+        for (&t, smile) in times.iter().zip(smiles) {
+            let f = forward(t);
+            let prices: Vec<(f64, f64)> = smile
+                .points
+                .iter()
+                .map(|&(x, vol)| {
+                    let k = to_strike(x, f);
+                    (k, black_call(f, k, vol, t))
+                })
+                .collect();
+            for window in prices.windows(3) {
+                let [(k1, c1), (k2, c2), (k3, c3)] = [window[0], window[1], window[2]];
+                let weight = (k3 - k2) / (k3 - k1);
+                let butterfly = weight * c1 + (1.0 - weight) * c3 - c2;
+                if butterfly < -BUTTERFLY_TOL {
+                    report.butterfly.push(ButterflyViolation {
+                        time: t,
+                        strikes: (k1, k2, k3),
+                        magnitude: butterfly,
+                    });
+                }
+            }
+        }
+
+        // calendar: total variance across adjacent expiries at the fixed
+        // forward moneyness of both pillars' quoted strikes
+        for i in 1..times.len() {
+            let (t1, t2) = (times[i - 1], times[i]);
+            let (f1, f2) = (forward(t1), forward(t2));
+            let mut moneyness: Vec<f64> = smiles[i - 1]
+                .points
+                .iter()
+                .map(|&(x, _)| to_strike(x, f1) / f1)
+                .chain(smiles[i].points.iter().map(|&(x, _)| to_strike(x, f2) / f2))
+                .collect();
+            moneyness.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            moneyness.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            for m in moneyness {
+                let v1 = self.vol(m * f1, f1, t1);
+                let v2 = self.vol(m * f2, f2, t2);
+                let (w1, w2) = (v1 * v1 * t1, v2 * v2 * t2);
+                if w2 < w1 - CALENDAR_TOL {
+                    report.calendar.push(CalendarViolation {
+                        earlier_time: t1,
+                        later_time: t2,
+                        moneyness: m,
+                        magnitude: w1 - w2,
+                    });
+                }
+            }
+        }
+        report
+    }
+
+    /// This surface as a self-contained document: the input form plus the
+    /// anchor date and optional provenance metadata.
+    pub fn to_document(&self, metadata: Option<serde_json::Value>) -> VolSurfaceDocument {
+        VolSurfaceDocument {
+            metadata,
+            reference_date: self.reference_date,
+            surface: self.to_input(),
+        }
+    }
+
+    /// Serialize as a pretty-printed JSON surface document (without
+    /// metadata; use [`Self::to_document`] to attach provenance first).
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(&self.to_document(None))
+            .expect("a validated surface always serializes (finite times and vols)")
+    }
+
+    /// Load a surface from a JSON document written by [`Self::to_json`]
+    /// (or any hand-written [`VolSurfaceDocument`]). Metadata is carried
+    /// by the document, not the surface — parse a [`VolSurfaceDocument`]
+    /// directly if you need it.
+    pub fn from_json(text: &str) -> Result<VolSurface, RustyQLibError> {
+        let document: VolSurfaceDocument = serde_json::from_str(text).map_err(|e| {
+            RustyQLibError::ParseError(format!("invalid vol surface document: {e}"))
+        })?;
+        document.build().map_err(RustyQLibError::from)
     }
 
     // ── Queries ─────────────────────────────────────────────────────────
@@ -780,5 +1086,163 @@ mod tests {
             .unwrap_err(),
             VolError::DeltaOutOfRange(1.5)
         );
+    }
+
+    #[test]
+    fn strike_smiles_input_builds_ragged_surfaces() {
+        // the design-doc document shape: per-expiry point lists, no grid
+        let input: VolInput = serde_json::from_str(
+            r#"{
+                "type": "strike_smiles",
+                "expiries": [0.5, 1.0],
+                "smiles": [[[95.0, 0.31], [100.0, 0.28]],
+                           [[90.0, 0.30], [100.0, 0.27], [110.0, 0.25]]],
+                "day_count": "Act365"
+            }"#,
+        )
+        .unwrap();
+        let s = VolSurface::from_input(&input, asof()).unwrap();
+        assert!((s.vol(95.0, 100.0, 0.5) - 0.31).abs() < 1e-14);
+        assert!((s.vol(110.0, 100.0, 1.0) - 0.25).abs() < 1e-14);
+        // coordinate defaults to strike; an explicit moneyness coordinate
+        // reads the same numbers as K/F
+        let m: VolInput = serde_json::from_str(
+            r#"{
+                "type": "strike_smiles",
+                "coordinate": "moneyness",
+                "expiries": [1.0],
+                "smiles": [[[0.9, 0.22], [1.0, 0.20], [1.1, 0.19]]]
+            }"#,
+        )
+        .unwrap();
+        let s = VolSurface::from_input(&m, asof()).unwrap();
+        assert!((s.vol(94.5, 105.0, 1.0) - 0.22).abs() < 1e-12);
+    }
+
+    #[test]
+    fn surface_documents_round_trip_through_json() {
+        let probes: [(f64, f64, f64); 4] = [
+            (90.0, 100.0, 0.5),
+            (100.0, 100.0, 1.0),
+            (104.0, 98.0, 1.5),
+            (130.0, 105.0, 3.0),
+        ];
+        let ragged = VolSurface::from_strike_smiles(
+            &[Tenor::YearFraction(0.5), Tenor::Date(d(2028, 7, 16))],
+            &[
+                vec![(95.0, 0.31), (100.0, 0.28)],
+                vec![(90.0, 0.30), (100.0, 0.27), (110.0, 0.25)],
+            ],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let moneyness = VolSurface::from_moneyness_grid(
+            &[Tenor::YearFraction(1.0)],
+            &[0.9, 1.0, 1.1],
+            &[vec![0.22, 0.20, 0.19]],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let delta = VolSurface::from_delta_grid(
+            &[Tenor::YearFraction(1.0)],
+            &[0.25, 0.5, 0.75],
+            &[vec![0.19, 0.20, 0.23]],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let flat = VolSurface::flat(0.3, asof(), DayCountConvention::Act365).unwrap();
+
+        for (name, surface) in [
+            ("ragged", &ragged),
+            ("moneyness", &moneyness),
+            ("delta", &delta),
+            ("flat", &flat),
+        ] {
+            let loaded = VolSurface::from_json(&surface.to_json()).unwrap();
+            for &(k, f, t) in &probes {
+                assert!(
+                    (loaded.vol(k, f, t) - surface.vol(k, f, t)).abs() < 1e-14,
+                    "{name} surface changed after a JSON round trip at ({k}, {f}, {t})"
+                );
+            }
+        }
+
+        // a document with metadata survives parsing, and build() ignores it
+        let mut document = ragged.to_document(Some(serde_json::json!({"symbol": "ACME"})));
+        let text = serde_json::to_string(&document).unwrap();
+        document = serde_json::from_str(&text).unwrap();
+        assert_eq!(document.metadata.as_ref().unwrap()["symbol"], "ACME");
+        assert!(document.build().is_ok());
+
+        assert!(VolSurface::from_json("{ not a document").is_err());
+    }
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn diagnostics_pass_clean_surfaces() {
+        // gentle skew, total variance increasing in time: no arbitrage
+        let clean = VolSurface::from_strike_smiles(
+            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0)],
+            &[
+                vec![(90.0, 0.22), (100.0, 0.20), (110.0, 0.19)],
+                vec![(90.0, 0.24), (100.0, 0.22), (110.0, 0.21)],
+            ],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let report = clean.diagnostics(|_| 100.0);
+        assert!(report.is_clean(), "{report:?}");
+        // flat surfaces are clean by construction
+        let flat = VolSurface::flat(0.2, asof(), DayCountConvention::Act365).unwrap();
+        assert!(flat.diagnostics(|_| 100.0).is_clean());
+    }
+
+    #[test]
+    fn diagnostics_flag_butterfly_arbitrage() {
+        // a vol spike at the middle strike prices the middle call above
+        // the convex hull of its neighbors
+        let spiked = VolSurface::from_strike_smiles(
+            &[Tenor::YearFraction(1.0)],
+            &[vec![(90.0, 0.20), (100.0, 0.50), (110.0, 0.20)]],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let report = spiked.diagnostics(|_| 100.0);
+        assert_eq!(report.butterfly.len(), 1);
+        assert_eq!(report.butterfly[0].strikes, (90.0, 100.0, 110.0));
+        assert!(report.butterfly[0].magnitude < -1.0, "clearly negative");
+        assert!(report.calendar.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_flag_calendar_arbitrage() {
+        // total variance falls: 0.4^2 * 0.5 = 0.08 -> 0.2^2 * 1.0 = 0.04
+        let falling = VolSurface::from_strike_smiles(
+            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0)],
+            &[vec![(100.0, 0.40)], vec![(100.0, 0.20)]],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let report = falling.diagnostics(|_| 100.0);
+        assert!(report.butterfly.is_empty(), "one strike per expiry");
+        assert_eq!(report.calendar.len(), 1);
+        let violation = &report.calendar[0];
+        assert_eq!(violation.moneyness, 1.0);
+        assert!((violation.magnitude - 0.04).abs() < 1e-12);
+
+        let meta = report.to_metadata();
+        assert_eq!(meta["butterfly_violations"], 0);
+        assert_eq!(meta["calendar_violations"], 1);
+        assert!(meta["worst_butterfly"].is_null());
+        assert!(meta["worst_calendar"]["magnitude"].as_f64().unwrap() > 0.03);
     }
 }

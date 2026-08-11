@@ -1,8 +1,16 @@
 use crate::bonds::build_contracts::bootstrap_from_contracts;
+use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::data_models::ProductData;
+use crate::core::daycount::DayCountConvention;
+use crate::core::errors::RustyQLibError;
 use crate::core::utils::{CombinedContract, Contract, ContractOutput, Contracts};
+use crate::core::vols::{VolInput, VolSurface};
+use crate::data::cboe;
 use crate::equity::build_contracts::build_eq_contracts_from_json;
 use crate::equity::handle_equity_contracts::handle_equity_contract;
+use crate::equity::local_vol::LocalVol;
+use crate::equity::option_chain::{implied_vol_surface_from_chain, FilterConfig, OptionChain};
+use crate::utils::plot3d::{self, linspace, GreekSurface, Labels};
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::vanilla_option::EquityOption;
 use anyhow::{bail, Context, Result};
@@ -39,12 +47,42 @@ pub fn save_to_file(
     Ok(dir)
 }
 
+/// How an option chain is discounted during `build` (parity forwards
+/// and de-discounting of mids).
+pub enum ChainDiscount {
+    /// Flat continuously compounded rate anchored at the chain's date.
+    Flat(f64),
+    /// A pre-built discount curve — e.g. bootstrapped from a fetched
+    /// Treasury par-yield document — with a metadata description of its
+    /// origin for the surface document.
+    Curve {
+        curve: YieldCurve,
+        description: serde_json::Value,
+    },
+}
+
 /// Build a curve (term structure, volatility surface, ...) from a
-/// contracts document and save it under `output_folder`. `source` names
-/// the input (a path or "stdin") in error messages.
-pub fn build_curve(contents: &str, source: &str, output_folder: &Path) -> Result<()> {
+/// contracts document — or an implied vol surface from an option chain
+/// document — and save it under `output_folder`. `source` names the
+/// input (a path or "stdin") in error messages; `chain_discount` says
+/// how chains are discounted (ignored for other inputs).
+pub fn build_curve(
+    contents: &str,
+    source: &str,
+    output_folder: &Path,
+    chain_discount: ChainDiscount,
+) -> Result<()> {
     let format = Format::detect(contents);
-    let list_contracts: Contracts = serialization::parse(contents, format)
+    let value = serialization::parse_value(contents, format)
+        .with_context(|| format!("failed to parse {format:?} document {source}"))?;
+    if let Some(chain) = chain_from_document(&value)
+        .transpose()
+        .with_context(|| format!("failed to read the option chain in {source}"))?
+    {
+        return build_chain_surface(&chain, chain_discount, output_folder);
+    }
+    let list_contracts: Contracts = serde_json::from_value(value)
+        .map_err(|e| RustyQLibError::ParseError(format!("document does not match the schema: {e}")))
         .with_context(|| format!("failed to parse {format:?} curve definition {source}"))?;
     if list_contracts.contracts.is_empty() {
         bail!("no contracts found in {source}");
@@ -96,6 +134,291 @@ pub fn build_curve(contents: &str, source: &str, output_folder: &Path) -> Result
         other => bail!("unsupported asset class `{other}` (expected EQ or IR)"),
     }
     Ok(())
+}
+
+/// Recognize an option chain document in any of its three shapes: the
+/// normalized [`OptionChain`] JSON (`quotes` + `as_of`), the wrapped
+/// `fetch chain` document (`response.data.options`), or a raw Cboe
+/// response (`data.options`). `None` means "not a chain — try the
+/// contracts schema".
+fn chain_from_document(value: &serde_json::Value) -> Option<Result<OptionChain, RustyQLibError>> {
+    if value.get("quotes").is_some_and(Value::is_array) && value.get("as_of").is_some() {
+        return Some(serde_json::from_value(value.clone()).map_err(|e| {
+            RustyQLibError::ParseError(format!("invalid option chain document: {e}"))
+        }));
+    }
+    let response = value
+        .get("response")
+        .filter(|r| r["data"]["options"].is_array())
+        .or_else(|| Some(value).filter(|v| v["data"]["options"].is_array()))?;
+    Some(cboe::chain_from_value(response))
+}
+
+/// Build an implied vol surface from an option chain and save it as a
+/// reloadable surface document plus an interactive 3-D plot. The
+/// document's metadata records the forwards used, every dropped quote by
+/// reason, and the discounting assumption.
+fn build_chain_surface(
+    chain: &OptionChain,
+    discount: ChainDiscount,
+    output_folder: &Path,
+) -> Result<()> {
+    log::info!(
+        "building an implied vol surface from the {} chain ({} quotes as of {})",
+        chain.symbol,
+        chain.quotes.len(),
+        chain.as_of
+    );
+    let (curve, discount_meta) = match discount {
+        ChainDiscount::Flat(rate) => {
+            if rate == 0.0 {
+                log::warn!(
+                    "discounting the chain at a 0% flat rate; pass --rate <r> or \
+                     --curve <ust.json> for realistic parity forwards"
+                );
+            }
+            let curve = YieldCurve::flat(
+                rate,
+                chain.as_of,
+                DayCountConvention::Act365,
+                Compounding::Continuous,
+            )
+            .map_err(RustyQLibError::from)?;
+            let meta = serde_json::json!({
+                "type": "flat",
+                "rate": rate,
+                "compounding": "continuous",
+                "day_count": "Act365",
+            });
+            (curve, meta)
+        }
+        ChainDiscount::Curve { curve, description } => {
+            let gap = (chain.as_of - curve.reference_date()).num_days();
+            if gap.abs() > 7 {
+                log::warn!(
+                    "the discount curve is dated {} but the chain is as of {} \
+                     ({gap} days apart)",
+                    curve.reference_date(),
+                    chain.as_of
+                );
+            }
+            (curve, description)
+        }
+    };
+    let (surface, report) = implied_vol_surface_from_chain(chain, &curve, &FilterConfig::default())
+        .context("failed to build the implied vol surface")?;
+    log::debug!("implied vol surface:\n{surface}");
+
+    let mut metadata = report.to_metadata(chain);
+    metadata["discount"] = discount_meta.clone();
+    write_surface_artifacts(
+        &surface,
+        metadata.clone(),
+        output_folder,
+        "vol_surface",
+        &format!("{} implied vol \u{2014} {}", chain.symbol, chain.as_of),
+        "Volatility surface",
+    )?;
+
+    // Dupire local vol calibrated from that implied surface (a
+    // non-parametric transformation, sampled on a level x time grid)
+    let spot = match chain.spot {
+        Some(spot) => spot,
+        None => {
+            // discount the front parity forward back to a spot proxy
+            let (front, forward) = report.forwards[0];
+            let df = curve.df_date(front) / curve.df_date(chain.as_of);
+            let implied = forward * df;
+            log::info!("chain has no spot; using {implied:.4} from the front parity forward");
+            implied
+        }
+    };
+    write_local_vol_artifacts(
+        &surface,
+        &curve,
+        spot,
+        &discount_meta,
+        chain,
+        output_folder,
+        "local_vol",
+        &format!("{} Dupire local vol \u{2014} {}", chain.symbol, chain.as_of),
+        "the as-quoted implied surface",
+    )?;
+
+    // cleaned versions: minimal-change static-arbitrage repair (convex
+    // hull of call prices per expiry + forward total-variance sweep),
+    // then the same artifacts again from the repaired surface
+    let day_count = DayCountConvention::Act365;
+    let forward_points: Vec<(f64, f64)> = report
+        .forwards
+        .iter()
+        .map(|(expiry, forward)| (day_count.year_fraction(chain.as_of, *expiry), *forward))
+        .collect();
+    let forward_of = |t: f64| match forward_points.len() {
+        1 => forward_points[0].1,
+        _ => crate::core::interpolation::interp_pairs(&forward_points, t),
+    };
+    let (cleaned, repair) = crate::equity::surface_repair::repair_arbitrage(&surface, forward_of)
+        .context("arbitrage repair failed")?;
+    let adjusted = repair.butterfly_adjustments + repair.calendar_adjustments;
+    if !repair.clean {
+        log::warn!(
+            "arbitrage repair did not fully converge after {} passes; \
+             the cleaned surface still carries violations",
+            repair.iterations
+        );
+    } else if adjusted > 0 {
+        log::info!(
+            "arbitrage repair adjusted {adjusted} pillar vols \
+             (max change {:.4}) and dropped {}",
+            repair.max_vol_change,
+            repair.dropped_points
+        );
+    }
+    let mut cleaned_meta = metadata;
+    let mut repair_meta =
+        serde_json::to_value(&repair).context("failed to serialize the repair report")?;
+    repair_meta["method"] = serde_json::json!(
+        "minimal-change: per-expiry convex-hull projection of call prices \
+         + forward total-variance monotonicity sweep"
+    );
+    cleaned_meta["repair"] = repair_meta;
+    cleaned_meta["diagnostics"] = cleaned.diagnostics(forward_of).to_metadata();
+    write_surface_artifacts(
+        &cleaned,
+        cleaned_meta,
+        output_folder,
+        "vol_surface_cleaned",
+        &format!(
+            "{} implied vol (arbitrage-repaired) \u{2014} {}",
+            chain.symbol, chain.as_of
+        ),
+        "Cleaned volatility surface",
+    )?;
+    write_local_vol_artifacts(
+        &cleaned,
+        &curve,
+        spot,
+        &discount_meta,
+        chain,
+        output_folder,
+        "local_vol_cleaned",
+        &format!(
+            "{} Dupire local vol (arbitrage-repaired) \u{2014} {}",
+            chain.symbol, chain.as_of
+        ),
+        "the arbitrage-repaired implied surface",
+    )?;
+    Ok(())
+}
+
+/// Write one surface as its reloadable document plus 3-D plot under
+/// `output_folder/vol_surface/<stem>.{json,html}`.
+fn write_surface_artifacts(
+    surface: &VolSurface,
+    metadata: serde_json::Value,
+    output_folder: &Path,
+    stem: &str,
+    title: &str,
+    label: &str,
+) -> Result<()> {
+    let document = surface.to_document(Some(metadata));
+    let rendered =
+        serde_json::to_string_pretty(&document).context("failed to serialize the surface")?;
+    let json_path = save_to_file(output_folder, "vol_surface", &format!("{stem}.json"), &rendered)?;
+    saved_note(label, &json_path);
+    let html = plot3d::vol_surface_html(surface, title);
+    let html_path = save_to_file(output_folder, "vol_surface", &format!("{stem}.html"), &html)?;
+    saved_note(&format!("{label} plot"), &html_path);
+    Ok(())
+}
+
+/// Calibrate Dupire local vol from `surface`, sample it, and write the
+/// grid document plus 3-D plot under
+/// `output_folder/local_vol/<stem>.{json,html}`.
+#[allow(clippy::too_many_arguments)]
+fn write_local_vol_artifacts(
+    surface: &VolSurface,
+    curve: &YieldCurve,
+    spot: f64,
+    discount_meta: &serde_json::Value,
+    chain: &OptionChain,
+    output_folder: &Path,
+    stem: &str,
+    title: &str,
+    derived_from: &str,
+) -> Result<()> {
+    let local_vol = LocalVol::new(surface, curve, spot, 0.0, 0.0);
+    let (levels, times) = local_vol_axes(surface);
+    let vols = local_vol.grid(&levels, &times);
+    let document = serde_json::json!({
+        "metadata": {
+            "model": "Dupire local volatility",
+            "derived_from": {
+                "symbol": chain.symbol,
+                "as_of": chain.as_of.to_string(),
+                "surface": derived_from,
+            },
+            "spot": spot,
+            "dividend_yield": 0.0,
+            "discount": discount_meta,
+            "grid": "vols[i][j] = local vol at levels[i], times[j] (years, Act/365)",
+            "note": "clamped to [1%, 300%]; wings and short times lean on numerical \
+                     derivatives of the interpolated implied surface — trust the interior",
+        },
+        "levels": &levels,
+        "times": &times,
+        "vols": &vols,
+    });
+    let rendered =
+        serde_json::to_string_pretty(&document).context("failed to serialize the local vol grid")?;
+    let json_path = save_to_file(output_folder, "local_vol", &format!("{stem}.json"), &rendered)?;
+    saved_note("Local vol grid", &json_path);
+    let sampled = GreekSurface {
+        xs: levels,
+        ys: times,
+        z: vols,
+    };
+    let labels = Labels {
+        title,
+        x: "underlying level",
+        y: "time (years)",
+        z: "local vol",
+    };
+    let html_path = save_to_file(
+        output_folder,
+        "local_vol",
+        &format!("{stem}.html"),
+        &plot3d::surface_html(&sampled, &labels),
+    )?;
+    saved_note("Local vol plot", &html_path);
+    Ok(())
+}
+
+/// Grid axes for sampling a local vol surface: the implied surface's own
+/// quoted strike span, and times from two weeks out to the last pillar
+/// (short times and wings are where Dupire's numerical derivatives get
+/// noisy, so the grid stays inside the quoted region).
+fn local_vol_axes(surface: &VolSurface) -> (Vec<f64>, Vec<f64>) {
+    let (mut lo, mut hi) = (50.0, 150.0);
+    let mut t_max: f64 = 2.0;
+    if let VolInput::StrikeSmiles {
+        expiries, smiles, ..
+    } = surface.to_input()
+    {
+        let strikes: Vec<f64> = smiles.iter().flatten().map(|&(k, _)| k).collect();
+        lo = strikes.iter().copied().fold(f64::MAX, f64::min);
+        hi = strikes.iter().copied().fold(f64::MIN, f64::max);
+        t_max = expiries
+            .iter()
+            .map(|tenor| match tenor {
+                crate::core::curves::Tenor::YearFraction(t) => *t,
+                crate::core::curves::Tenor::Date(_) => 0.0,
+            })
+            .fold(0.0, f64::max);
+    }
+    let t_lo = (2.0 / 52.0_f64).min(0.5 * t_max);
+    (linspace(lo, hi, 50), linspace(t_lo, t_max, 30))
 }
 
 /// Price every contract in a document and return the rendered results.

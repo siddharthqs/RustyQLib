@@ -60,9 +60,13 @@ pub use crate::core::market::{
 pub use crate::core::quotes::Quote;
 pub use crate::core::results::{Greeks, PricingResult};
 pub use crate::core::traits::Instrument;
-pub use crate::core::vols::{VolInput, VolSurface};
+pub use crate::core::vols::{SmileCoordinate, VolInput, VolSurface, VolSurfaceDocument};
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;
+pub use crate::equity::option_chain::{
+    implied_vol_surface_from_chain, FilterConfig, OptionChain, OptionQuote, SurfaceBuildReport,
+};
+pub use crate::equity::surface_repair::{repair_arbitrage, RepairReport};
 pub use crate::rates::{
     BasisSwap, BasisSwapLeg, FedFundsFuture, OvernightIndexSwap, PayerReceiver, RateFixings,
     SofrContract, SofrFuture, VanillaSwap,

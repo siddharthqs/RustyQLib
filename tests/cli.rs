@@ -636,6 +636,56 @@ fn fetch_rate_xml_output_works() {
 }
 
 #[test]
+fn fetch_chain_emits_the_verbatim_feed_response() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "chain", "--symbol", "aapl", "--from-file"])
+            .arg(fixture("cboe_chain_sample.json")),
+    );
+    assert_eq!(doc["metadata"]["symbol"], "AAPL");
+    assert!(doc["metadata"]["source"].as_str().unwrap().contains("Cboe"));
+    assert!(doc["metadata"]["file"].as_str().unwrap().contains("cboe"));
+    // the feed response is passed through verbatim
+    let options = doc["response"]["data"]["options"].as_array().unwrap();
+    assert_eq!(options.len(), 56);
+    assert!(options[0]["option"].as_str().unwrap().starts_with("AAPL"));
+}
+
+#[test]
+fn fetch_chain_normalize_emits_the_unified_chain() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "chain", "--symbol", "AAPL", "--normalize", "--from-file"])
+            .arg(fixture("cboe_chain_sample.json")),
+    );
+    assert_eq!(doc["symbol"], "AAPL");
+    assert_eq!(doc["as_of"], "2026-08-08");
+    assert_eq!(doc["spot"], 313.15);
+    let quotes = doc["quotes"].as_array().unwrap();
+    assert_eq!(quotes.len(), 56);
+    assert!(quotes
+        .iter()
+        .all(|q| q["right"] == "C" || q["right"] == "P"));
+    assert!(doc["metadata"]["file"].as_str().unwrap().contains("cboe"));
+}
+
+#[test]
+fn fetch_chain_requires_a_symbol_and_rejects_date() {
+    cli()
+        .args(["fetch", "chain", "--from-file"])
+        .arg(fixture("cboe_chain_sample.json"))
+        .assert()
+        .code(1)
+        .stderr(contains("--symbol"));
+    cli()
+        .args(["fetch", "chain", "--symbol", "AAPL", "--date", "2026-08-05", "--from-file"])
+        .arg(fixture("cboe_chain_sample.json"))
+        .assert()
+        .code(1)
+        .stderr(contains("omit --date"));
+}
+
+#[test]
 fn fetch_format_flag_forces_xml_on_stdout() {
     cli()
         .args(["fetch", "ust", "--format", "xml", "--from-file"])
@@ -644,6 +694,198 @@ fn fetch_format_flag_forces_xml_on_stdout() {
         .success()
         .stdout(contains("<?xml"))
         .stdout(contains("<curve>"));
+}
+
+#[test]
+fn build_from_a_raw_cboe_chain_writes_surface_and_plot() {
+    let dir = tempfile::tempdir().unwrap();
+    cli()
+        .args(["build", "--rate", "0.037", "-i"])
+        .arg(fixture("cboe_chain_sample.json"))
+        .arg("-o")
+        .arg(dir.path())
+        .assert()
+        .success();
+    let doc: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("vol_surface").join("vol_surface.json")).unwrap(),
+    )
+    .expect("surface document is valid JSON");
+    // a reloadable surface document with full provenance
+    assert_eq!(doc["surface"]["type"], "strike_smiles");
+    assert_eq!(doc["reference_date"], "2026-08-08");
+    assert_eq!(doc["metadata"]["symbol"], "AAPL");
+    assert_eq!(doc["metadata"]["discount"]["rate"], 0.037);
+    let forwards = doc["metadata"]["forwards"].as_object().unwrap();
+    assert_eq!(forwards.len(), 2, "one parity forward per expiry");
+    assert!(forwards["2026-12-18"].as_f64().unwrap() > 300.0);
+    // arbitrage diagnostics ride along in the metadata
+    let diagnostics = &doc["metadata"]["diagnostics"];
+    assert!(diagnostics["butterfly_violations"].is_u64());
+    assert!(diagnostics["calendar_violations"].is_u64());
+    // and the interactive plot next to it
+    let html =
+        std::fs::read_to_string(dir.path().join("vol_surface").join("vol_surface.html")).unwrap();
+    assert!(html.contains("Plotly.newPlot"));
+    assert!(html.contains("scatter3d"), "quote pillar markers");
+    assert!(html.contains("AAPL implied vol"));
+
+    // Dupire local vol calibrates from the same surface: a sampled grid
+    // document plus its own 3D plot
+    let lv: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("local_vol").join("local_vol.json")).unwrap(),
+    )
+    .expect("local vol grid is valid JSON");
+    assert_eq!(lv["metadata"]["model"], "Dupire local volatility");
+    assert_eq!(lv["metadata"]["derived_from"]["symbol"], "AAPL");
+    assert_eq!(lv["metadata"]["spot"], 313.15);
+    let levels = lv["levels"].as_array().unwrap();
+    let times = lv["times"].as_array().unwrap();
+    let vols = lv["vols"].as_array().unwrap();
+    assert_eq!(vols.len(), levels.len(), "one row per level");
+    for row in vols {
+        let row = row.as_array().unwrap();
+        assert_eq!(row.len(), times.len(), "one column per time");
+        for v in row {
+            let v = v.as_f64().unwrap();
+            assert!((0.01..=3.0).contains(&v), "local vol {v} outside clamp");
+        }
+    }
+    // grid spans the quoted strikes (250..380) and stops at the last expiry
+    assert_eq!(levels[0], 250.0);
+    assert_eq!(levels[levels.len() - 1], 380.0);
+    assert!(times[times.len() - 1].as_f64().unwrap() < 0.4);
+    let lv_html =
+        std::fs::read_to_string(dir.path().join("local_vol").join("local_vol.html")).unwrap();
+    assert!(lv_html.contains("Plotly.newPlot"));
+    assert!(lv_html.contains("AAPL Dupire local vol"));
+
+    // the cleaned pair is always written; this fixture is already
+    // arbitrage-free, so the repair is a recorded no-op
+    let cleaned: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            dir.path().join("vol_surface").join("vol_surface_cleaned.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let repair = &cleaned["metadata"]["repair"];
+    assert_eq!(repair["clean"], true);
+    assert_eq!(repair["butterfly_adjustments"], 0);
+    assert_eq!(repair["calendar_adjustments"], 0);
+    assert!(repair["method"].as_str().unwrap().contains("convex-hull"));
+    assert_eq!(cleaned["metadata"]["diagnostics"]["butterfly_violations"], 0);
+    assert_eq!(cleaned["metadata"]["diagnostics"]["calendar_violations"], 0);
+    assert_eq!(cleaned["surface"]["type"], "strike_smiles");
+    assert!(dir
+        .path()
+        .join("vol_surface")
+        .join("vol_surface_cleaned.html")
+        .exists());
+    assert!(dir
+        .path()
+        .join("local_vol")
+        .join("local_vol_cleaned.json")
+        .exists());
+    let lv_cleaned: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("local_vol").join("local_vol_cleaned.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(lv_cleaned["metadata"]["derived_from"]["surface"]
+        .as_str()
+        .unwrap()
+        .contains("arbitrage-repaired"));
+}
+
+#[test]
+fn fetch_normalize_pipes_into_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain_path = dir.path().join("aapl_chain.json");
+    cli()
+        .args(["fetch", "chain", "--symbol", "AAPL", "--normalize", "--from-file"])
+        .arg(fixture("cboe_chain_sample.json"))
+        .arg("-o")
+        .arg(&chain_path)
+        .assert()
+        .success();
+    cli()
+        .args(["build", "--rate", "0.037", "-i"])
+        .arg(&chain_path)
+        .arg("-o")
+        .arg(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join("vol_surface").join("vol_surface.json").exists());
+    assert!(dir.path().join("vol_surface").join("vol_surface.html").exists());
+    assert!(dir.path().join("local_vol").join("local_vol.json").exists());
+    assert!(dir.path().join("local_vol").join("local_vol.html").exists());
+}
+
+#[test]
+fn build_discounts_the_chain_off_a_fetched_treasury_curve() {
+    let dir = tempfile::tempdir().unwrap();
+    let ust = dir.path().join("ust.json");
+    // fetch ust (fixture) -> curve document -> build --curve
+    cli()
+        .args(["fetch", "ust", "--date", "2026-08-05", "--from-file"])
+        .arg(fixture("ust_par_yields_2026.csv"))
+        .arg("-o")
+        .arg(&ust)
+        .assert()
+        .success();
+    cli()
+        .args(["build", "--curve"])
+        .arg(&ust)
+        .arg("-i")
+        .arg(fixture("cboe_chain_sample.json"))
+        .arg("-o")
+        .arg(dir.path())
+        .assert()
+        .success();
+    let doc: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("vol_surface").join("vol_surface.json")).unwrap(),
+    )
+    .unwrap();
+    let discount = &doc["metadata"]["discount"];
+    assert!(discount["type"].as_str().unwrap().contains("Treasury"));
+    assert_eq!(discount["curve_date"], "2026-08-05");
+    assert_eq!(discount["pillars"], 14);
+    assert!(discount["source"].as_str().unwrap().contains("treasury.gov"));
+    // parity forwards still land where the quotes put them
+    let forward = doc["metadata"]["forwards"]["2026-12-18"].as_f64().unwrap();
+    assert!((300.0..335.0).contains(&forward), "forward {forward}");
+    // the local vol grid inherits the same discount description
+    let lv: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("local_vol").join("local_vol.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(lv["metadata"]["discount"]["type"]
+        .as_str()
+        .unwrap()
+        .contains("Treasury"));
+
+    // --curve and --rate are mutually exclusive
+    cli()
+        .args(["build", "--rate", "0.04", "--curve"])
+        .arg(&ust)
+        .arg("-i")
+        .arg(fixture("cboe_chain_sample.json"))
+        .arg("-o")
+        .arg(dir.path())
+        .assert()
+        .code(2)
+        .stderr(contains("cannot be used with"));
+    // a non-curve document fails with context, not a panic
+    cli()
+        .args(["build", "--curve"])
+        .arg(fixture("cboe_chain_sample.json"))
+        .arg("-i")
+        .arg(fixture("cboe_chain_sample.json"))
+        .arg("-o")
+        .arg(dir.path())
+        .assert()
+        .code(1)
+        .stderr(contains("failed to bootstrap"));
 }
 
 #[test]

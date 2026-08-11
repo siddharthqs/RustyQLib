@@ -109,6 +109,16 @@ impl<'a> LocalVol<'a> {
         }
         (dw_dt / denom).sqrt().clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL)
     }
+
+    /// The local vol function sampled on a `levels` x `times` grid:
+    /// `grid[i][j]` is [`vol`](Self::vol)`(levels[i], times[j])` — the
+    /// layout the plotting and document-writing code consumes.
+    pub fn grid(&self, levels: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
+        levels
+            .iter()
+            .map(|&level| times.iter().map(|&t| self.vol(level, t)).collect())
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +151,23 @@ mod tests {
             for t in [0.05, 0.5, 1.0, 2.0] {
                 let v = lv.vol(level, t);
                 assert!((v - 0.25).abs() < 1e-6, "level={level} t={t}: {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn grid_matches_pointwise_queries_in_level_time_layout() {
+        let surface = VolSurface::flat(0.25, asof(), DayCountConvention::Act365).unwrap();
+        let curve = flat_curve();
+        let lv = LocalVol::new(&surface, &curve, 100.0, 0.0, 0.0);
+        let levels = [80.0, 100.0, 120.0];
+        let times = [0.25, 1.0];
+        let grid = lv.grid(&levels, &times);
+        assert_eq!(grid.len(), levels.len());
+        for (i, row) in grid.iter().enumerate() {
+            assert_eq!(row.len(), times.len());
+            for (j, v) in row.iter().enumerate() {
+                assert_eq!(*v, lv.vol(levels[i], times[j]), "grid[{i}][{j}]");
             }
         }
     }

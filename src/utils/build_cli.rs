@@ -1,5 +1,6 @@
 use crate::core::serialization::{self, Format};
 use crate::core::trade::PutOrCall;
+use crate::data::cboe;
 use crate::data::nyfed;
 use crate::data::treasury;
 use crate::equity::blackscholes::implied_vol_from_price;
@@ -163,12 +164,21 @@ pub struct PriceArgs {
 
 #[derive(Args)]
 pub struct BuildArgs {
-    /// Input financial contracts to use in construction ('-' reads from stdin)
+    /// Input financial contracts or an option chain document ('-' reads
+    /// from stdin)
     #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub input: String,
     /// Output directory
     #[arg(short, long, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub output: String,
+    /// Flat continuously compounded rate used to discount an option
+    /// chain (parity forwards); ignored for other inputs
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+    pub rate: f64,
+    /// Discount an option chain off a fetched US Treasury par-yield
+    /// curve document (`fetch ust`) instead of --rate
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath, conflicts_with = "rate")]
+    pub curve: Option<String>,
 }
 
 /// Free official end-of-day data sources for `fetch`.
@@ -183,6 +193,9 @@ pub enum FetchSource {
     /// Effective Federal Funds Rate (markets.newyorkfed.org)
     #[value(name = "effr")]
     Effr,
+    /// Listed option chain, 15-minute delayed (cdn.cboe.com); needs --symbol
+    #[value(name = "chain")]
+    Chain,
 }
 
 #[derive(Args)]
@@ -193,7 +206,14 @@ pub struct FetchArgs {
     /// Curve date, YYYY-MM-DD (default: the latest published business day)
     #[arg(long, value_name = "DATE")]
     pub date: Option<String>,
-    /// Parse a previously downloaded CSV instead of hitting the network
+    /// Underlying ticker for the `chain` source (e.g. AAPL, _SPX)
+    #[arg(long, value_name = "SYMBOL")]
+    pub symbol: Option<String>,
+    /// For `chain`: emit the normalized OptionChain document instead of
+    /// the verbatim feed response
+    #[arg(long)]
+    pub normalize: bool,
+    /// Parse a previously downloaded file instead of hitting the network
     #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub from_file: Option<String>,
     /// Output file (default: stdout)
@@ -405,10 +425,40 @@ fn price_directory(input_path: &Path, output_path: &Path, format: Option<Format>
 
 /// Handle the "build" subcommand.
 pub fn handle_build(args: &BuildArgs) -> Result<()> {
+    if args.input == "-" && args.curve.as_deref() == Some("-") {
+        bail!("only one of --input and --curve can read from stdin");
+    }
     // We measure the time of the operation
     measure_time("build_curve", || {
         let contents = read_input(&args.input)?;
-        parse_contracts::build_curve(&contents, input_label(&args.input), Path::new(&args.output))
+        let discount = match &args.curve {
+            Some(path) => {
+                let text = read_input(path)?;
+                let value = serialization::parse_value(&text, Format::detect(&text))
+                    .with_context(|| {
+                        format!("failed to parse the curve document {}", input_label(path))
+                    })?;
+                let (curve, description) =
+                    treasury::bootstrap_from_document(&value).with_context(|| {
+                        format!(
+                            "failed to bootstrap a Treasury curve from {}",
+                            input_label(path)
+                        )
+                    })?;
+                log::info!(
+                    "discounting off the bootstrapped Treasury curve of {}",
+                    curve.reference_date()
+                );
+                parse_contracts::ChainDiscount::Curve { curve, description }
+            }
+            None => parse_contracts::ChainDiscount::Flat(args.rate),
+        };
+        parse_contracts::build_curve(
+            &contents,
+            input_label(&args.input),
+            Path::new(&args.output),
+            discount,
+        )
     })
 }
 
@@ -430,7 +480,60 @@ pub fn handle_fetch(args: &FetchArgs) -> Result<()> {
         FetchSource::UstParYields => fetch_ust_par_yields(args, date),
         FetchSource::Sofr => fetch_nyfed_rate(args, date, nyfed::ReferenceRate::Sofr),
         FetchSource::Effr => fetch_nyfed_rate(args, date, nyfed::ReferenceRate::Effr),
+        FetchSource::Chain => fetch_cboe_chain(args, date),
     })
+}
+
+fn fetch_cboe_chain(args: &FetchArgs, date: Option<NaiveDate>) -> Result<()> {
+    if date.is_some() {
+        bail!("the chain source is a live snapshot with no history; omit --date");
+    }
+    let symbol = args
+        .symbol
+        .as_deref()
+        .context("the chain source needs --symbol (e.g. --symbol AAPL)")?;
+    let (text, origin) = match &args.from_file {
+        Some(path) => (
+            read_input(path)?,
+            serde_json::json!({ "file": input_label(path) }),
+        ),
+        None => (
+            cboe::fetch(symbol)?,
+            serde_json::json!({
+                "url": cboe::url(symbol),
+                "fetched_at": Local::now().to_rfc3339(),
+            }),
+        ),
+    };
+    if args.normalize {
+        let mut chain = cboe::to_chain(&text)
+            .with_context(|| format!("failed to normalize the chain for {symbol}"))?;
+        if let (Some(serde_json::Value::Object(meta)), serde_json::Value::Object(origin)) =
+            (chain.metadata.as_mut(), origin)
+        {
+            meta.extend(origin);
+        }
+        log::info!(
+            "option chain for {}: {} quotes as of {}",
+            chain.symbol,
+            chain.quotes.len(),
+            chain.as_of
+        );
+        let value = serde_json::to_value(&chain).context("failed to serialize the chain")?;
+        let format = args
+            .format
+            .map(Format::from)
+            .or_else(|| args.output.as_ref().and_then(Format::from_path))
+            .unwrap_or(Format::Json);
+        write_output(
+            args.output.as_ref(),
+            &serialization::render_value(&value, format, "option_chain"),
+        )
+    } else {
+        let document = cboe::to_document(&text, symbol)
+            .with_context(|| format!("failed to read the chain response for {symbol}"))?;
+        emit_document(args, document, origin, "option_chain")
+    }
 }
 
 fn fetch_ust_par_yields(args: &FetchArgs, date: Option<NaiveDate>) -> Result<()> {

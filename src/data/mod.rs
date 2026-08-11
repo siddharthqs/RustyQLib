@@ -7,6 +7,7 @@
 //! metadata, never reinterpreted — and pricing never touches the network,
 //! so every downstream computation stays reproducible from a file.
 
+pub mod cboe;
 pub mod nyfed;
 pub mod treasury;
 

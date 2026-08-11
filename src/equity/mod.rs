@@ -16,6 +16,7 @@ pub mod builder;
 pub mod bump;
 pub mod greeks;
 pub mod market;
+pub mod option_chain;
 pub mod portfolio;
 pub mod utils;
 
@@ -34,5 +35,7 @@ pub use engines::{
     baw, binomial, bjerksund_stensland, black76, blackscholes, carr_madan, cos, finite_difference,
     heston_adi, montecarlo,
 };
-pub use models::{bates, heston, local_vol, processes, rbergomi, slv, svi, vol_surface};
+pub use models::{
+    bates, heston, local_vol, processes, rbergomi, slv, surface_repair, svi, vol_surface,
+};
 pub use service::{build_contracts, handle_equity_contracts};

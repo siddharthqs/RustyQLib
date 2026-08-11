@@ -64,7 +64,8 @@ chrono = { version = "0.4.31", features = ["serde"] }
 rand_chacha = "0.3.1"
 rand_pcg = " 0.3.1"
 serde = { version = "1.0.104", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: saved documents (curves, vol surfaces) reload bit-exact
+serde_json = { version = "1", features = ["float_roundtrip"] }
 strum = "0.25"
 thiserror = "1"
 strum_macros = "0.25"
@@ -109,6 +110,10 @@ harness = false
 [[example]]
 name = "convert_format"
 required-features = ["xml"]
+
+[[example]]
+name = "chain_to_local_vol"
+required-features = ["fetch"]
 
 [[example]]
 name = "stress_mtm"

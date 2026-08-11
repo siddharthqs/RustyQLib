@@ -7,5 +7,6 @@ pub mod local_vol;
 pub mod processes;
 pub mod rbergomi;
 pub mod slv;
+pub mod surface_repair;
 pub mod svi;
 pub mod vol_surface;

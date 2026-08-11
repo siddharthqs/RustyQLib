@@ -5,6 +5,8 @@ Cargo.lock
 /runs
 # Book draft (Typst) — kept out of the library repo
 /book
+# working notes and todo lists — not part of the published library
+/docs
 
 # editor backup files
 *~

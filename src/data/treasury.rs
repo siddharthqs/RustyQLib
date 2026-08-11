@@ -12,8 +12,12 @@
 //! [`parse_csv`], [`select_row`] and [`to_document`] are pure functions,
 //! so everything after the download is testable offline.
 
-use chrono::NaiveDate;
+use chrono::{Days, Months, NaiveDate};
 
+use crate::bonds::{bootstrap_curve, BillQuote, BondQuote, CurveInstrument, FixedRateBond, TreasuryBill};
+use crate::core::calendar::Calendar;
+use crate::core::curves::YieldCurve;
+use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
 
 /// Human-readable name of the source, recorded in document metadata.
@@ -245,6 +249,140 @@ pub fn fetch_year_csv(year: i32) -> Result<String, RustyQLibError> {
     super::http_get(&csv_url(year))
 }
 
+/// Read a fetched par-yield curve document (the [`to_document`] output,
+/// after any JSON/XML round trip) back into a [`ParYieldRow`]. Tenor
+/// labels are re-parsed from the document; unrecognized labels are
+/// skipped with a warning, and yields are bounds-checked exactly like
+/// the CSV path.
+pub fn row_from_document(value: &serde_json::Value) -> Result<ParYieldRow, RustyQLibError> {
+    let date_field = value["metadata"]["curve_date"].as_str().ok_or_else(|| {
+        RustyQLibError::ParseError(
+            "no `metadata.curve_date` — this does not look like a fetched \
+             Treasury par yield curve document"
+                .to_string(),
+        )
+    })?;
+    let date = NaiveDate::parse_from_str(date_field, "%Y-%m-%d").map_err(|_| {
+        RustyQLibError::ParseError(format!("`{date_field}` is not a YYYY-MM-DD curve date"))
+    })?;
+    let entries = value["points"].as_array().ok_or_else(|| {
+        RustyQLibError::ParseError("the curve document has no `points` array".to_string())
+    })?;
+    let mut points = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let label = entry["tenor"].as_str().ok_or_else(|| {
+            RustyQLibError::ParseError(format!("curve point without a `tenor`: {entry}"))
+        })?;
+        let Some((months, extra_days)) = parse_tenor_header(label) else {
+            log::warn!("skipping unrecognized tenor `{label}` in the curve document");
+            continue;
+        };
+        let yield_pct = entry["yield"].as_f64().ok_or_else(|| {
+            RustyQLibError::ParseError(format!("tenor `{label}` has no numeric `yield`"))
+        })?;
+        if !(yield_pct.is_finite()
+            && yield_pct > PERCENT_BOUNDS.0
+            && yield_pct < PERCENT_BOUNDS.1)
+        {
+            return Err(RustyQLibError::ParseError(format!(
+                "tenor `{label}`: {yield_pct} is outside the plausible percent range — \
+                 refusing to guess the document's units"
+            )));
+        }
+        points.push(ParYieldPoint {
+            label: label.to_string(),
+            months,
+            extra_days,
+            yield_pct,
+        });
+    }
+    if points.is_empty() {
+        return Err(RustyQLibError::ParseError(
+            "the curve document has no usable points".to_string(),
+        ));
+    }
+    Ok(ParYieldRow { date, points })
+}
+
+/// Bootstrap a discount curve from one day's fitted par yields — the
+/// explicit interpretation step the pass-through documents deliberately
+/// omit. Conventions:
+///
+/// - settlement is T+1 on the US government-bond calendar; maturities
+///   are settlement advanced by the tenor with plain calendar
+///   arithmetic (fractional-month tenors add their leftover days for
+///   bills, and are rounded to whole months for bonds);
+/// - **sub-year tenors** become [`BillQuote`]s: the published
+///   bond-equivalent par yield is restated as the Act/360 discount rate
+///   (simple Act/365 up to 182 days, one compounding period beyond,
+///   inverting [`TreasuryBill::bond_equivalent_yield`]);
+/// - **1Y+ tenors** become synthetic par bonds: coupon equal to the par
+///   yield, clean price 100, dated at settlement so the par identity is
+///   exact ([`BondQuote`] on [`FixedRateBond::us_treasury`]).
+///
+/// The result is an ordinary [`YieldCurve`] (continuous zeros,
+/// log-linear discount factors, Act/365) that reprices every input
+/// exactly.
+pub fn bootstrap_par_yield_curve(row: &ParYieldRow) -> Result<YieldCurve, RustyQLibError> {
+    let valuation = row.date;
+    let settlement = Calendar::UsGovernmentBond.add_business_days(valuation, 1);
+    let mut instruments: Vec<Box<dyn CurveInstrument>> = Vec::with_capacity(row.points.len());
+    for point in &row.points {
+        let months = settlement
+            .checked_add_months(Months::new(point.months))
+            .ok_or_else(|| {
+                RustyQLibError::invalid_input(
+                    "tenor",
+                    format!("cannot advance {settlement} by `{}`", point.label),
+                )
+            })?;
+        let yield_rate = point.yield_pct / 100.0;
+        if point.months < 12 {
+            let maturity = months
+                .checked_add_days(Days::new(u64::from(point.extra_days)))
+                .ok_or_else(|| {
+                    RustyQLibError::invalid_input(
+                        "tenor",
+                        format!("cannot advance {settlement} by `{}`", point.label),
+                    )
+                })?;
+            let n = (maturity - settlement).num_days() as f64;
+            let price = if n <= 182.0 {
+                100.0 / (1.0 + yield_rate * n / 365.0)
+            } else {
+                100.0 / ((1.0 + yield_rate / 2.0) * (1.0 + (n / 365.0 - 0.5) * yield_rate))
+            };
+            let bill = TreasuryBill::new(100.0, maturity)?;
+            let discount_rate = bill.discount_rate_from_price(price, settlement)?;
+            instruments.push(Box::new(BillQuote::new(bill, discount_rate, settlement)?));
+        } else {
+            // whole coupon periods keep the par identity exact
+            let bond = FixedRateBond::us_treasury(100.0, yield_rate, settlement, months)?;
+            instruments.push(Box::new(BondQuote::new(bond, 100.0, settlement)?));
+        }
+    }
+    bootstrap_curve(&instruments, valuation, DayCountConvention::Act365)
+}
+
+/// [`row_from_document`] + [`bootstrap_par_yield_curve`] in one step,
+/// returning the curve together with a metadata description of where it
+/// came from (for embedding in whatever the curve is used to build).
+pub fn bootstrap_from_document(
+    value: &serde_json::Value,
+) -> Result<(YieldCurve, serde_json::Value), RustyQLibError> {
+    let row = row_from_document(value)?;
+    let curve = bootstrap_par_yield_curve(&row)?;
+    let description = serde_json::json!({
+        "type": "bootstrapped US Treasury par yield curve",
+        "curve_date": row.date.to_string(),
+        "pillars": row.points.len(),
+        "source": value["metadata"]["source"],
+        "note": "sub-year par yields as bills (bond-equivalent restated on the Act/360 \
+                 discount basis); 1Y+ as synthetic par bonds dated at T+1 settlement",
+    });
+    Ok((curve, description))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +492,61 @@ Date,\"1 Mo\",\"Mystery\",\"10 Yr\"
         assert_eq!(points[13]["yield"], 5.17);
         // nothing invented: a point is exactly {tenor, yield}
         assert_eq!(points[0].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn curve_documents_round_trip_into_rows() {
+        let rows = parse_csv(SAMPLE).unwrap();
+        let document = to_document(&rows[0]);
+        let back = row_from_document(&document).unwrap();
+        assert_eq!(back, rows[0], "labels re-parse to the same tenors");
+        // malformed documents are rejected with context
+        assert!(row_from_document(&serde_json::json!({})).is_err());
+        assert!(row_from_document(&serde_json::json!({
+            "metadata": {"curve_date": "2026-08-05"}, "points": []
+        }))
+        .is_err());
+        assert!(row_from_document(&serde_json::json!({
+            "metadata": {"curve_date": "2026-08-05"},
+            "points": [{"tenor": "10 Yr", "yield": 463.0}]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn bootstrapped_par_curve_reprices_its_inputs() {
+        let rows = parse_csv(SAMPLE).unwrap();
+        let curve = bootstrap_par_yield_curve(&rows[0]).unwrap();
+        assert_eq!(curve.reference_date(), d(2026, 8, 5));
+        assert_eq!(curve.pillars().len(), 14);
+        let dfs: Vec<f64> = curve.pillars().iter().map(|p| p.df).collect();
+        assert!(dfs.windows(2).all(|w| w[1] < w[0]), "{dfs:?}");
+        // zeros stay in the vicinity of the 3.8-5.2% par inputs
+        for pillar in curve.pillars() {
+            assert!(
+                pillar.zero_rate > 0.03 && pillar.zero_rate < 0.06,
+                "zero {} at t={}",
+                pillar.zero_rate,
+                pillar.time
+            );
+        }
+        // the curve must reprice a synthetic par bond at exactly 100
+        // (10 Yr published at 4.63: Aug 5 is a Wednesday, T+1 Thursday)
+        let settlement = d(2026, 8, 6);
+        let ten_year =
+            FixedRateBond::us_treasury(100.0, 0.0463, settlement, d(2036, 8, 6)).unwrap();
+        let clean = ten_year.clean_price_from_curve(&curve, settlement).unwrap();
+        assert!((clean - 100.0).abs() < 1e-6, "10Y par bond repriced at {clean}");
+        // and the short end reprices the bill implied by the 3M BEY
+        let bill = TreasuryBill::new(100.0, d(2026, 11, 6)).unwrap();
+        let n = (d(2026, 11, 6) - settlement).num_days() as f64;
+        let price = 100.0 / (1.0 + 0.0389 * n / 365.0);
+        let repriced = 100.0 * curve.df_date(d(2026, 11, 6)) / curve.df_date(settlement);
+        assert!(
+            (repriced - price).abs() < 1e-7,
+            "3M bill: {repriced} vs {price}"
+        );
+        let _ = bill;
     }
 
     /// Live check that the endpoint and schema still exist. Excluded from

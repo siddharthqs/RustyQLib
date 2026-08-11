@@ -274,6 +274,13 @@ rustyqlib fetch ust --date 2026-08-05 --format xml
 # NY Fed reference rates: SOFR / EFFR
 rustyqlib fetch sofr
 rustyqlib fetch effr --date 2026-08-04
+# listed option chain (Cboe, 15-min delayed): verbatim feed, or normalized
+rustyqlib fetch chain --symbol AAPL -o aapl_raw.json
+rustyqlib fetch chain --symbol AAPL --normalize -o aapl_chain.json
+# chain -> implied vol surface + Dupire local vol (document + 3D plot each),
+# discounted off the fetched Treasury curve (or a flat --rate)
+rustyqlib fetch ust -o ust.json
+rustyqlib fetch chain --symbol AAPL --normalize | rustyqlib build --curve ust.json -i - -o out/
 # stress MtM: revalue a one-underlying options book under TOML scenarios
 rustyqlib stress -i portfolio.json -c scenarios.toml
 # VaR / Expected Shortfall by scenario simulation (delta-gamma and full revaluation)
@@ -302,14 +309,40 @@ aliases of `price`.
 
 ### Free market data (`fetch`)
 
-`fetch` pulls free, keyless, official US data and emits it (JSON or XML)
-exactly as published — nothing reinterpreted. Three sources so far:
+`fetch` pulls free, keyless official data and emits it (JSON or XML)
+exactly as published — nothing reinterpreted. Four sources so far:
 `ust`, the [US Treasury daily par yield curve](https://home.treasury.gov/resource-center/data-chart-center/interest-rates)
-(relative tenor labels and percent yields, verbatim), and the
+(relative tenor labels and percent yields, verbatim); the
 [NY Fed reference rates](https://www.newyorkfed.org/markets/reference-rates/)
 `sofr` and `effr` (one observation per business day — rate, percentiles,
 volume, and for EFFR the FOMC target range, passed through as the feed's
-own record). The `ust` curve is Treasury's *fitted* end-of-day curve
+own record); and `chain`, the Cboe 15-minute-delayed listed option chain
+for any underlying. `chain` emits the feed verbatim by default, or with
+`--normalize` as the library's unified `OptionChain` document — the
+input to `implied_vol_surface_from_chain`, which cleans the quotes,
+implies each expiry's forward from put-call parity, solves Black-76
+implied vols and returns a `VolSurface` (with a build report of the
+forwards used, every quote dropped by reason, and static-arbitrage
+diagnostics — butterfly and calendar violations at the quoted pillars,
+reported rather than enforced). Surfaces save and
+reload as JSON documents via `to_json`/`from_json`, bit-exact. The
+`build` command consumes any chain document (raw, wrapped or
+normalized) directly, writing that reloadable surface document plus an
+interactive 3-D Plotly plot of the surface with the raw quote pillars
+marked on it — and then calibrates Dupire local vol from the built
+surface, writing a sampled local-vol grid document and its own 3-D
+plot alongside. Chains discount off a flat `--rate`, or off
+`--curve ust.json`: a fetched Treasury par-yield document that `build`
+bootstraps into a full discount curve (par yields below one year as
+bills on the discount basis, synthetic par bonds beyond — the explicit
+interpretation step the pass-through `fetch` documents deliberately
+omit). Each surface and local-vol artifact also comes in a **cleaned**
+version (`vol_surface_cleaned`, `local_vol_cleaned`): a minimal-change
+static-arbitrage repair — per-expiry convex-hull projection of call
+prices plus a forward total-variance sweep — that moves only violating
+pillars, re-verifies against the diagnostics, and records every
+adjustment in the document metadata. Note the Cboe data is delayed exchange data on
+personal-use terms, unlike the public-domain government feeds. The `ust` curve is Treasury's *fitted* end-of-day curve
 (par yields read off a spline through the on-the-run quotes), and the
 document says so: every fetched document carries a `metadata` block
 recording the source, what the data is, its date, units, quote basis
@@ -448,6 +481,8 @@ cargo run --release --example vanilla_option     # all four engines, European + 
 cargo run --release --example barrier_option     # eight barrier types, in-out parity
 cargo run --release --example heston_option      # char. function vs MC, smile shape
 cargo run --release --example local_vol_calibration  # quotes -> surface -> Dupire -> reprice
+# a real Cboe chain -> parity forwards -> implied surface (saved/reloaded) -> local vol -> reprice
+cargo run --release --features fetch --example chain_to_local_vol
 ```
 
 See [`examples/README.md`](examples/README.md) for the full list.
@@ -542,9 +577,9 @@ the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo
 - Barrier rebates, double/window barriers, seasoned Asians
 - Rates: curve bootstrapping from deposits/FRAs/swaps onto the core curve type,
   swaps and swaptions; FX (Garman-Kohlhagen)
-- Market data: mapping fetched par yields onto bootstrap inputs; the
-  Treasury bill-rates feed; a `compare` command diffing a fetched fitted
-  curve against a quote-bootstrapped curve pillar by pillar
+- Market data: the Treasury bill-rates feed; a `compare` command diffing
+  a fetched fitted curve against a quote-bootstrapped curve pillar by
+  pillar
 - Stulz closed forms for two-asset best-of/worst-of; per-asset smiles and
   path-dependent multi-asset payoffs; SVI smile parameterization with
   no-arbitrage checks; pathwise / likelihood-ratio Greeks
