@@ -78,7 +78,7 @@ impl EquityOption {
         option.market.vol_surface = vol.clone();
         option.market.discount_curve = curve.clone();
         option.market.valuation_date = market.valuation_date();
-        if option.model.is_heston() || option.model.is_rbergomi() {
+        if option.model.is_heston() || option.model.is_rbergomi() || option.model.is_sabr() {
             let t = option.time_to_maturity();
             if t > 0.0 {
                 // the surface's parallel shift at this contract's anchor
@@ -88,7 +88,7 @@ impl EquityOption {
                 let shift =
                     option.market.vol_surface.vol(k, f, t) - self.market.vol_surface.vol(k, f, t);
                 if shift != 0.0 {
-                    option.model = option.model.with_vol_shift(shift);
+                    option.model = option.model.with_vol_shift(shift, f);
                 }
             }
         }

@@ -436,6 +436,7 @@ impl EquityOption {
             data.mc_model.as_deref(),
             data.heston,
             data.rbergomi,
+            data.sabr,
         )?);
 
         let mut option = builder.build()?;

@@ -243,7 +243,10 @@ pub fn implied_vol_surface_from_chain(
             report.drop_quotes("expiry_window", 1);
             continue;
         }
-        by_expiry.entry(quote.expiry).or_default().push((quote, mid));
+        by_expiry
+            .entry(quote.expiry)
+            .or_default()
+            .push((quote, mid));
     }
 
     let mut tenors: Vec<Tenor> = Vec::new();
@@ -287,8 +290,12 @@ pub fn implied_vol_surface_from_chain(
                 implied.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 implied[implied.len() / 2]
             });
-            pair_forwards
-                .sort_by(|a, b| (a.0 - anchor).abs().partial_cmp(&(b.0 - anchor).abs()).unwrap());
+            pair_forwards.sort_by(|a, b| {
+                (a.0 - anchor)
+                    .abs()
+                    .partial_cmp(&(b.0 - anchor).abs())
+                    .unwrap()
+            });
             let mut nearest: Vec<f64> = pair_forwards
                 .iter()
                 .take(filter.forward_pairs.max(1))
@@ -565,7 +572,11 @@ mod tests {
         });
         let (surface, report) =
             implied_vol_surface_from_chain(&chain, &curve(), &FilterConfig::default()).unwrap();
-        assert_eq!(surface.expiry_times().len(), 2, "only the two real expiries");
+        assert_eq!(
+            surface.expiry_times().len(),
+            2,
+            "only the two real expiries"
+        );
         assert_eq!(report.dropped["expiry_window"], 1);
         assert_eq!(report.dropped["sparse_expiry"], 1);
     }

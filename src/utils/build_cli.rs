@@ -434,10 +434,9 @@ pub fn handle_build(args: &BuildArgs) -> Result<()> {
         let discount = match &args.curve {
             Some(path) => {
                 let text = read_input(path)?;
-                let value = serialization::parse_value(&text, Format::detect(&text))
-                    .with_context(|| {
-                        format!("failed to parse the curve document {}", input_label(path))
-                    })?;
+                let value = serialization::parse_value(&text, Format::detect(&text)).with_context(
+                    || format!("failed to parse the curve document {}", input_label(path)),
+                )?;
                 let (curve, description) =
                     treasury::bootstrap_from_document(&value).with_context(|| {
                         format!(

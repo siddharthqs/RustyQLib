@@ -76,6 +76,10 @@ pub enum Model {
     /// non-Markovian Volterra variance has no characteristic function
     /// and no finite-dimensional PDE state).
     RBergomi(crate::equity::rbergomi::RBergomiParams),
+    /// SABR stochastic volatility: Hagan implied vol into the
+    /// Black-Scholes closed forms on the Analytical engine, two-factor
+    /// `(forward, alpha)` simulation on Monte Carlo.
+    Sabr(crate::equity::sabr::SabrParams),
 }
 
 impl Model {
@@ -87,6 +91,10 @@ impl Model {
         matches!(self, Model::RBergomi(_))
     }
 
+    pub fn is_sabr(&self) -> bool {
+        matches!(self, Model::Sabr(_))
+    }
+
     /// The model under a parallel implied-vol shift — the model is a risk
     /// factor owner like a surface or a curve. GBM and local vol read the
     /// (already bumped) surface at pricing time, so they pass through
@@ -94,22 +102,27 @@ impl Model {
     /// `sqrt(v0)` and `sqrt(theta)` in parallel
     /// ([`HestonParams::with_vol_shift`](crate::equity::heston::HestonParams::with_vol_shift)),
     /// rather than recalibrating to the bumped surface. Rough Bergomi
-    /// shifts its forward vol `sqrt(xi0)` the same way.
-    pub fn with_vol_shift(&self, shift: f64) -> Model {
+    /// shifts its forward vol `sqrt(xi0)` the same way; SABR scales
+    /// `alpha` so the ATM vol at `forward` moves in parallel (`forward`
+    /// anchors that backbone conversion and is ignored by the other
+    /// models).
+    pub fn with_vol_shift(&self, shift: f64, forward: f64) -> Model {
         match self {
             Model::Heston(params) => Model::Heston(params.with_vol_shift(shift)),
             Model::RBergomi(params) => Model::RBergomi(params.with_vol_shift(shift)),
+            Model::Sabr(params) => Model::Sabr(params.with_vol_shift(shift, forward)),
             other => *other,
         }
     }
 
     /// Parse from contract fields: the `mc_model` string plus the
-    /// `heston` / `rbergomi` parameter block (required when the model is
-    /// Heston / rough Bergomi respectively).
+    /// `heston` / `rbergomi` / `sabr` parameter block (required when the
+    /// model is Heston / rough Bergomi / SABR respectively).
     pub fn from_contract(
         mc_model: Option<&str>,
         heston: Option<crate::equity::heston::HestonParams>,
         rbergomi: Option<crate::equity::rbergomi::RBergomiParams>,
+        sabr: Option<crate::equity::sabr::SabrParams>,
     ) -> Result<Model, crate::core::errors::RustyQLibError> {
         use crate::core::errors::RustyQLibError;
         match mc_model.map(str::trim) {
@@ -137,9 +150,19 @@ impl Model {
                 params.validate()?;
                 Ok(Model::RBergomi(params))
             }
+            Some("sabr") | Some("Sabr") | Some("SABR") => {
+                let params = sabr.ok_or_else(|| {
+                    RustyQLibError::invalid_input(
+                        "sabr",
+                        "sabr parameters are required when mc_model = sabr",
+                    )
+                })?;
+                params.validate()?;
+                Ok(Model::Sabr(params))
+            }
             Some(other) => Err(RustyQLibError::invalid_input(
                 "mc_model",
-                format!("unknown model '{other}' (use gbm, local_vol, heston or rbergomi)"),
+                format!("unknown model '{other}' (use gbm, local_vol, heston, rbergomi or sabr)"),
             )),
         }
     }

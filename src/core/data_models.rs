@@ -188,6 +188,8 @@ pub struct EquityOptionData {
     pub heston: Option<crate::equity::heston::HestonParams>,
     /// Rough Bergomi parameters; required when `mc_model` is "rbergomi".
     pub rbergomi: Option<crate::equity::rbergomi::RBergomiParams>,
+    /// SABR parameters; required when `mc_model` is "sabr".
+    pub sabr: Option<crate::equity::sabr::SabrParams>,
     pub exercise_style: Option<String>, //European, American,
     pub pricer: Option<String>,
     /// Optional discount curve; when absent a flat curve is built from

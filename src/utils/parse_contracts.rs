@@ -10,9 +10,12 @@ use crate::equity::build_contracts::build_eq_contracts_from_json;
 use crate::equity::handle_equity_contracts::handle_equity_contract;
 use crate::equity::local_vol::LocalVol;
 use crate::equity::option_chain::{implied_vol_surface_from_chain, FilterConfig, OptionChain};
-use crate::utils::plot3d::{self, linspace, GreekSurface, Labels};
 use crate::equity::portfolio::EquityPortfolio;
+use crate::equity::sabr::SabrSurfaceFit;
+use crate::equity::svi::SviSurfaceFit;
+use crate::equity::usability::{usability_report, UsabilityConfig};
 use crate::equity::vanilla_option::EquityOption;
+use crate::utils::plot3d::{self, linspace, GreekSurface, Labels};
 use anyhow::{bail, Context, Result};
 use chrono::Local;
 use std::fs;
@@ -233,16 +236,24 @@ fn build_chain_surface(
             implied
         }
     };
+    let numeric_note = "clamped to [1%, 300%]; wings and short times lean on numerical \
+                        derivatives of the interpolated implied surface — trust the interior";
+    let raw_local_vol = LocalVol::new(&surface, &curve, spot, 0.0, 0.0);
     write_local_vol_artifacts(
         &surface,
-        &curve,
+        &|level, t| raw_local_vol.vol_checked(level, t),
         spot,
+        &curve,
         &discount_meta,
         chain,
         output_folder,
-        "local_vol",
-        &format!("{} Dupire local vol \u{2014} {}", chain.symbol, chain.as_of),
-        "the as-quoted implied surface",
+        &LocalVolSpec {
+            stem: "local_vol",
+            title: &format!("{} Dupire local vol \u{2014} {}", chain.symbol, chain.as_of),
+            model: "Dupire local volatility",
+            derived_from: "the as-quoted implied surface",
+            note: numeric_note,
+        },
     )?;
 
     // cleaned versions: minimal-change static-arbitrage repair (convex
@@ -295,20 +306,114 @@ fn build_chain_surface(
         ),
         "Cleaned volatility surface",
     )?;
+    let cleaned_local_vol = LocalVol::new(&cleaned, &curve, spot, 0.0, 0.0);
     write_local_vol_artifacts(
         &cleaned,
-        &curve,
+        &|level, t| cleaned_local_vol.vol_checked(level, t),
         spot,
+        &curve,
         &discount_meta,
         chain,
         output_folder,
-        "local_vol_cleaned",
-        &format!(
-            "{} Dupire local vol (arbitrage-repaired) \u{2014} {}",
-            chain.symbol, chain.as_of
-        ),
-        "the arbitrage-repaired implied surface",
+        &LocalVolSpec {
+            stem: "local_vol_cleaned",
+            title: &format!(
+                "{} Dupire local vol (arbitrage-repaired) \u{2014} {}",
+                chain.symbol, chain.as_of
+            ),
+            model: "Dupire local volatility",
+            derived_from: "the arbitrage-repaired implied surface",
+            note: numeric_note,
+        },
     )?;
+
+    // third flavor: the SVI smoother, fitted to the cleaned smiles —
+    // C^2 in strike, so its Dupire local vol is analytic and smooth
+    match SviSurfaceFit::fit(&cleaned, forward_of) {
+        Ok(fit) => {
+            let sampled = fit.to_vol_surface(61).map_err(RustyQLibError::from)?;
+            let poorly_fit = fit.slices.iter().filter(|s| s.rmse > 0.005).count();
+            let arbitrage_slices = fit.slices.iter().filter(|s| s.min_g < 0.0).count();
+            if poorly_fit + arbitrage_slices > 0 {
+                log::warn!(
+                    "SVI fit: {poorly_fit} slices with vol RMSE above 50 bps, \
+                     {arbitrage_slices} with negative butterfly g in the quoted range \
+                     — see the fit metadata"
+                );
+            }
+            let mut svi_meta = report.to_metadata(chain);
+            svi_meta["discount"] = discount_meta.clone();
+            svi_meta["svi_fit"] = fit.metadata();
+            svi_meta["diagnostics"] = sampled.diagnostics(forward_of).to_metadata();
+            write_surface_artifacts(
+                &sampled,
+                svi_meta,
+                output_folder,
+                "vol_surface_svi",
+                &format!(
+                    "{} implied vol (SVI fit) \u{2014} {}",
+                    chain.symbol, chain.as_of
+                ),
+                "SVI volatility surface",
+            )?;
+            write_local_vol_artifacts(
+                &sampled,
+                &|level, t| fit.local_vol_checked(level, t),
+                spot,
+                &curve,
+                &discount_meta,
+                chain,
+                output_folder,
+                &LocalVolSpec {
+                    stem: "local_vol_svi",
+                    title: &format!(
+                        "{} Dupire local vol (SVI fit) \u{2014} {}",
+                        chain.symbol, chain.as_of
+                    ),
+                    model: "Dupire local volatility (analytic on the per-expiry SVI fit)",
+                    derived_from: "the SVI fit of the arbitrage-repaired surface",
+                    note: "clamped to [1%, 300%]; Gatheral's formula with closed-form SVI \
+                           derivatives — smooth by construction inside the quoted region",
+                },
+            )?;
+        }
+        Err(e) => log::warn!("SVI fit skipped: {e}"),
+    }
+
+    // fourth flavor: the SABR smoother (Hagan lognormal, beta = 1 — the
+    // equity backbone convention), also fitted to the cleaned smiles:
+    // three parameters per expiry, wings extrapolated by the model's
+    // dynamics rather than a spline
+    match SabrSurfaceFit::fit(&cleaned, forward_of, 1.0) {
+        Ok(fit) => {
+            let sampled = fit.to_vol_surface(61).map_err(RustyQLibError::from)?;
+            let poorly_fit = fit.slices.iter().filter(|s| s.rmse > 0.005).count();
+            let arbitrage_slices = fit.slices.iter().filter(|s| s.min_g < 0.0).count();
+            if poorly_fit + arbitrage_slices > 0 {
+                log::warn!(
+                    "SABR fit: {poorly_fit} slices with vol RMSE above 50 bps, \
+                     {arbitrage_slices} with negative butterfly g in the quoted range \
+                     — see the fit metadata"
+                );
+            }
+            let mut sabr_meta = report.to_metadata(chain);
+            sabr_meta["discount"] = discount_meta.clone();
+            sabr_meta["sabr_fit"] = fit.metadata();
+            sabr_meta["diagnostics"] = sampled.diagnostics(forward_of).to_metadata();
+            write_surface_artifacts(
+                &sampled,
+                sabr_meta,
+                output_folder,
+                "vol_surface_sabr",
+                &format!(
+                    "{} implied vol (SABR fit, beta = 1) \u{2014} {}",
+                    chain.symbol, chain.as_of
+                ),
+                "SABR volatility surface",
+            )?;
+        }
+        Err(e) => log::warn!("SABR fit skipped: {e}"),
+    }
     Ok(())
 }
 
@@ -325,7 +430,12 @@ fn write_surface_artifacts(
     let document = surface.to_document(Some(metadata));
     let rendered =
         serde_json::to_string_pretty(&document).context("failed to serialize the surface")?;
-    let json_path = save_to_file(output_folder, "vol_surface", &format!("{stem}.json"), &rendered)?;
+    let json_path = save_to_file(
+        output_folder,
+        "vol_surface",
+        &format!("{stem}.json"),
+        &rendered,
+    )?;
     saved_note(label, &json_path);
     let html = plot3d::vol_surface_html(surface, title);
     let html_path = save_to_file(output_folder, "vol_surface", &format!("{stem}.html"), &html)?;
@@ -333,46 +443,84 @@ fn write_surface_artifacts(
     Ok(())
 }
 
-/// Calibrate Dupire local vol from `surface`, sample it, and write the
-/// grid document plus 3-D plot under
+/// Naming and provenance for one local-vol artifact pair.
+struct LocalVolSpec<'a> {
+    stem: &'a str,
+    title: &'a str,
+    model: &'a str,
+    derived_from: &'a str,
+    note: &'a str,
+}
+
+/// Sample the instrumented `local_vol(level, t) -> (vol, guard_fired)`
+/// over the axes implied by `axes_surface`, attach the usability report
+/// (round-trip repricing, clamp/fallback fractions, trusted region),
+/// and write the grid document plus 3-D plot under
 /// `output_folder/local_vol/<stem>.{json,html}`.
 #[allow(clippy::too_many_arguments)]
 fn write_local_vol_artifacts(
-    surface: &VolSurface,
-    curve: &YieldCurve,
+    axes_surface: &VolSurface,
+    local_vol: &dyn Fn(f64, f64) -> (f64, bool),
     spot: f64,
+    curve: &YieldCurve,
     discount_meta: &serde_json::Value,
     chain: &OptionChain,
     output_folder: &Path,
-    stem: &str,
-    title: &str,
-    derived_from: &str,
+    spec: &LocalVolSpec,
 ) -> Result<()> {
-    let local_vol = LocalVol::new(surface, curve, spot, 0.0, 0.0);
-    let (levels, times) = local_vol_axes(surface);
-    let vols = local_vol.grid(&levels, &times);
+    let (levels, times) = local_vol_axes(axes_surface);
+    let vols: Vec<Vec<f64>> = levels
+        .iter()
+        .map(|&level| times.iter().map(|&t| local_vol(level, t).0).collect())
+        .collect();
+    let usability = usability_report(
+        axes_surface,
+        local_vol,
+        &levels,
+        &times,
+        curve,
+        spot,
+        &UsabilityConfig::default(),
+    );
+    if !usability.within_desk_tolerance {
+        log::warn!(
+            "{}: outside desk tolerance (round trip mean {:.1} / max {:.1} vol bps, \
+             {:.1}% clamped, {:.1}% guard fallbacks)",
+            spec.stem,
+            usability.roundtrip.mean_vol_bps,
+            usability.roundtrip.max_vol_bps,
+            usability.clamped_fraction * 100.0,
+            usability.fallback_fraction * 100.0
+        );
+    }
     let document = serde_json::json!({
         "metadata": {
-            "model": "Dupire local volatility",
+            "model": spec.model,
             "derived_from": {
                 "symbol": chain.symbol,
                 "as_of": chain.as_of.to_string(),
-                "surface": derived_from,
+                "surface": spec.derived_from,
             },
             "spot": spot,
             "dividend_yield": 0.0,
             "discount": discount_meta,
             "grid": "vols[i][j] = local vol at levels[i], times[j] (years, Act/365)",
-            "note": "clamped to [1%, 300%]; wings and short times lean on numerical \
-                     derivatives of the interpolated implied surface — trust the interior",
+            "note": spec.note,
+            "usability": serde_json::to_value(&usability)
+                .context("failed to serialize the usability report")?,
         },
         "levels": &levels,
         "times": &times,
         "vols": &vols,
     });
-    let rendered =
-        serde_json::to_string_pretty(&document).context("failed to serialize the local vol grid")?;
-    let json_path = save_to_file(output_folder, "local_vol", &format!("{stem}.json"), &rendered)?;
+    let rendered = serde_json::to_string_pretty(&document)
+        .context("failed to serialize the local vol grid")?;
+    let json_path = save_to_file(
+        output_folder,
+        "local_vol",
+        &format!("{}.json", spec.stem),
+        &rendered,
+    )?;
     saved_note("Local vol grid", &json_path);
     let sampled = GreekSurface {
         xs: levels,
@@ -380,7 +528,7 @@ fn write_local_vol_artifacts(
         z: vols,
     };
     let labels = Labels {
-        title,
+        title: spec.title,
         x: "underlying level",
         y: "time (years)",
         z: "local vol",
@@ -388,7 +536,7 @@ fn write_local_vol_artifacts(
     let html_path = save_to_file(
         output_folder,
         "local_vol",
-        &format!("{stem}.html"),
+        &format!("{}.html", spec.stem),
         &plot3d::surface_html(&sampled, &labels),
     )?;
     saved_note("Local vol plot", &html_path);

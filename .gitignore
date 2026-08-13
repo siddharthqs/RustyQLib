@@ -7,6 +7,8 @@ Cargo.lock
 /book
 # working notes and todo lists — not part of the published library
 /docs
+# broker connectivity prototype (IBKR) — private for now, quantdesk-bound
+/broker
 
 # editor backup files
 *~

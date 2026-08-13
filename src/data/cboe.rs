@@ -133,17 +133,13 @@ pub fn chain_from_value(value: &serde_json::Value) -> Result<OptionChain, RustyQ
         .or(value["symbol"].as_str())
         .unwrap_or_default()
         .to_string();
-    let spot = value["data"]["current_price"]
-        .as_f64()
-        .filter(|p| *p > 0.0);
+    let spot = value["data"]["current_price"].as_f64().filter(|p| *p > 0.0);
 
     let records = value["data"]["options"].as_array().expect("checked above");
     let mut quotes = Vec::with_capacity(records.len());
     let mut unparsed = 0usize;
     for record in records {
-        let Some((_, expiry, right, strike)) =
-            record["option"].as_str().and_then(parse_occ)
-        else {
+        let Some((_, expiry, right, strike)) = record["option"].as_str().and_then(parse_occ) else {
             unparsed += 1;
             continue;
         };
@@ -300,7 +296,11 @@ mod tests {
     fn live_feed_still_parses() {
         let text = fetch("AAPL").expect("fetch failed");
         let chain = to_chain(&text).expect("normalize failed");
-        assert!(chain.quotes.len() > 100, "only {} quotes", chain.quotes.len());
+        assert!(
+            chain.quotes.len() > 100,
+            "only {} quotes",
+            chain.quotes.len()
+        );
         assert!(chain.spot.is_some());
         to_document(&text, "AAPL").expect("document failed");
     }

@@ -14,8 +14,8 @@ use crate::core::vols::VolSurface;
 use crate::equity::barrier::BarrierPayoff;
 use crate::equity::blackscholes;
 use crate::equity::bump::BumpedMarket;
-use crate::equity::heston;
 use crate::equity::utils::{LongShort, Model, Payoff, PayoffType, PricingEngine};
+use crate::equity::{heston, sabr};
 use crate::equity::{baw, binomial, bjerksund_stensland, finite_difference, greeks, montecarlo};
 use blackscholes::BlackScholesPricer;
 use chrono::NaiveDate;
@@ -140,6 +140,15 @@ impl EquityOption {
         match &self.model {
             Model::RBergomi(rp) => rp,
             _ => unreachable!("rBergomi code path reached on a non-rBergomi model"),
+        }
+    }
+
+    /// SABR parameters. Invariant: only called on SABR-model code paths
+    /// (the model dispatch guarantees it).
+    pub(crate) fn sabr_params(&self) -> &crate::equity::sabr::SabrParams {
+        match &self.model {
+            Model::Sabr(sp) => sp,
+            _ => unreachable!("SABR code path reached on a non-SABR model"),
         }
     }
 
@@ -413,6 +422,35 @@ impl EquityOption {
                 );
             }
         }
+        if self.model.is_sabr() {
+            if !matches!(
+                self.engine,
+                PricingEngine::BlackScholes | PricingEngine::MonteCarlo(_)
+            ) {
+                return unsupported(
+                    "The SABR model prices on the Analytical engine (Hagan implied vol \
+                     into the Black-Scholes closed forms) and on MonteCarlo (two-factor \
+                     path simulation), not on lattice or PDE engines",
+                );
+            }
+            if matches!(self.engine, PricingEngine::BlackScholes)
+                && !matches!(
+                    self.payoff.payoff_kind(),
+                    PayoffType::Vanilla | PayoffType::Binary
+                )
+            {
+                return unsupported(
+                    "The SABR analytic pricer covers vanilla and binary payoffs; \
+                     use MonteCarlo for path-dependent payoffs",
+                );
+            }
+            if american {
+                return unsupported(
+                    "SABR supports European exercise only: the (forward, alpha) LSMC \
+                     regression basis is not implemented",
+                );
+            }
+        }
         let heston = self.model.is_heston();
         if heston && matches!(self.engine, PricingEngine::Binomial(_)) {
             return unsupported(
@@ -471,6 +509,7 @@ impl Instrument for EquityOption {
         let heston = self.model.is_heston();
         Ok(match self.engine {
             PricingEngine::BlackScholes if heston => heston::analytic_npv(self, None),
+            PricingEngine::BlackScholes if self.model.is_sabr() => sabr::analytic_npv(self, None),
             PricingEngine::BlackScholes => BlackScholesPricer::new().npv(self),
             PricingEngine::MonteCarlo(_) => montecarlo::npv(self, None),
             PricingEngine::Binomial(_) => binomial::npv(self, None),
@@ -504,6 +543,11 @@ impl EquityOption {
             self.engine,
             PricingEngine::BlackScholes | PricingEngine::Binomial(_)
         ) && self.model.is_heston()
+    }
+    /// Analytical engine with SABR dynamics: Hagan implied vol into the
+    /// Black-Scholes closed forms.
+    pub(crate) fn analytic_sabr(&self) -> bool {
+        matches!(self.engine, PricingEngine::BlackScholes) && self.model.is_sabr()
     }
     pub fn delta(&self) -> f64 {
         greeks::delta(self)
@@ -573,6 +617,7 @@ impl EquityOption {
             PricingEngine::BaroneAdesiWhaley => baw::npv(self, Some(m)),
             PricingEngine::BjerksundStensland => bjerksund_stensland::npv(self, Some(m)),
             _ if self.analytic_heston() => heston::analytic_npv(self, Some(m)),
+            _ if self.analytic_sabr() => sabr::analytic_npv(self, Some(m)),
             PricingEngine::Binomial(_) => binomial::npv(self, Some(m)),
             _ => BlackScholesPricer::price_bumped(self, m),
         }

@@ -36,6 +36,7 @@ pub use engines::{
     heston_adi, montecarlo,
 };
 pub use models::{
-    bates, heston, local_vol, processes, rbergomi, slv, surface_repair, svi, vol_surface,
+    bates, heston, local_vol, processes, rbergomi, sabr, slv, surface_repair, svi, usability,
+    vol_surface,
 };
 pub use service::{build_contracts, handle_equity_contracts};

@@ -2715,6 +2715,157 @@ mod tests {
         assert!(am - european < 3.0, "american={am} european={european}");
     }
 
+    // ── SABR stochastic vol ─────────────────────────────────────────────
+
+    fn sabr_option(payoff: Box<dyn Payoff>) -> EquityOption {
+        let mut option = test_option_with(payoff, flat_5pct());
+        option.market.dividend_yield = 0.02;
+        option.model = crate::equity::utils::Model::Sabr(crate::equity::sabr::SabrParams {
+            alpha: 0.25,
+            beta: 1.0,
+            rho: -0.5,
+            nu: 0.4,
+        });
+        option
+    }
+
+    fn sabr_vanilla(pc: PutOrCall) -> EquityOption {
+        sabr_option(Box::new(VanillaPayoff {
+            put_or_call: pc,
+            exercise_style: ContractStyle::European,
+        }))
+    }
+
+    #[test]
+    fn sabr_mc_matches_the_hagan_analytic_price() {
+        // the MC simulates the true two-factor dynamics; the analytic
+        // route prices at Hagan's expanded vol — they must agree up to
+        // sampler noise plus the expansion's own O(t) accuracy
+        for pc in [PutOrCall::Call, PutOrCall::Put] {
+            let analytic = sabr_vanilla(pc).npv();
+            let mut mc = sabr_vanilla(pc);
+            mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            mc.mc_cfg_mut().paths = 100_000;
+            let mc_price = mc.npv();
+            assert!(
+                (mc_price - analytic).abs() < 0.15,
+                "{pc:?}: mc={mc_price} analytic={analytic}"
+            );
+        }
+    }
+
+    #[test]
+    fn sabr_smile_prices_otm_puts_above_flat_black_scholes() {
+        // negative rho fattens the left tail relative to the ATM-vol
+        // lognormal, so the OTM put must be worth more than flat BS at
+        // the model's own ATM vol
+        let mut put = sabr_vanilla(PutOrCall::Put);
+        put.base.strike_price = 80.0;
+        let sabr = put.npv();
+        let sp = crate::equity::sabr::SabrParams {
+            alpha: 0.25,
+            beta: 1.0,
+            rho: -0.5,
+            nu: 0.4,
+        };
+        let forward = put.forward_price();
+        let atm_vol = sp.vol(forward, forward, put.time_to_maturity());
+        let flat = bs_price(
+            put.effective_spot(),
+            80.0,
+            put.risk_free_rate(),
+            put.carry_yield(),
+            atm_vol,
+            put.time_to_maturity(),
+            PutOrCall::Put,
+        );
+        assert!(sabr > flat, "sabr={sabr} flat={flat}");
+    }
+
+    #[test]
+    fn sabr_binary_mc_matches_the_smile_corrected_analytic() {
+        // the digital's smile correction (-vega * dsigma/dK) is what
+        // makes the analytic route agree with the simulated exercise
+        // probability under the true dynamics
+        let binary = |engine: Engine| {
+            let mut option = sabr_option(Box::new(BinaryPayoff {
+                put_or_call: PutOrCall::Call,
+                exercise_style: ContractStyle::European,
+                binary_type: BinaryType::CashOrNothing,
+                cash: 1.0,
+            }));
+            option.engine = crate::equity::utils::PricingEngine::from_kind(engine);
+            option
+        };
+        let analytic = binary(Engine::BlackScholes).npv();
+        let mut mc = binary(Engine::MonteCarlo);
+        mc.mc_cfg_mut().paths = 200_000;
+        let mc_price = mc.npv();
+        assert!(
+            (mc_price - analytic).abs() < 0.015,
+            "mc={mc_price} analytic={analytic}"
+        );
+        // and the correction moves the digital the right way: with
+        // negative skew the corrected call digital exceeds plain N(d2)
+        let option = binary(Engine::BlackScholes);
+        let sigma_k = crate::equity::sabr::SabrParams {
+            alpha: 0.25,
+            beta: 1.0,
+            rho: -0.5,
+            nu: 0.4,
+        }
+        .vol(option.forward_price(), 100.0, option.time_to_maturity());
+        let s = option.effective_spot();
+        let t = option.time_to_maturity();
+        let (r, q) = (option.risk_free_rate(), option.carry_yield());
+        let d2 = ((s / 100.0_f64).ln() + (r - q - 0.5 * sigma_k * sigma_k) * t)
+            / (sigma_k * t.sqrt());
+        let plain = (-r * t).exp() * norm_cdf(d2);
+        assert!(analytic > plain, "corrected={analytic} plain={plain}");
+    }
+
+    #[test]
+    fn sabr_greeks_are_sane_for_a_vanilla_call() {
+        let call = sabr_vanilla(PutOrCall::Call);
+        let delta = call.delta();
+        assert!((0.3..0.9).contains(&delta), "delta={delta}");
+        assert!(call.gamma() > 0.0);
+        assert!(call.vega() > 0.0);
+        assert!(call.theta() < 0.0);
+        // vega is per unit vol: close to the flat-BS vega scale
+        assert!((20.0..60.0).contains(&call.vega()), "vega={}", call.vega());
+    }
+
+    #[test]
+    fn sabr_engine_rules_are_enforced() {
+        // lattice and PDE engines reject SABR
+        for engine in [Engine::Binomial, Engine::FiniteDifference] {
+            let mut option = sabr_vanilla(PutOrCall::Call);
+            option.engine = crate::equity::utils::PricingEngine::from_kind(engine.clone());
+            assert!(option.try_npv().is_err(), "{engine:?} must reject SABR");
+        }
+        // American exercise rejects SABR on every engine
+        let mut american = sabr_option(Box::new(VanillaPayoff {
+            put_or_call: PutOrCall::Put,
+            exercise_style: ContractStyle::American,
+        }));
+        american.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        assert!(american.try_npv().is_err());
+        // path-dependent payoffs reject the analytic engine but price on MC
+        let mut asian = sabr_option(Box::new(AsianPayoff {
+            put_or_call: PutOrCall::Call,
+            exercise_style: ContractStyle::European,
+            averaging: crate::equity::asian::AveragingType::Arithmetic,
+            strike_type: crate::equity::asian::AsianStrikeType::FixedStrike,
+        }));
+        assert!(asian.try_npv().is_err());
+        asian.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+        asian.mc_cfg_mut().paths = 20_000;
+        let asian_price = asian.npv();
+        let vanilla = sabr_vanilla(PutOrCall::Call).npv();
+        assert!(asian_price > 0.0 && asian_price < vanilla);
+    }
+
     // ── Borrow cost and dividends ───────────────────────────────────────
 
     #[test]

@@ -94,6 +94,16 @@ pub struct BuiltBond {
     pub settlement: NaiveDate,
 }
 
+/// Default settlement lag by instrument: T+2 for corporates, T+1 for
+/// Treasuries and bills.
+fn default_settlement_days(bond_data: &BondData) -> i64 {
+    if bond_data.instrument == "Corporate" {
+        2
+    } else {
+        1
+    }
+}
+
 /// Trade context (valuation date, T+n settlement on the SIFMA calendar)
 /// shared by bonds and bills.
 fn trade_context(
@@ -104,7 +114,9 @@ fn trade_context(
         Some(s) => resolve_date(s, today)?,
         None => today,
     };
-    let settlement_days = bond_data.settlement_days.unwrap_or(1);
+    let settlement_days = bond_data
+        .settlement_days
+        .unwrap_or_else(|| default_settlement_days(bond_data));
     if settlement_days < 0 {
         return Err(RustyQLibError::invalid_input(
             "settlement_days",
@@ -131,6 +143,8 @@ pub fn build_bond(bond_data: &BondData, today: NaiveDate) -> Result<BuiltBond, R
     };
     let day_count = match &bond_data.day_count {
         Some(s) => parse_day_count(s)?,
+        // corporates accrue 30/360; Treasuries Act/Act ICMA
+        None if bond_data.instrument == "Corporate" => DayCountConvention::Thirty360,
         None => DayCountConvention::ActActIcma,
     };
     let end_of_month = is_end_of_month(maturity_date);
@@ -150,7 +164,9 @@ pub fn build_bond(bond_data: &BondData, today: NaiveDate) -> Result<BuiltBond, R
         day_count,
         Calendar::UsGovernmentBond,
         BusinessDayConvention::Following,
-        bond_data.settlement_days.unwrap_or(1),
+        bond_data
+            .settlement_days
+            .unwrap_or_else(|| default_settlement_days(bond_data)),
         end_of_month,
     )?;
     Ok(BuiltBond {

@@ -22,6 +22,9 @@
 //! - `data` *(feature `fetch`)* — free official end-of-day market data:
 //!   the US Treasury daily par yield curve, passed through as published
 //!   with provenance metadata
+//! - [`validation`] — runtime model-validation checks (martingale
+//!   forward recovery, surface diagnostics, local-vol usability) that
+//!   measure model quality on given data and ship as reports
 //! - [`utils`] — random number generation, stochastic processes and the
 //!   JSON/CLI plumbing used by the `rustyqlib` binary
 //!
@@ -40,10 +43,13 @@ pub mod equity;
 pub mod rates;
 pub mod risk;
 pub mod utils;
+pub mod validation;
 
 pub use crate::bonds::{
-    bootstrap_curve, conversion_factor, BillQuote, BondFuture, BondQuote, CurveInstrument,
-    DeliverableBond, Deposit, FactorRounding, FixedRateBond, Fra, Frequency, TreasuryBill,
+    bootstrap_credit_curve, bootstrap_curve, conversion_factor, g_spread, BillQuote, BondFuture,
+    BondOptionality, BondQuote, CallOption, CreditCurve, CurveInstrument, DeliverableBond, Deposit,
+    FactorRounding, FixedRateBond, FloatingRateNote, Fra, Frequency, MakeWholeCall, PutOption,
+    TreasuryBill,
 };
 pub use crate::core::calendar::{
     BusinessDayConvention, Calendar, DateGeneration, Period, Schedule,
@@ -68,6 +74,8 @@ pub use crate::equity::option_chain::{
 };
 pub use crate::equity::surface_repair::{repair_arbitrage, RepairReport};
 pub use crate::rates::{
-    BasisSwap, BasisSwapLeg, FedFundsFuture, OvernightIndexSwap, PayerReceiver, RateFixings,
-    SofrContract, SofrFuture, VanillaSwap,
+    BasisSwap, BasisSwapLeg, CoxIngersollRoss, FedFundsFuture, HullWhite, OneFactorAffine,
+    OvernightIndexSwap, PayerReceiver, RateFixings, ShortRateModel, SofrContract, SofrFuture,
+    VanillaSwap, Vasicek,
 };
+pub use crate::validation::martingale::{martingale_report, MartingaleConfig, MartingaleReport};

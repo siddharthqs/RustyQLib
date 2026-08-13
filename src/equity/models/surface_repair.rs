@@ -278,8 +278,7 @@ mod tests {
 
     fn strike_surface(expiries: &[f64], smiles: &[Vec<(f64, f64)>]) -> VolSurface {
         let tenors: Vec<Tenor> = expiries.iter().map(|&t| Tenor::YearFraction(t)).collect();
-        VolSurface::from_strike_smiles(&tenors, smiles, asof(), DayCountConvention::Act365)
-            .unwrap()
+        VolSurface::from_strike_smiles(&tenors, smiles, asof(), DayCountConvention::Act365).unwrap()
     }
 
     #[test]

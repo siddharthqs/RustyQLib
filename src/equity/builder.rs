@@ -974,6 +974,10 @@ impl EquityOptionBuilder {
         self.model = Model::RBergomi(params);
         self
     }
+    pub fn sabr(mut self, params: crate::equity::sabr::SabrParams) -> Self {
+        self.model = Model::Sabr(params);
+        self
+    }
     pub fn mc_config(mut self, cfg: MonteCarloConfig) -> Self {
         self.mc = cfg;
         self
@@ -1158,6 +1162,7 @@ impl EquityOptionBuilder {
         match &self.model {
             Model::Heston(params) => params.validate()?,
             Model::RBergomi(params) => params.validate()?,
+            Model::Sabr(params) => params.validate()?,
             Model::Gbm | Model::LocalVol => {}
         }
 

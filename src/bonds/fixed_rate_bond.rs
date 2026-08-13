@@ -37,7 +37,14 @@ pub struct Cashflow {
     pub amount: f64,
 }
 
-/// A fixed-rate bullet bond.
+/// A fixed-rate bond: bullet by default, with optional step-up
+/// coupons ([`with_coupon_steps`](FixedRateBond::with_coupon_steps))
+/// and a sinking fund
+/// ([`with_sinking_fund`](FixedRateBond::with_sinking_fund)).
+///
+/// Prices, accrued and yields are quoted per 100 of the **outstanding**
+/// face at settlement (the factor-adjusted trading convention); for a
+/// bullet that is simply per 100 face.
 #[derive(Debug, Clone)]
 pub struct FixedRateBond {
     pub face_value: f64,
@@ -56,6 +63,12 @@ pub struct FixedRateBond {
     /// Snap all coupon dates to month-ends (bonds maturing on one).
     pub end_of_month: bool,
     schedule: CouponSchedule,
+    /// `(from_date, annual_rate)` coupon steps: from each date the rate
+    /// applying to periods **starting** on or after it. Empty = flat.
+    coupon_steps: Vec<(NaiveDate, f64)>,
+    /// `(coupon_date, fraction_of_original_face)` sinking-fund
+    /// redemptions; the remainder redeems at maturity. Empty = bullet.
+    sinking_fund: Vec<(NaiveDate, f64)>,
 }
 
 /// One coupon accrual period with its ICMA reference period.
@@ -77,6 +90,22 @@ struct Flow {
     tau: f64,
     /// Absolute amount (redemption folded into the last flow).
     amount: f64,
+}
+
+/// One entry of a call schedule: the issuer may redeem on `call_date`
+/// at `call_price` per 100 face (plus accrued).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CallOption {
+    pub call_date: NaiveDate,
+    pub call_price: f64,
+}
+
+/// One entry of a put schedule: the holder may demand redemption on
+/// `put_date` at `put_price` per 100 face (plus accrued).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PutOption {
+    pub put_date: NaiveDate,
+    pub put_price: f64,
 }
 
 impl FixedRateBond {
@@ -124,7 +153,120 @@ impl FixedRateBond {
             settlement_days,
             end_of_month,
             schedule,
+            coupon_steps: Vec::new(),
+            sinking_fund: Vec::new(),
         })
+    }
+
+    /// Add step-up (or step-down) coupons: from each `(date, rate)` the
+    /// annual rate applying to coupon periods **starting** on or after
+    /// that date (the rate of a period is set at its start, so a step
+    /// inside a period takes effect from the next one).
+    pub fn with_coupon_steps(mut self, steps: &[(NaiveDate, f64)]) -> Result<Self, RustyQLibError> {
+        for &(date, rate) in steps {
+            if !rate.is_finite() || rate < 0.0 {
+                return Err(RustyQLibError::invalid_input(
+                    "coupon_steps",
+                    format!("step rates must be non-negative, got {rate} at {date}"),
+                ));
+            }
+            if date <= self.dated_date || date >= self.maturity_date {
+                return Err(RustyQLibError::invalid_input(
+                    "coupon_steps",
+                    format!(
+                        "step date {date} must lie strictly between the dated date and maturity"
+                    ),
+                ));
+            }
+        }
+        if steps.windows(2).any(|w| w[1].0 <= w[0].0) {
+            return Err(RustyQLibError::invalid_input(
+                "coupon_steps",
+                "step dates must be strictly increasing",
+            ));
+        }
+        self.coupon_steps = steps.to_vec();
+        Ok(self)
+    }
+
+    /// Add a sinking fund: on each `(coupon_date, fraction)` the issuer
+    /// repays that fraction of the **original** face; the remainder
+    /// redeems at maturity. Redemption dates must be scheduled coupon
+    /// dates before maturity, and the fractions must sum to at most 1.
+    pub fn with_sinking_fund(
+        mut self,
+        redemptions: &[(NaiveDate, f64)],
+    ) -> Result<Self, RustyQLibError> {
+        let mut total = 0.0;
+        for &(date, fraction) in redemptions {
+            if !fraction.is_finite() || fraction <= 0.0 {
+                return Err(RustyQLibError::invalid_input(
+                    "sinking_fund",
+                    format!("fractions must be positive, got {fraction} at {date}"),
+                ));
+            }
+            if date >= self.maturity_date || !self.schedule.dates.contains(&date) {
+                return Err(RustyQLibError::invalid_input(
+                    "sinking_fund",
+                    format!(
+                        "redemption date {date} must be a scheduled coupon date before maturity"
+                    ),
+                ));
+            }
+            total += fraction;
+        }
+        if redemptions.windows(2).any(|w| w[1].0 <= w[0].0) {
+            return Err(RustyQLibError::invalid_input(
+                "sinking_fund",
+                "redemption dates must be strictly increasing",
+            ));
+        }
+        if total > 1.0 + 1e-12 {
+            return Err(RustyQLibError::invalid_input(
+                "sinking_fund",
+                format!("redemption fractions sum to {total}, above the face"),
+            ));
+        }
+        self.sinking_fund = redemptions.to_vec();
+        Ok(self)
+    }
+
+    /// The annual coupon rate applying to a period starting at `date`.
+    fn rate_for(&self, date: NaiveDate) -> f64 {
+        self.coupon_steps
+            .iter()
+            .rev()
+            .find(|&&(from, _)| from <= date)
+            .map_or(self.coupon_rate, |&(_, rate)| rate)
+    }
+
+    /// Outstanding face after all sinking-fund payments on or before
+    /// `date` (the factor times the original face).
+    pub fn outstanding_face(&self, date: NaiveDate) -> f64 {
+        let repaid: f64 = self
+            .sinking_fund
+            .iter()
+            .filter(|&&(d, _)| d <= date)
+            .map(|&(_, fraction)| fraction)
+            .sum();
+        self.face_value * (1.0 - repaid).max(0.0)
+    }
+
+    /// Principal repaid at a scheduled coupon date (absolute): the sink
+    /// amount, plus the remaining outstanding when the date is maturity.
+    fn principal_at(&self, coupon_date: NaiveDate) -> f64 {
+        let sink: f64 = self
+            .sinking_fund
+            .iter()
+            .filter(|&&(d, _)| d == coupon_date)
+            .map(|&(_, fraction)| fraction * self.face_value)
+            .sum();
+        if coupon_date == self.maturity_date {
+            let repaid: f64 = self.sinking_fund.iter().map(|&(_, f)| f).sum();
+            sink + self.face_value * (1.0 - repaid).max(0.0)
+        } else {
+            sink
+        }
     }
 
     /// A US Treasury note/bond: semiannual Act/Act ICMA coupons on the
@@ -151,6 +293,29 @@ impl FixedRateBond {
         )
     }
 
+    /// A US investment-grade corporate bond: semiannual 30/360 coupons,
+    /// T+2 settlement on the bond-market calendar, payments rolled
+    /// forward, end-of-month rule when maturity is a month-end.
+    pub fn us_corporate(
+        face_value: f64,
+        coupon_rate: f64,
+        dated_date: NaiveDate,
+        maturity_date: NaiveDate,
+    ) -> Result<Self, RustyQLibError> {
+        Self::new(
+            face_value,
+            coupon_rate,
+            Frequency::Semiannual,
+            dated_date,
+            maturity_date,
+            DayCountConvention::Thirty360,
+            Calendar::UsGovernmentBond,
+            BusinessDayConvention::Following,
+            2,
+            is_end_of_month(maturity_date),
+        )
+    }
+
     /// Scheduled (unadjusted) coupon dates, ending at maturity.
     pub fn coupon_dates(&self) -> &[NaiveDate] {
         &self.schedule.dates
@@ -166,15 +331,10 @@ impl FixedRateBond {
     /// redemption of `face_value`.
     pub fn cashflows(&self) -> Vec<Cashflow> {
         let periods = self.periods();
-        let n = periods.len();
         periods
             .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let mut amount = self.coupon_amount(p);
-                if i == n - 1 {
-                    amount += self.face_value;
-                }
+            .map(|p| {
+                let amount = self.coupon_amount(p) + self.principal_at(p.end);
                 Cashflow {
                     accrual_start: p.start,
                     accrual_end: p.end,
@@ -208,7 +368,7 @@ impl FixedRateBond {
             period.end,
             self.frequency.per_year(),
         );
-        Ok(100.0 * self.coupon_rate * fraction)
+        Ok(100.0 * self.rate_for(period.start) * fraction)
     }
 
     // ── Yield analytics (street convention) ─────────────────────────────
@@ -221,7 +381,7 @@ impl FixedRateBond {
         settlement: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
         let flows = self.remaining_flows(settlement)?;
-        Ok(self.per_100(self.pv_flows(&flows, yield_rate)?))
+        Ok(self.pv_flows(&flows, yield_rate)? * 100.0 / self.outstanding_face(settlement))
     }
 
     /// Clean (quoted) price per 100 face: dirty minus accrued.
@@ -242,34 +402,55 @@ impl FixedRateBond {
         settlement: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
         let target_dirty = clean_price + self.accrued_interest(settlement)?;
-        if !target_dirty.is_finite() || target_dirty <= 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "bond",
-                format!("dirty price must be positive, got {target_dirty}"),
-            ));
-        }
         let flows = self.remaining_flows(settlement)?;
-        let f = self.frequency.per_year() as f64;
-        // g(y) = target - dirty(y) is increasing in y; bracket wide:
-        // y > -f keeps 1 + y/f positive.
-        let (lo, hi) = (-0.99 * f, 10.0);
-        let g = |y: f64| {
-            target_dirty
-                - self.per_100(
-                    self.pv_flows(&flows, y)
-                        .expect("bracket keeps 1 + y/f positive"),
-                )
-        };
-        let dg = |y: f64| -self.per_100(self.dpv_dy(&flows, y));
-        let root = Solver1d::new(1e-10, 100).newton_safeguarded(g, dg, lo, hi, self.coupon_rate);
-        if !root.converged {
-            return Err(RustyQLibError::CalibrationFailed {
-                iterations: root.iterations,
-                residual: g(root.x).abs(),
-                reason: "yield solve did not converge".to_string(),
-            });
+        self.solve_yield(&flows, target_dirty, self.outstanding_face(settlement))
+    }
+
+    /// Yield to a call: the street yield assuming the bond is redeemed
+    /// on `call.call_date` at `call.call_price` (per 100). Coupons up to
+    /// the call are paid; a call between coupon dates pays the accrued
+    /// to the call date.
+    pub fn yield_to_call(
+        &self,
+        clean_price: f64,
+        settlement: NaiveDate,
+        call: &CallOption,
+    ) -> Result<f64, RustyQLibError> {
+        let target_dirty = clean_price + self.accrued_interest(settlement)?;
+        let flows = self.flows_to_redemption(settlement, call.call_date, call.call_price)?;
+        self.solve_yield(&flows, target_dirty, self.outstanding_face(settlement))
+    }
+
+    /// Yield to a put: the street yield assuming the holder redeems on
+    /// `put.put_date` at `put.put_price` (per 100) — the same truncated
+    /// cash-flow math as a call, exercised by the other side.
+    pub fn yield_to_put(
+        &self,
+        clean_price: f64,
+        settlement: NaiveDate,
+        put: &PutOption,
+    ) -> Result<f64, RustyQLibError> {
+        let target_dirty = clean_price + self.accrued_interest(settlement)?;
+        let flows = self.flows_to_redemption(settlement, put.put_date, put.put_price)?;
+        self.solve_yield(&flows, target_dirty, self.outstanding_face(settlement))
+    }
+
+    /// Yield to worst: the lowest of the yield to maturity and the
+    /// yields to every call still alive at `settlement`.
+    pub fn yield_to_worst(
+        &self,
+        clean_price: f64,
+        settlement: NaiveDate,
+        calls: &[CallOption],
+    ) -> Result<f64, RustyQLibError> {
+        let mut worst = self.yield_from_clean_price(clean_price, settlement)?;
+        for call in calls {
+            if call.call_date <= settlement || call.call_date >= self.maturity_date {
+                continue;
+            }
+            worst = worst.min(self.yield_to_call(clean_price, settlement, call)?);
         }
-        Ok(root.x)
+        Ok(worst)
     }
 
     /// Macaulay duration in years at the given yield.
@@ -355,7 +536,7 @@ impl FixedRateBond {
             .filter(|cf| cf.accrual_end > settlement)
             .map(|cf| cf.amount * curve.df_date(cf.payment_date))
             .sum();
-        Ok(self.per_100(pv / df_settlement))
+        Ok(pv / df_settlement * 100.0 / self.outstanding_face(settlement))
     }
 
     /// Clean price per 100 face off a discount curve.
@@ -389,7 +570,8 @@ impl FixedRateBond {
         periods
     }
 
-    /// Coupon interest paid at the end of `period` (absolute).
+    /// Coupon interest paid at the end of `period` (absolute): the
+    /// period's stepped rate on the outstanding face at its start.
     fn coupon_amount(&self, period: &Period) -> f64 {
         let fraction = self.day_count.year_fraction_icma(
             period.start,
@@ -398,7 +580,30 @@ impl FixedRateBond {
             period.end,
             self.frequency.per_year(),
         );
-        self.face_value * self.coupon_rate * fraction
+        self.outstanding_face(period.start) * self.rate_for(period.start) * fraction
+    }
+
+    /// Fraction of a coupon period remaining at `at`, in period units.
+    /// Under Act/Act ICMA this is days-to-coupon over the *reference*
+    /// period length (the street convention, also correct for a short
+    /// first coupon); other day counts use the ratio within the period.
+    fn fraction_remaining(&self, at: NaiveDate, period: &Period) -> Result<f64, RustyQLibError> {
+        let f = self.frequency.per_year();
+        let remaining =
+            self.day_count
+                .year_fraction_icma(at, period.end, period.ref_start, period.end, f);
+        if self.day_count == DayCountConvention::ActActIcma {
+            Ok(remaining * f as f64)
+        } else {
+            let full = self.day_count.year_fraction(period.start, period.end);
+            if full <= 0.0 {
+                return Err(RustyQLibError::NumericalError(format!(
+                    "degenerate coupon period ending {}",
+                    period.end
+                )));
+            }
+            Ok(remaining / full)
+        }
     }
 
     /// Cash flows after `settlement` with their discount exponents
@@ -410,48 +615,130 @@ impl FixedRateBond {
             .iter()
             .position(|p| p.end > settlement)
             .expect("settlement is before maturity");
-        let current = &periods[next];
-        // fraction of a coupon period remaining at settlement. Under
-        // Act/Act ICMA this is days-to-coupon over the *reference* period
-        // length (the street convention, also correct for a short first
-        // coupon); other day counts use the ratio within the period.
-        let f = self.frequency.per_year();
-        let remaining = self.day_count.year_fraction_icma(
-            settlement,
-            current.end,
-            current.ref_start,
-            current.end,
-            f,
-        );
-        let w = if self.day_count == DayCountConvention::ActActIcma {
-            remaining * f as f64
-        } else {
-            let full = self.day_count.year_fraction(current.start, current.end);
-            if full <= 0.0 {
-                return Err(RustyQLibError::NumericalError(format!(
-                    "degenerate coupon period ending {}",
-                    current.end
-                )));
-            }
-            remaining / full
-        };
+        let w = self.fraction_remaining(settlement, &periods[next])?;
 
-        let n = periods.len();
         let flows = periods[next..]
             .iter()
             .enumerate()
-            .map(|(k, p)| {
-                let mut amount = self.coupon_amount(p);
-                if next + k == n - 1 {
-                    amount += self.face_value;
-                }
-                Flow {
-                    tau: w + k as f64,
-                    amount,
-                }
+            .map(|(k, p)| Flow {
+                tau: w + k as f64,
+                amount: self.coupon_amount(p) + self.principal_at(p.end),
             })
             .collect();
         Ok(flows)
+    }
+
+    /// Cash flows assuming redemption at `redemption_date` instead of
+    /// maturity (a call or a put): coupons through the redemption date,
+    /// then the redemption price plus accrued, at the date's fractional
+    /// period position.
+    fn flows_to_redemption(
+        &self,
+        settlement: NaiveDate,
+        redemption_date: NaiveDate,
+        redemption_price: f64,
+    ) -> Result<Vec<Flow>, RustyQLibError> {
+        self.check_settlement(settlement)?;
+        if !redemption_price.is_finite() || redemption_price <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "redemption",
+                format!("redemption price must be positive, got {redemption_price}"),
+            ));
+        }
+        if redemption_date <= settlement || redemption_date > self.maturity_date {
+            return Err(RustyQLibError::invalid_input(
+                "redemption",
+                format!(
+                    "redemption date {redemption_date} must lie after settlement \
+                     {settlement} and at or before maturity {}",
+                    self.maturity_date
+                ),
+            ));
+        }
+        let redemption = self.outstanding_face(redemption_date) * redemption_price / 100.0;
+        let periods = self.periods();
+        let next = periods
+            .iter()
+            .position(|p| p.end > settlement)
+            .expect("settlement is before maturity");
+        let w = self.fraction_remaining(settlement, &periods[next])?;
+
+        let mut flows = Vec::new();
+        for (k, p) in periods[next..].iter().enumerate() {
+            if p.end <= redemption_date {
+                let mut amount = self.coupon_amount(p);
+                if p.end == redemption_date {
+                    amount += redemption;
+                } else {
+                    // scheduled sink payments before the redemption
+                    amount += self.principal_at(p.end);
+                }
+                flows.push(Flow {
+                    tau: w + k as f64,
+                    amount,
+                });
+                if p.end == redemption_date {
+                    break;
+                }
+            } else {
+                // redemption strictly inside this period: the price plus
+                // the accrued coupon, at the elapsed fraction of the period
+                let elapsed = 1.0 - self.fraction_remaining(redemption_date, p)?;
+                let accrued = self.outstanding_face(p.start)
+                    * self.rate_for(p.start)
+                    * self.day_count.year_fraction_icma(
+                        p.start,
+                        redemption_date,
+                        p.ref_start,
+                        p.end,
+                        self.frequency.per_year(),
+                    );
+                flows.push(Flow {
+                    tau: w + k as f64 - 1.0 + elapsed,
+                    amount: redemption + accrued,
+                });
+                break;
+            }
+        }
+        Ok(flows)
+    }
+
+    /// Solve the street yield hitting `target_dirty` (per 100 of
+    /// `quote_base` outstanding face) over the given flows.
+    fn solve_yield(
+        &self,
+        flows: &[Flow],
+        target_dirty: f64,
+        quote_base: f64,
+    ) -> Result<f64, RustyQLibError> {
+        if !target_dirty.is_finite() || target_dirty <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "bond",
+                format!("dirty price must be positive, got {target_dirty}"),
+            ));
+        }
+        let f = self.frequency.per_year() as f64;
+        // g(y) = target - dirty(y) is increasing in y; bracket wide:
+        // y > -f keeps 1 + y/f positive.
+        let (lo, hi) = (-0.99 * f, 10.0);
+        let g = |y: f64| {
+            target_dirty
+                - self
+                    .pv_flows(flows, y)
+                    .expect("bracket keeps 1 + y/f positive")
+                    * 100.0
+                    / quote_base
+        };
+        let dg = |y: f64| -self.dpv_dy(flows, y) * 100.0 / quote_base;
+        let root = Solver1d::new(1e-10, 100).newton_safeguarded(g, dg, lo, hi, self.coupon_rate);
+        if !root.converged {
+            return Err(RustyQLibError::CalibrationFailed {
+                iterations: root.iterations,
+                residual: g(root.x).abs(),
+                reason: "yield solve did not converge".to_string(),
+            });
+        }
+        Ok(root.x)
     }
 
     /// `1 + y/f`, rejecting yields at or below `-f`.
@@ -485,10 +772,6 @@ impl FixedRateBond {
             .iter()
             .map(|flow| -flow.amount * flow.tau / f * base.powf(-flow.tau - 1.0))
             .sum()
-    }
-
-    fn per_100(&self, absolute: f64) -> f64 {
-        absolute * 100.0 / self.face_value
     }
 
     fn check_settlement(&self, settlement: NaiveDate) -> Result<(), RustyQLibError> {
@@ -716,5 +999,295 @@ mod tests {
         assert!(bond.dirty_price_from_yield(0.05, d(2029, 1, 1)).is_err());
         // yield below -f
         assert!(bond.dirty_price_from_yield(-2.5, d(2026, 8, 3)).is_err());
+    }
+
+    #[test]
+    fn us_corporate_conventions() {
+        let bond =
+            FixedRateBond::us_corporate(100.0, 0.055, d(2026, 5, 15), d(2031, 5, 15)).unwrap();
+        assert_eq!(bond.day_count, DayCountConvention::Thirty360);
+        assert_eq!(bond.settlement_days, 2);
+        // trade Wednesday Aug 5 2026: T+2 settles Friday Aug 7
+        assert_eq!(bond.settlement_date(d(2026, 8, 5)), d(2026, 8, 7));
+        // 30/360 accrued: May 15 -> Aug 7 is 82 thirty-day-count days
+        let accrued = bond.accrued_interest(d(2026, 8, 7)).unwrap();
+        assert!(
+            (accrued - 100.0 * 0.055 * 82.0 / 360.0).abs() < 1e-12,
+            "accrued {accrued}"
+        );
+        // par identity holds under 30/360 exactly like Act/Act
+        let clean = bond.clean_price_from_yield(0.055, d(2026, 11, 15)).unwrap();
+        assert!((clean - 100.0).abs() < 1e-10, "clean {clean}");
+    }
+
+    #[test]
+    fn yield_to_call_on_a_coupon_date_preserves_the_par_identity() {
+        // a par-priced bond called at 100 on any coupon date still
+        // yields the coupon
+        let bond =
+            FixedRateBond::us_corporate(100.0, 0.055, d(2026, 5, 15), d(2031, 5, 15)).unwrap();
+        let settlement = d(2026, 11, 15); // coupon date
+        for call_date in [d(2028, 5, 15), d(2029, 11, 15)] {
+            let call = CallOption {
+                call_date,
+                call_price: 100.0,
+            };
+            let ytc = bond.yield_to_call(100.0, settlement, &call).unwrap();
+            assert!((ytc - 0.055).abs() < 1e-10, "{call_date}: {ytc}");
+        }
+        // a premium call price raises the yield to that call
+        let premium = CallOption {
+            call_date: d(2028, 5, 15),
+            call_price: 102.0,
+        };
+        let ytc = bond.yield_to_call(100.0, settlement, &premium).unwrap();
+        assert!(ytc > 0.055, "premium call ytc {ytc}");
+    }
+
+    #[test]
+    fn yield_to_worst_picks_the_binding_scenario() {
+        let bond =
+            FixedRateBond::us_corporate(100.0, 0.055, d(2026, 5, 15), d(2031, 5, 15)).unwrap();
+        let settlement = d(2026, 8, 7);
+        let calls = [
+            CallOption {
+                call_date: d(2028, 5, 15),
+                call_price: 100.0,
+            },
+            CallOption {
+                call_date: d(2029, 5, 15),
+                call_price: 100.0,
+            },
+        ];
+        // priced at a premium: early redemption at par is the worst
+        let premium_clean = 104.0;
+        let ytm = bond
+            .yield_from_clean_price(premium_clean, settlement)
+            .unwrap();
+        let ytw = bond
+            .yield_to_worst(premium_clean, settlement, &calls)
+            .unwrap();
+        let first_call = bond
+            .yield_to_call(premium_clean, settlement, &calls[0])
+            .unwrap();
+        assert!(ytw < ytm, "{ytw} vs ytm {ytm}");
+        assert!((ytw - first_call).abs() < 1e-12, "worst is the first call");
+        // priced at a discount: holding to maturity is the worst
+        let discount_clean = 95.0;
+        let ytm = bond
+            .yield_from_clean_price(discount_clean, settlement)
+            .unwrap();
+        let ytw = bond
+            .yield_to_worst(discount_clean, settlement, &calls)
+            .unwrap();
+        assert!((ytw - ytm).abs() < 1e-12, "worst is maturity");
+        // dead or maturity-dated calls are ignored
+        let stale = [CallOption {
+            call_date: d(2026, 6, 1),
+            call_price: 100.0,
+        }];
+        let same = bond
+            .yield_to_worst(discount_clean, settlement, &stale)
+            .unwrap();
+        assert!((same - ytm).abs() < 1e-15);
+    }
+
+    #[test]
+    fn mid_period_call_approaches_the_coupon_date_call() {
+        let bond =
+            FixedRateBond::us_corporate(100.0, 0.055, d(2026, 5, 15), d(2031, 5, 15)).unwrap();
+        let settlement = d(2026, 8, 7);
+        let on_coupon = bond
+            .yield_to_call(
+                101.0,
+                settlement,
+                &CallOption {
+                    call_date: d(2028, 5, 15),
+                    call_price: 100.0,
+                },
+            )
+            .unwrap();
+        // one day earlier, mid-period: accrued to call replaces the
+        // final coupon, so the yield barely moves
+        let mid_period = bond
+            .yield_to_call(
+                101.0,
+                settlement,
+                &CallOption {
+                    call_date: d(2028, 5, 14),
+                    call_price: 100.0,
+                },
+            )
+            .unwrap();
+        assert!(
+            (mid_period - on_coupon).abs() < 5e-4,
+            "{mid_period} vs {on_coupon}"
+        );
+        // call before settlement or after maturity is rejected
+        assert!(bond
+            .yield_to_call(
+                101.0,
+                settlement,
+                &CallOption {
+                    call_date: d(2026, 8, 7),
+                    call_price: 100.0,
+                },
+            )
+            .is_err());
+        assert!(bond
+            .yield_to_call(
+                101.0,
+                settlement,
+                &CallOption {
+                    call_date: d(2032, 1, 1),
+                    call_price: 100.0,
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn step_up_coupons_change_the_flows_and_accrued_by_hand() {
+        // 4% stepping to 6% from the 2027-05-15 coupon period onward
+        let bond = FixedRateBond::us_corporate(100.0, 0.04, d(2026, 5, 15), d(2029, 5, 15))
+            .unwrap()
+            .with_coupon_steps(&[(d(2027, 5, 15), 0.06)])
+            .unwrap();
+        let amounts: Vec<f64> = bond.cashflows().iter().map(|cf| cf.amount).collect();
+        // periods starting Nov 15 2026 and May 15 2027... the period
+        // *starting* 2027-05-15 is the first at 6%: flows 2, 2, 3, 3, 3, 103
+        assert_eq!(amounts.len(), 6);
+        for (i, expected) in [2.0, 2.0, 3.0, 3.0, 3.0, 103.0].iter().enumerate() {
+            assert!(
+                (amounts[i] - expected).abs() < 1e-12,
+                "flow {i}: {} vs {expected}",
+                amounts[i]
+            );
+        }
+        // accrued before the step uses 4%, after it 6% (30/360)
+        let before = bond.accrued_interest(d(2026, 8, 15)).unwrap();
+        assert!((before - 100.0 * 0.04 * 90.0 / 360.0).abs() < 1e-12);
+        let after = bond.accrued_interest(d(2027, 8, 15)).unwrap();
+        assert!((after - 100.0 * 0.06 * 90.0 / 360.0).abs() < 1e-12);
+        // yield round trip still holds on the stepped flows
+        let settle = d(2026, 8, 7);
+        let clean = bond.clean_price_from_yield(0.05, settle).unwrap();
+        let back = bond.yield_from_clean_price(clean, settle).unwrap();
+        assert!((back - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step_up_bond_prices_between_the_flat_bounds() {
+        let settle = d(2026, 8, 7);
+        let flat_low =
+            FixedRateBond::us_corporate(100.0, 0.04, d(2026, 5, 15), d(2029, 5, 15)).unwrap();
+        let flat_high =
+            FixedRateBond::us_corporate(100.0, 0.06, d(2026, 5, 15), d(2029, 5, 15)).unwrap();
+        let stepped = FixedRateBond::us_corporate(100.0, 0.04, d(2026, 5, 15), d(2029, 5, 15))
+            .unwrap()
+            .with_coupon_steps(&[(d(2027, 5, 15), 0.06)])
+            .unwrap();
+        let y = 0.05;
+        let low = flat_low.clean_price_from_yield(y, settle).unwrap();
+        let high = flat_high.clean_price_from_yield(y, settle).unwrap();
+        let step = stepped.clean_price_from_yield(y, settle).unwrap();
+        assert!(low < step && step < high, "{low} < {step} < {high}");
+        // validation: out-of-range and unordered steps rejected
+        let base =
+            FixedRateBond::us_corporate(100.0, 0.04, d(2026, 5, 15), d(2029, 5, 15)).unwrap();
+        assert!(base
+            .clone()
+            .with_coupon_steps(&[(d(2026, 5, 15), 0.06)])
+            .is_err());
+        assert!(base
+            .clone()
+            .with_coupon_steps(&[(d(2028, 5, 15), 0.06), (d(2027, 5, 15), 0.05)])
+            .is_err());
+        assert!(base.with_coupon_steps(&[(d(2027, 5, 15), -0.01)]).is_err());
+    }
+
+    #[test]
+    fn sinking_fund_flows_and_outstanding_by_hand() {
+        // 5.5% 2031, 25% sinks in 2028 and 2030 (coupon dates)
+        let bond = FixedRateBond::us_corporate(100.0, 0.055, d(2026, 5, 15), d(2031, 5, 15))
+            .unwrap()
+            .with_sinking_fund(&[(d(2028, 5, 15), 0.25), (d(2030, 5, 15), 0.25)])
+            .unwrap();
+        assert_eq!(bond.outstanding_face(d(2027, 1, 1)), 100.0);
+        assert_eq!(bond.outstanding_face(d(2028, 5, 15)), 75.0);
+        assert_eq!(bond.outstanding_face(d(2030, 5, 15)), 50.0);
+        let flows = bond.cashflows();
+        // coupons: 2.75 on 100 until May 2028, then 2.0625 on 75, then
+        // 1.375 on 50; principals 25, 25, and 50 at maturity
+        let expect = |cf: &crate::bonds::Cashflow, coupon: f64, principal: f64| {
+            assert!(
+                (cf.amount - coupon - principal).abs() < 1e-12,
+                "{}: {} vs {} + {}",
+                cf.accrual_end,
+                cf.amount,
+                coupon,
+                principal
+            );
+        };
+        expect(&flows[0], 2.75, 0.0); // Nov 2026
+        expect(&flows[3], 2.75, 25.0); // May 2028: coupon on 100 + sink
+        expect(&flows[4], 75.0 * 0.055 / 2.0, 0.0); // Nov 2028 on 75
+        expect(&flows[7], 75.0 * 0.055 / 2.0, 25.0); // May 2030 + sink
+        expect(&flows[8], 50.0 * 0.055 / 2.0, 0.0); // Nov 2030 on 50
+        expect(&flows[9], 50.0 * 0.055 / 2.0, 50.0); // maturity remainder
+    }
+
+    #[test]
+    fn sinker_prices_yield_round_trips_and_shortens_duration() {
+        let settle = d(2026, 8, 7);
+        let bullet =
+            FixedRateBond::us_corporate(100.0, 0.055, d(2026, 5, 15), d(2031, 5, 15)).unwrap();
+        let sinker = bullet
+            .clone()
+            .with_sinking_fund(&[(d(2028, 5, 15), 0.25), (d(2030, 5, 15), 0.25)])
+            .unwrap();
+        // par identity: at y = coupon, a sinker still prices at par
+        // (every principal tranche is a par bond at its own horizon)
+        let clean = sinker
+            .clean_price_from_yield(0.055, d(2026, 11, 15))
+            .unwrap();
+        assert!((clean - 100.0).abs() < 1e-9, "sinker par {clean}");
+        // yield round trip
+        let quoted = sinker.clean_price_from_yield(0.05, settle).unwrap();
+        let back = sinker.yield_from_clean_price(quoted, settle).unwrap();
+        assert!((back - 0.05).abs() < 1e-9);
+        // early principal return shortens duration vs the bullet
+        let d_sinker = sinker.macaulay_duration(0.05, settle).unwrap();
+        let d_bullet = bullet.macaulay_duration(0.05, settle).unwrap();
+        assert!(d_sinker < d_bullet, "{d_sinker} vs {d_bullet}");
+        // curve pricing consistent with manual discounting per 100 of
+        // outstanding
+        let curve = YieldCurve::flat(
+            0.04,
+            settle,
+            DayCountConvention::Act365,
+            crate::core::curves::Compounding::Continuous,
+        )
+        .unwrap();
+        let manual: f64 = sinker
+            .cashflows()
+            .iter()
+            .map(|cf| cf.amount * curve.df_date(cf.payment_date))
+            .sum();
+        let dirty = sinker.dirty_price_from_curve(&curve, settle).unwrap();
+        assert!(
+            (dirty - manual / curve.df_date(settle) * 100.0 / 100.0).abs() < 1e-10,
+            "{dirty} vs {manual}"
+        );
+        // validation: off-schedule dates and over-redemption rejected
+        assert!(bullet
+            .clone()
+            .with_sinking_fund(&[(d(2028, 5, 16), 0.25)])
+            .is_err());
+        assert!(bullet
+            .clone()
+            .with_sinking_fund(&[(d(2028, 5, 15), 0.7), (d(2030, 5, 15), 0.5)])
+            .is_err());
+        assert!(bullet.with_sinking_fund(&[(d(2031, 5, 15), 0.25)]).is_err());
     }
 }

@@ -73,16 +73,25 @@ impl<'a> LocalVol<'a> {
 
     /// Local volatility at underlying level `level` and time `t`.
     pub fn vol(&self, level: f64, t: f64) -> f64 {
+        self.vol_checked(level, t).0
+    }
+
+    /// [`vol`](Self::vol) plus whether a guard fired: `true` means the
+    /// Dupire transformation was *not* used at this point — the implied
+    /// vol was returned instead (very short time, vanishing total
+    /// variance, or a calendar/butterfly violation in the inputs). The
+    /// usability report's raw material.
+    pub fn vol_checked(&self, level: f64, t: f64) -> (f64, bool) {
         let implied = self.implied(level, t.max(1e-4));
         if t < 1e-3 {
-            return implied.clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL);
+            return (implied.clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL), true);
         }
 
         let f = self.forward(t);
         let y = (level / f).ln();
         let w = self.total_variance(level, t);
         if w < 1e-8 {
-            return implied.clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL);
+            return (implied.clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL), true);
         }
 
         // dw/dt at fixed moneyness y: strike moves with the forward
@@ -105,9 +114,12 @@ impl<'a> LocalVol<'a> {
         if dw_dt <= 0.0 || denom <= 1e-4 {
             // calendar / butterfly violation in the interpolated inputs:
             // fall back to the implied vol at this point
-            return implied.clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL);
+            return (implied.clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL), true);
         }
-        (dw_dt / denom).sqrt().clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL)
+        (
+            (dw_dt / denom).sqrt().clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL),
+            false,
+        )
     }
 
     /// The local vol function sampled on a `levels` x `times` grid:

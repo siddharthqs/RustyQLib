@@ -103,15 +103,23 @@ impl SviParams {
         Ok(())
     }
 
-    /// The Gatheral-Jacquier butterfly function
-    /// `g(k) = (1 - k w'/(2w))^2 - (w'^2/4)(1/w + 1/4) + w''/2`,
-    /// which must stay non-negative for an arbitrage-free density.
-    pub fn butterfly_g(&self, k: f64) -> f64 {
+    /// Total variance and its first two log-moneyness derivatives at
+    /// `k` — all closed-form, which is what makes SVI-based Dupire
+    /// local vol smooth by construction.
+    pub fn variance_derivatives(&self, k: f64) -> (f64, f64, f64) {
         let d = k - self.m;
         let root = (d * d + self.sigma * self.sigma).sqrt();
         let w = self.a + self.b * (self.rho * d + root);
         let w1 = self.b * (self.rho + d / root);
         let w2 = self.b * self.sigma * self.sigma / (root * root * root);
+        (w, w1, w2)
+    }
+
+    /// The Gatheral-Jacquier butterfly function
+    /// `g(k) = (1 - k w'/(2w))^2 - (w'^2/4)(1/w + 1/4) + w''/2`,
+    /// which must stay non-negative for an arbitrage-free density.
+    pub fn butterfly_g(&self, k: f64) -> f64 {
+        let (w, w1, w2) = self.variance_derivatives(k);
         (1.0 - k * w1 / (2.0 * w)).powi(2) - (w1 * w1 / 4.0) * (1.0 / w + 0.25) + w2 / 2.0
     }
 
@@ -188,6 +196,354 @@ impl SviParams {
             iterations: fit.iterations,
             converged: fit.converged,
         }
+    }
+}
+
+// ── Per-expiry SVI surface fit ──────────────────────────────────────────
+
+/// One fitted expiry slice of a [`SviSurfaceFit`].
+#[derive(Debug, Clone)]
+pub struct SviSlice {
+    /// Expiry time (year fraction).
+    pub t: f64,
+    /// Forward the slice's log-moneyness is measured against.
+    pub forward: f64,
+    pub params: SviParams,
+    /// Fit error in implied vol against the input pillars.
+    pub rmse: f64,
+    pub converged: bool,
+    /// The quoted log-moneyness span the fit is anchored on.
+    pub k_range: (f64, f64),
+    /// Minimum of Gatheral's `g(k)` over the quoted span; negative
+    /// means the *fit itself* carries butterfly arbitrage there.
+    pub min_g: f64,
+}
+
+/// A per-expiry SVI fit of an implied surface: one [`SviParams`] smile
+/// per pillar expiry, linear total variance in time between slices at
+/// fixed log-moneyness (with a forward-variance floor for calendar
+/// safety), and **analytic** Dupire local vol from SVI's closed-form
+/// derivatives.
+///
+/// This is the smoother, where
+/// [`repair_arbitrage`](crate::equity::surface_repair::repair_arbitrage)
+/// is the repair: every point moves a little (by the fit RMSE), in
+/// exchange for a C^2 smile that Dupire can differentiate without the
+/// spikes piecewise-linear interpolation produces. Fit it to the
+/// *cleaned* surface so outright arbitrage is gone before smoothing.
+#[derive(Debug, Clone)]
+pub struct SviSurfaceFit {
+    reference_date: NaiveDate,
+    day_count: DayCountConvention,
+    /// Slices in increasing expiry order.
+    pub slices: Vec<SviSlice>,
+    /// Input expiries skipped for having fewer than five pillar quotes.
+    pub skipped_slices: usize,
+    /// Largest total-variance decrease between adjacent fitted slices
+    /// over the quoted span (0 = calendar-clean fit); evaluation floors
+    /// forward variance, so this measures fit tension, not arbitrage in
+    /// the output.
+    pub max_calendar_crossing: f64,
+}
+
+/// Forward-variance floor: `dw/dt` never drops below this, so local
+/// variance stays positive even where fitted slices graze.
+const MIN_FORWARD_VARIANCE: f64 = 1e-8;
+/// Local vol clamps, matching
+/// [`LocalVol`](crate::equity::local_vol::LocalVol).
+const MIN_LOCAL_VOL: f64 = 0.01;
+const MAX_LOCAL_VOL: f64 = 3.0;
+
+impl SviSurfaceFit {
+    /// Fit one SVI smile per pillar expiry of `surface` (its per-expiry
+    /// point smiles, on any coordinate). `forward` maps expiry time to
+    /// the underlying's forward, exactly as for
+    /// [`VolSurface::diagnostics`](crate::core::vols::VolSurface::diagnostics).
+    /// Expiries with fewer than five pillars (SVI has five parameters)
+    /// are skipped and counted.
+    pub fn fit(
+        surface: &VolSurface,
+        forward: impl Fn(f64) -> f64,
+    ) -> Result<SviSurfaceFit, RustyQLibError> {
+        use crate::core::vols::{SmileCoordinate, VolInput};
+        let VolInput::StrikeSmiles {
+            expiries,
+            smiles,
+            coordinate,
+            ..
+        } = surface.to_input()
+        else {
+            return Err(RustyQLibError::invalid_input(
+                "svi fit",
+                "the surface has no per-expiry smiles to fit (flat surface?)",
+            ));
+        };
+        let mut slices = Vec::new();
+        let mut skipped = 0usize;
+        for (tenor, smile) in expiries.iter().zip(&smiles) {
+            let t = match tenor {
+                Tenor::YearFraction(t) => *t,
+                Tenor::Date(_) => continue, // to_input never emits dates
+            };
+            if smile.len() < 5 {
+                skipped += 1;
+                continue;
+            }
+            let f = forward(t);
+            let quotes: Vec<(f64, f64)> = smile
+                .iter()
+                .map(|&(x, vol)| {
+                    let k = match coordinate {
+                        SmileCoordinate::Strike => (x / f).ln(),
+                        SmileCoordinate::Moneyness => x.ln(),
+                        SmileCoordinate::LogMoneyness => x,
+                    };
+                    (k, vol)
+                })
+                .collect();
+            let fit = SviParams::calibrate(&quotes, t);
+            let (k_lo, k_hi) = quotes
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(lo, hi), &(k, _)| {
+                    (lo.min(k), hi.max(k))
+                });
+            let min_g = (0..=200)
+                .map(|i| {
+                    fit.params
+                        .butterfly_g(k_lo + (k_hi - k_lo) * i as f64 / 200.0)
+                })
+                .fold(f64::INFINITY, f64::min);
+            slices.push(SviSlice {
+                t,
+                forward: f,
+                params: fit.params,
+                rmse: fit.rmse,
+                converged: fit.converged,
+                k_range: (k_lo, k_hi),
+                min_g,
+            });
+        }
+        if slices.is_empty() {
+            return Err(RustyQLibError::invalid_input(
+                "svi fit",
+                format!("no expiry has the five quotes an SVI fit needs ({skipped} skipped)"),
+            ));
+        }
+        slices.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+
+        // fit tension: does total variance ever fall between slices?
+        let mut max_crossing: f64 = 0.0;
+        for pair in slices.windows(2) {
+            let (lo, hi) = (
+                pair[0].k_range.0.min(pair[1].k_range.0),
+                pair[0].k_range.1.max(pair[1].k_range.1),
+            );
+            for i in 0..=100 {
+                let k = lo + (hi - lo) * i as f64 / 100.0;
+                let crossing = pair[0].params.total_variance(k) - pair[1].params.total_variance(k);
+                max_crossing = max_crossing.max(crossing);
+            }
+        }
+        Ok(SviSurfaceFit {
+            reference_date: surface.reference_date(),
+            day_count: surface.day_count(),
+            slices,
+            skipped_slices: skipped,
+            max_calendar_crossing: max_crossing,
+        })
+    }
+
+    /// The slice pair bracketing `t`, with the interpolation weight on
+    /// the later slice (0 at or below the earlier, 1 at or beyond the
+    /// later; a single-slice surface brackets with itself).
+    fn bracket(&self, t: f64) -> (&SviSlice, &SviSlice, f64) {
+        let n = self.slices.len();
+        if n == 1 || t <= self.slices[0].t {
+            return (&self.slices[0], &self.slices[0], 0.0);
+        }
+        if t >= self.slices[n - 1].t {
+            return (&self.slices[n - 1], &self.slices[n - 1], 0.0);
+        }
+        let idx = self.slices.partition_point(|s| s.t < t);
+        let (a, b) = (&self.slices[idx - 1], &self.slices[idx]);
+        (a, b, (t - a.t) / (b.t - a.t))
+    }
+
+    /// Forward at `t`: linear between the slice forwards, flat outside.
+    pub fn forward(&self, t: f64) -> f64 {
+        let (a, b, weight) = self.bracket(t);
+        a.forward + (b.forward - a.forward) * weight
+    }
+
+    /// Total variance at log-moneyness `k`: linear in time between
+    /// slices at fixed `k`, floored to be non-decreasing; proportional
+    /// to `t` below the first slice (variance accrues from zero).
+    pub fn total_variance(&self, k: f64, t: f64) -> f64 {
+        let (a, b, weight) = self.bracket(t);
+        let (wa, wb) = (
+            a.params.total_variance(k),
+            b.params.total_variance(k).max(a.params.total_variance(k)),
+        );
+        let w = if t <= a.t {
+            wa * (t / a.t).min(1.0)
+        } else {
+            wa + (wb - wa) * weight
+        };
+        w.max(0.0)
+    }
+
+    /// Implied vol for an absolute `strike` at `t`.
+    pub fn vol(&self, strike: f64, t: f64) -> f64 {
+        let k = (strike / self.forward(t)).ln();
+        (self.total_variance(k, t).max(1e-12) / t.max(1e-8)).sqrt()
+    }
+
+    /// Analytic Dupire local vol at underlying `level` and time `t`:
+    /// Gatheral's formula with `w`, `w_k`, `w_kk` in closed form from
+    /// the bracketing SVI slices (interpolated linearly in time) and
+    /// `dw/dt` as the floored forward variance between them. Clamped to
+    /// the same `[1%, 300%]` band as the numerical
+    /// [`LocalVol`](crate::equity::local_vol::LocalVol).
+    pub fn local_vol(&self, level: f64, t: f64) -> f64 {
+        self.local_vol_checked(level, t).0
+    }
+
+    /// [`local_vol`](Self::local_vol) plus whether a guard fired
+    /// (`true` = implied vol was returned instead of the Dupire value:
+    /// vanishing variance or a non-positive density denominator).
+    pub fn local_vol_checked(&self, level: f64, t: f64) -> (f64, bool) {
+        let t = t.max(1e-4);
+        let k = (level / self.forward(t)).ln();
+        let (a, b, weight) = self.bracket(t);
+        let (wa, wa1, wa2) = a.params.variance_derivatives(k);
+        let (mut wb, mut wb1, mut wb2) = b.params.variance_derivatives(k);
+        if wb < wa {
+            // grazing slices: floor the later variance (flat forward)
+            (wb, wb1, wb2) = (wa, wa1, wa2);
+        }
+        let (w, w1, w2, dwdt) = if t <= a.t {
+            // below the first pillar variance accrues proportionally
+            let scale = (t / a.t).min(1.0);
+            (wa * scale, wa1 * scale, wa2 * scale, wa / a.t)
+        } else if a.t == b.t {
+            // at or beyond the last pillar: flat-extrapolated smile,
+            // forward variance from the last inter-slice segment
+            let dwdt = self.last_segment_dwdt(k);
+            (wa, wa1, wa2, dwdt)
+        } else {
+            let dwdt = (wb - wa) / (b.t - a.t);
+            (
+                wa + (wb - wa) * weight,
+                wa1 + (wb1 - wa1) * weight,
+                wa2 + (wb2 - wa2) * weight,
+                dwdt,
+            )
+        };
+        let dwdt = dwdt.max(MIN_FORWARD_VARIANCE);
+        if w < 1e-8 {
+            return (
+                (w.max(1e-12) / t)
+                    .sqrt()
+                    .clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL),
+                true,
+            );
+        }
+        let denominator =
+            (1.0 - k * w1 / (2.0 * w)).powi(2) - (w1 * w1 / 4.0) * (1.0 / w + 0.25) + w2 / 2.0;
+        if denominator <= 1e-4 {
+            return ((w / t).sqrt().clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL), true);
+        }
+        (
+            (dwdt / denominator)
+                .sqrt()
+                .clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL),
+            false,
+        )
+    }
+
+    fn last_segment_dwdt(&self, k: f64) -> f64 {
+        let n = self.slices.len();
+        if n == 1 {
+            let s = &self.slices[0];
+            return s.params.total_variance(k) / s.t;
+        }
+        let (prev, last) = (&self.slices[n - 2], &self.slices[n - 1]);
+        (last.params.total_variance(k) - prev.params.total_variance(k)) / (last.t - prev.t)
+    }
+
+    /// Sample the fit into the canonical pricing [`VolSurface`]: per
+    /// slice, `samples` strikes across its own quoted log-moneyness
+    /// span, through the floored [`Self::total_variance`] so the
+    /// calendar floor is baked into the artifact. The sampled surface
+    /// serializes, plots and prices like any other; Dupire should use
+    /// [`Self::local_vol`] directly, which stays analytic. (Sub-basis-
+    /// point calendar crossings can survive in the sampled wings where
+    /// grazing weekly fits overlap — the diagnostics in the build
+    /// metadata report them; the analytic path floors them.)
+    pub fn to_vol_surface(&self, samples: usize) -> Result<VolSurface, VolError> {
+        let expiries: Vec<Tenor> = self
+            .slices
+            .iter()
+            .map(|s| Tenor::YearFraction(s.t))
+            .collect();
+        let smiles: Vec<Vec<(f64, f64)>> = self
+            .slices
+            .iter()
+            .map(|slice| {
+                let (lo, hi) = slice.k_range;
+                let n = samples.max(5);
+                (0..n)
+                    .map(|i| {
+                        let k = lo + (hi - lo) * i as f64 / (n - 1) as f64;
+                        // sample through the floored accessor, so the
+                        // calendar floor between grazing fitted slices
+                        // is baked into the sampled artifact too
+                        let vol = (self.total_variance(k, slice.t).max(1e-12) / slice.t).sqrt();
+                        (slice.forward * k.exp(), vol)
+                    })
+                    .collect()
+            })
+            .collect();
+        VolSurface::from_strike_smiles(&expiries, &smiles, self.reference_date, self.day_count)
+    }
+
+    /// Sample [`Self::local_vol`] on a `levels` x `times` grid
+    /// (`grid[i][j]` = level i, time j — the plotting layout).
+    pub fn local_vol_grid(&self, levels: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
+        levels
+            .iter()
+            .map(|&level| times.iter().map(|&t| self.local_vol(level, t)).collect())
+            .collect()
+    }
+
+    /// Fit-quality metadata for the surface document: per-slice params,
+    /// RMSE in vol basis points, convergence, `min g`, and the global
+    /// calendar-tension figure.
+    pub fn metadata(&self) -> serde_json::Value {
+        let slices: Vec<serde_json::Value> = self
+            .slices
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "t": s.t,
+                    "forward": s.forward,
+                    "params": {
+                        "a": s.params.a, "b": s.params.b, "rho": s.params.rho,
+                        "m": s.params.m, "sigma": s.params.sigma,
+                    },
+                    "rmse_vol_bps": s.rmse * 1e4,
+                    "converged": s.converged,
+                    "min_butterfly_g": s.min_g,
+                    "k_range": [s.k_range.0, s.k_range.1],
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "model": "per-expiry raw SVI (Gatheral), linear total variance in time",
+            "slices": slices,
+            "skipped_slices": self.skipped_slices,
+            "max_calendar_crossing": self.max_calendar_crossing,
+        })
     }
 }
 
@@ -489,6 +845,124 @@ mod tests {
                 "k = {k}"
             );
         }
+    }
+
+    fn surface_from(slices: &[(f64, SviParams, f64)]) -> VolSurface {
+        // sample each known smile onto pillar strikes, as a chain would
+        let expiries: Vec<Tenor> = slices
+            .iter()
+            .map(|&(t, _, _)| Tenor::YearFraction(t))
+            .collect();
+        let smiles: Vec<Vec<(f64, f64)>> = slices
+            .iter()
+            .map(|&(t, p, f)| {
+                (0..11)
+                    .map(|i| {
+                        let k = -0.3 + i as f64 * 0.06;
+                        (f * k.exp(), p.vol(k, t))
+                    })
+                    .collect()
+            })
+            .collect();
+        VolSurface::from_strike_smiles(
+            &expiries,
+            &smiles,
+            NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(),
+            DayCountConvention::Act365,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn per_expiry_fit_recovers_generating_smiles() {
+        let front = sane();
+        let back = SviParams { a: 0.055, ..sane() };
+        let surface = surface_from(&[(0.5, front, 101.0), (1.0, back, 102.0)]);
+        let forward = |t: f64| if t < 0.75 { 101.0 } else { 102.0 };
+        let fit = SviSurfaceFit::fit(&surface, forward).unwrap();
+        assert_eq!(fit.slices.len(), 2);
+        assert_eq!(fit.skipped_slices, 0);
+        for slice in &fit.slices {
+            assert!(slice.rmse < 1e-5, "rmse {}", slice.rmse);
+            assert!(slice.min_g > 0.0, "min g {}", slice.min_g);
+        }
+        assert!(fit.max_calendar_crossing <= 1e-10);
+        // fitted vols agree with the generators off the pillar grid too
+        for i in 0..=12 {
+            let k = -0.28 + i as f64 * 0.05;
+            let strike = 101.0 * k.exp();
+            assert!(
+                (fit.vol(strike, 0.5) - front.vol((strike / 101.0_f64).ln(), 0.5)).abs() < 5e-4,
+                "k = {k}"
+            );
+        }
+        // sampled surface matches the fit at its own nodes
+        let sampled = fit.to_vol_surface(41).unwrap();
+        assert_eq!(sampled.expiry_times().len(), 2);
+        let probe = 101.0;
+        assert!((sampled.vol(probe, probe, 0.5) - fit.vol(probe, 0.5)).abs() < 1e-3);
+        // metadata carries per-slice fit quality
+        let meta = fit.metadata();
+        assert_eq!(meta["slices"].as_array().unwrap().len(), 2);
+        assert!(meta["slices"][0]["rmse_vol_bps"].as_f64().unwrap() < 0.5);
+    }
+
+    #[test]
+    fn flat_svi_term_structure_gives_flat_local_vol() {
+        // b = 0 collapses SVI to w(k) = a: constant vol per slice
+        let vol = 0.3_f64;
+        let slice = |t: f64| SviParams {
+            a: vol * vol * t,
+            b: 0.0,
+            rho: 0.0,
+            m: 0.0,
+            sigma: 0.3,
+        };
+        let surface = surface_from(&[(0.5, slice(0.5), 100.0), (1.0, slice(1.0), 100.0)]);
+        let fit = SviSurfaceFit::fit(&surface, |_| 100.0).unwrap();
+        // sigma_loc = sigma_imp everywhere: interior, between slices,
+        // below the first pillar and beyond the last
+        for level in [80.0, 100.0, 120.0] {
+            for t in [0.1, 0.5, 0.75, 1.0, 1.4] {
+                let lv = fit.local_vol(level, t);
+                assert!((lv - vol).abs() < 5e-3, "level {level} t {t}: {lv}");
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_slices_are_skipped_not_fatal() {
+        let p = sane();
+        let expiries = [Tenor::YearFraction(0.5), Tenor::YearFraction(1.0)];
+        let smiles = vec![
+            // three quotes: below SVI's five-parameter minimum
+            vec![(90.0, 0.25), (100.0, 0.24), (110.0, 0.23)],
+            (0..9)
+                .map(|i| {
+                    let k = -0.2 + i as f64 * 0.05;
+                    (100.0 * k.exp(), p.vol(k, 1.0))
+                })
+                .collect(),
+        ];
+        let surface = VolSurface::from_strike_smiles(
+            &expiries,
+            &smiles,
+            NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let fit = SviSurfaceFit::fit(&surface, |_| 100.0).unwrap();
+        assert_eq!(fit.slices.len(), 1);
+        assert_eq!(fit.skipped_slices, 1);
+        // a surface with no fittable slice errors instead
+        let tiny = VolSurface::from_strike_smiles(
+            &[Tenor::YearFraction(0.5)],
+            &[vec![(100.0, 0.2), (105.0, 0.19)]],
+            NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        assert!(SviSurfaceFit::fit(&tiny, |_| 100.0).is_err());
     }
 
     fn ssvi() -> Ssvi {

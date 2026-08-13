@@ -25,12 +25,15 @@ pub fn price_ir_contract(data: &Contract, today: NaiveDate) -> Result<Value, Rus
         ));
     };
     let output = match bond_data.instrument.as_str() {
-        "Bond" => price_bond(bond_data, today)?,
+        "Bond" | "Corporate" => price_bond(bond_data, today)?,
         "Bill" => price_bill(bond_data, today)?,
         other => {
             return Err(RustyQLibError::invalid_input(
                 "instrument",
-                format!("unsupported IR instrument `{other}` for pricing (expected Bond or Bill)"),
+                format!(
+                    "unsupported IR instrument `{other}` for pricing \
+                     (expected Bond, Corporate or Bill)"
+                ),
             ))
         }
     };
@@ -42,33 +45,43 @@ fn price_bond(bond_data: &BondData, today: NaiveDate) -> Result<Value, RustyQLib
     let bond = &built.bond;
     let settlement = built.settlement;
 
-    let quotes = [
-        bond_data.clean_price.is_some(),
-        bond_data.yield_rate.is_some(),
-        bond_data.curve.is_some(),
-    ];
-    if quotes.iter().filter(|&&q| q).count() != 1 {
+    // exactly one market quote — a curve alone prices the bond, a curve
+    // alongside a quote serves as the benchmark for spread analytics
+    if bond_data.clean_price.is_some() && bond_data.yield_rate.is_some() {
         return Err(RustyQLibError::invalid_input(
             "bond_data",
-            "provide exactly one of `clean_price`, `yield_rate` or `curve`",
+            "provide `clean_price` or `yield_rate`, not both",
         ));
     }
+    if bond_data.clean_price.is_none()
+        && bond_data.yield_rate.is_none()
+        && bond_data.curve.is_none()
+    {
+        return Err(RustyQLibError::invalid_input(
+            "bond_data",
+            "provide one of `clean_price`, `yield_rate` or `curve`",
+        ));
+    }
+    let benchmark = bond_data
+        .curve
+        .as_ref()
+        .map(|input| YieldCurve::from_input(input, built.valuation_date))
+        .transpose()?;
 
     let (clean_price, yield_rate) = if let Some(clean) = bond_data.clean_price {
         (clean, bond.yield_from_clean_price(clean, settlement)?)
     } else if let Some(y) = bond_data.yield_rate {
         (bond.clean_price_from_yield(y, settlement)?, y)
     } else {
-        let input = bond_data.curve.as_ref().expect("one quote is present");
-        let curve = YieldCurve::from_input(input, built.valuation_date)?;
-        let clean = bond.clean_price_from_curve(&curve, settlement)?;
+        let curve = benchmark.as_ref().expect("curve is the only quote");
+        let clean = bond.clean_price_from_curve(curve, settlement)?;
         (clean, bond.yield_from_clean_price(clean, settlement)?)
     };
 
     let accrued = bond.accrued_interest(settlement)?;
     let dirty = clean_price + accrued;
-    Ok(json!({
-        "instrument": "Bond",
+    let mut output = json!({
+        "instrument": bond_data.instrument,
         "valuation_date": built.valuation_date.to_string(),
         "settlement_date": settlement.to_string(),
         "clean_price": clean_price,
@@ -80,7 +93,17 @@ fn price_bond(bond_data: &BondData, today: NaiveDate) -> Result<Value, RustyQLib
         "convexity": bond.convexity(yield_rate, settlement)?,
         "dv01": bond.dv01(yield_rate, settlement)?,
         "pv": dirty * bond.face_value / 100.0,
-    }))
+    });
+
+    // a benchmark curve next to a market quote adds spread analytics
+    if let Some(curve) = &benchmark {
+        if bond_data.clean_price.is_some() || bond_data.yield_rate.is_some() {
+            let z = bond.z_spread(clean_price, curve, settlement)?;
+            output["z_spread"] = json!(z);
+            output["spread_dv01"] = json!(bond.spread_dv01(curve, z, settlement)?);
+        }
+    }
+    Ok(output)
 }
 
 fn price_bill(bond_data: &BondData, today: NaiveDate) -> Result<Value, RustyQLibError> {
@@ -282,5 +305,47 @@ mod tests {
         }))
         .unwrap();
         assert!(price_ir_contract(&deposit, today).is_err());
+    }
+
+    #[test]
+    fn corporate_bond_with_benchmark_curve_reports_spread_analytics() {
+        let data = contract(json!({
+            "instrument": "Corporate",
+            "coupon_rate": 0.055,
+            "dated_date": "2026-05-15",
+            "maturity_date": "2031-05-15",
+            "valuation_date": "2026-08-05",
+            "clean_price": 98.75,
+            "curve": { "type": "flat", "rate": 0.04 },
+        }));
+        let result = price_ir_contract(&data, d(2026, 8, 5)).unwrap();
+        let output = &result["output"];
+        assert_eq!(output["instrument"], "Corporate");
+        // corporate defaults: T+2 from Wednesday Aug 5 -> Friday Aug 7,
+        // 30/360 accrued May 15 -> Aug 7 = 82/360 at 5.5%
+        assert_eq!(output["settlement_date"], "2026-08-07");
+        let accrued = output["accrued_interest"].as_f64().unwrap();
+        assert!(
+            (accrued - 100.0 * 0.055 * 82.0 / 360.0).abs() < 1e-9,
+            "accrued {accrued}"
+        );
+        // below par at a 5.5% coupon over a 4% curve: a healthy z-spread
+        let z = output["z_spread"].as_f64().unwrap();
+        assert!(z > 0.01 && z < 0.03, "z-spread {z}");
+        assert!(output["spread_dv01"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn treasury_quote_without_curve_omits_spread_fields() {
+        let data = contract(json!({
+            "instrument": "Bond",
+            "coupon_rate": 0.045,
+            "dated_date": "2026-05-15",
+            "maturity_date": "2028-05-15",
+            "valuation_date": "2026-08-05",
+            "clean_price": 99.50,
+        }));
+        let result = price_ir_contract(&data, d(2026, 8, 5)).unwrap();
+        assert!(result["output"].get("z_spread").is_none());
     }
 }

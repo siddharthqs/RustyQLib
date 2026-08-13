@@ -19,7 +19,7 @@ put-call parity, replication identities and cross-engine agreement in the test s
   tree, finite difference (log-spot Crank-Nicolson with Rannacher smoothing),
   and parallel Monte Carlo — behind one dispatch, so the same contract prices
   on any suitable engine.
-- **Five volatility frameworks** — Black-Scholes, **Dupire local volatility**
+- **Six volatility frameworks** — Black-Scholes, **Dupire local volatility**
   (calibrated non-parametrically from an implied vol surface), **Heston
   stochastic volatility** (semi-analytic characteristic-function pricing +
   Monte Carlo) with **Bates jump-diffusion extensions** (Heston + lognormal
@@ -35,6 +35,13 @@ put-call parity, replication identities and cross-engine agreement in the test s
   **stochastic local volatility** (Heston-style variance times a leverage
   function calibrated to the Dupire surface by the particle / binning
   method, so vanillas reprice while forward smiles stay stochastic),
+  **SABR** (Hagan-Kumar-Lesniewski-Woodward: Hagan's lognormal implied-vol
+  expansion into the Black-Scholes closed forms on the analytic engine —
+  vanillas plus smile-consistent digitals carrying the `vega * dsigma/dK`
+  skew correction — two-factor `(forward, alpha)` Monte Carlo for
+  path-dependent payoffs, per-expiry Levenberg-Marquardt smile calibration
+  at fixed or free `beta`, and a `SabrSurfaceFit` smoother that
+  parameterizes a noisy chain-implied surface into smooth C^2 smiles),
   and **SVI / SSVI parametric implied surfaces** (Gatheral,
   Gatheral-Jacquier) — Levenberg-Marquardt smile and surface calibration,
   Gatheral-Jacquier butterfly (`g(k)`) and calendar no-arbitrage checks, and
@@ -103,7 +110,9 @@ put-call parity, replication identities and cross-engine agreement in the test s
 
 Model availability: local vol runs on the FD and MC engines; Heston runs on the
 analytic (vanilla + binary) and MC engines (all payoffs above except American
-and rainbow); rough Bergomi runs on the MC engine only (European exercise —
+and rainbow); SABR runs on the analytic (vanilla + binary, Hagan vol into the
+Black-Scholes closed forms) and MC engines (European exercise); rough Bergomi
+runs on the MC engine only (European exercise —
 the non-Markovian variance has no characteristic function, PDE state, or
 LSMC-compatible exercise state). Rainbow options are a separate product type
 (`"product_type": "rainbow_option"`) with per-asset spots/vols/dividends and a
@@ -205,7 +214,7 @@ correlation matrix; outputs include per-asset `deltas` and `vegas`.
   Newton-Raphson, secant, Halley, safeguarded Newton — pluggable by enum),
   multi-dimensional optimization (`optimization`: Levenberg-Marquardt, BFGS,
   conjugate gradient, steepest descent, Nelder-Mead, differential evolution —
-  the fitting layer for Heston today, SABR / Nelson-Siegel tomorrow), FD
+  the fitting layer for the Heston, SABR and SVI calibrations), FD
   linear solvers (`fd_solvers`, 1-D to 3-D), asset-agnostic Monte Carlo
   machinery (`montecarlo`: reproducible per-path RNG streams, Sobol with
   digital-shift scrambling, Halton with Cranley-Patterson rotation, Brownian
@@ -336,12 +345,29 @@ plot alongside. Chains discount off a flat `--rate`, or off
 bootstraps into a full discount curve (par yields below one year as
 bills on the discount basis, synthetic par bonds beyond — the explicit
 interpretation step the pass-through `fetch` documents deliberately
-omit). Each surface and local-vol artifact also comes in a **cleaned**
-version (`vol_surface_cleaned`, `local_vol_cleaned`): a minimal-change
+omit). Each surface and local-vol artifact comes in **four flavors**: *raw*
+(the market as quoted, violations reported), *cleaned*
+(`vol_surface_cleaned`, `local_vol_cleaned`: a minimal-change
 static-arbitrage repair — per-expiry convex-hull projection of call
 prices plus a forward total-variance sweep — that moves only violating
-pillars, re-verifies against the diagnostics, and records every
-adjustment in the document metadata. Note the Cboe data is delayed exchange data on
+pillars and records every adjustment), *SVI-fitted*
+(`vol_surface_svi`, `local_vol_svi`: one Gatheral SVI smile per expiry
+calibrated to the cleaned surface, butterfly density checked per
+slice, with **analytic** Dupire local vol from the closed-form SVI
+derivatives — smooth by construction, no interpolation spikes; fit
+RMSE in vol bps per slice lands in the metadata), and *SABR-fitted*
+(`vol_surface_sabr`: one Hagan smile per expiry at `beta = 1`, three
+parameters per slice, wings extrapolated by the model's dynamics —
+the smoothing parameterization of choice when you also want the
+calibrated `(alpha, rho, nu)` per expiry for quoting or hedging). Every local-vol
+document also carries a **usability report**: round-trip repricing of
+interior vanillas through the finite-difference local-vol engine,
+scored in implied-vol basis points against the surface's own vols
+(sampled at delta-comparable strikes), the fraction of the grid pinned
+at the clamps or silently guarded back to implied vol, the
+quote-backed trusted region, and a desk-rule verdict — so "is this
+local vol usable?" is a number in the metadata, not a squint at the
+plot. Note the Cboe data is delayed exchange data on
 personal-use terms, unlike the public-domain government feeds. The `ust` curve is Treasury's *fitted* end-of-day curve
 (par yields read off a spline through the on-the-run quotes), and the
 document says so: every fetched document carries a `metadata` block
@@ -421,7 +447,7 @@ Selected fields (all optional unless noted):
 | `cash_dividends` | discrete dividends `[{"date", "amount"}]`; escrowed model on analytic/tree/terminal-MC, jumps on path-MC and FD |
 | `discount_curve` | `flat`, `zero_rates`, `discount_factors`, `forward_rates` |
 | `vol_surface` | `flat`, `strike_expiry`, `moneyness_expiry`, `delta_expiry` |
-| `mc_model` | `gbm` (default), `local_vol`, `heston` (needs `heston` params), `rbergomi` (needs `rbergomi` params: `xi0`, `eta`, `hurst`, `rho`) |
+| `mc_model` | `gbm` (default), `local_vol`, `heston` (needs `heston` params), `rbergomi` (needs `rbergomi` params: `xi0`, `eta`, `hurst`, `rho`), `sabr` (needs `sabr` params: `alpha`, `beta`, `rho`, `nu`) |
 | `simulation`, `mc_time_steps`, `mc_scheme`, `mc_sampler`, `mc_seed` | Monte Carlo controls |
 | `fd_spot_steps`, `fd_time_steps` | finite difference grid |
 | `tree_type`, `tree_steps` | binomial lattice: `LeisenReimer` (default), `CRR`, `JarrowRudd`, `Tian`, `Trigeorgis`, `EQP`; steps default 1000 |

@@ -14,7 +14,9 @@
 
 use chrono::{Days, Months, NaiveDate};
 
-use crate::bonds::{bootstrap_curve, BillQuote, BondQuote, CurveInstrument, FixedRateBond, TreasuryBill};
+use crate::bonds::{
+    bootstrap_curve, BillQuote, BondQuote, CurveInstrument, FixedRateBond, TreasuryBill,
+};
 use crate::core::calendar::Calendar;
 use crate::core::curves::YieldCurve;
 use crate::core::daycount::DayCountConvention;
@@ -280,9 +282,7 @@ pub fn row_from_document(value: &serde_json::Value) -> Result<ParYieldRow, Rusty
         let yield_pct = entry["yield"].as_f64().ok_or_else(|| {
             RustyQLibError::ParseError(format!("tenor `{label}` has no numeric `yield`"))
         })?;
-        if !(yield_pct.is_finite()
-            && yield_pct > PERCENT_BOUNDS.0
-            && yield_pct < PERCENT_BOUNDS.1)
+        if !(yield_pct.is_finite() && yield_pct > PERCENT_BOUNDS.0 && yield_pct < PERCENT_BOUNDS.1)
         {
             return Err(RustyQLibError::ParseError(format!(
                 "tenor `{label}`: {yield_pct} is outside the plausible percent range — \
@@ -536,7 +536,10 @@ Date,\"1 Mo\",\"Mystery\",\"10 Yr\"
         let ten_year =
             FixedRateBond::us_treasury(100.0, 0.0463, settlement, d(2036, 8, 6)).unwrap();
         let clean = ten_year.clean_price_from_curve(&curve, settlement).unwrap();
-        assert!((clean - 100.0).abs() < 1e-6, "10Y par bond repriced at {clean}");
+        assert!(
+            (clean - 100.0).abs() < 1e-6,
+            "10Y par bond repriced at {clean}"
+        );
         // and the short end reprices the bill implied by the 3M BEY
         let bill = TreasuryBill::new(100.0, d(2026, 11, 6)).unwrap();
         let n = (d(2026, 11, 6) - settlement).num_days() as f64;

@@ -336,6 +336,8 @@ fn solve(
         Model::Heston(_) => unreachable!("Heston is dispatched to heston_adi::solve"),
         // rejected by check_engine_support (Monte Carlo only)
         Model::RBergomi(_) => unreachable!("rBergomi never reaches the FD engine"),
+        // rejected by check_engine_support (Analytical / Monte Carlo only)
+        Model::Sabr(_) => unreachable!("SABR never reaches the FD engine"),
     };
 
     // ── Grid geometry (log-spot). A knock-out barrier becomes the exact

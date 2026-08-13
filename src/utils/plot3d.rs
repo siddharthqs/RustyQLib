@@ -239,11 +239,7 @@ pub fn vol_surface_html(surface: &VolSurface, title: &str) -> String {
 }
 
 /// [`vol_surface_html`] written to `path` (creating parent directories).
-pub fn save_vol_surface_html(
-    surface: &VolSurface,
-    path: &str,
-    title: &str,
-) -> std::io::Result<()> {
+pub fn save_vol_surface_html(surface: &VolSurface, path: &str, title: &str) -> std::io::Result<()> {
     write_html(path, &vol_surface_html(surface, title))
 }
 
@@ -299,7 +295,10 @@ pub fn save_lines_html(
     log_x: bool,
     log_y: bool,
 ) -> std::io::Result<()> {
-    write_html(path, &lines_html(series, title, x_label, y_label, log_x, log_y))
+    write_html(
+        path,
+        &lines_html(series, title, x_label, y_label, log_x, log_y),
+    )
 }
 
 fn write_html(path: &str, html: &str) -> std::io::Result<()> {

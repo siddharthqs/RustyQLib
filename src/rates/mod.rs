@@ -11,6 +11,10 @@
 //!   over the calendar month) and 3-month (SR3, daily compounding over
 //!   an IMM quarter), with a convexity helper for the futures/forward
 //!   bias
+//! - [`models`] — stochastic short-rate models (Vasicek, Hull-White,
+//!   CIR) with exact simulation transitions and analytic zero-bond
+//!   options, plus Jamshidian coupon-bond options, European swaptions
+//!   and caps/floors built on them
 //!
 //! All pricing is linear discounting off [`YieldCurve`]s: each product
 //! takes an explicit **discount** curve and one **forecast** curve per
@@ -27,6 +31,7 @@
 pub mod basis_swap;
 pub mod fed_funds_future;
 pub mod leg;
+pub mod models;
 pub mod ois;
 pub mod overnight;
 pub mod sofr_future;
@@ -35,6 +40,7 @@ pub mod vanilla_swap;
 pub use basis_swap::{BasisSwap, BasisSwapLeg};
 pub use fed_funds_future::FedFundsFuture;
 pub use leg::AccrualPeriod;
+pub use models::{CoxIngersollRoss, HullWhite, OneFactorAffine, ShortRateModel, Vasicek};
 pub use ois::OvernightIndexSwap;
 pub use overnight::{overnight_forward, simple_forward, RateFixings};
 pub use sofr_future::{hull_convexity_adjustment, SofrContract, SofrFuture};

@@ -655,7 +655,14 @@ fn fetch_chain_emits_the_verbatim_feed_response() {
 fn fetch_chain_normalize_emits_the_unified_chain() {
     let doc = stdout_json(
         cli()
-            .args(["fetch", "chain", "--symbol", "AAPL", "--normalize", "--from-file"])
+            .args([
+                "fetch",
+                "chain",
+                "--symbol",
+                "AAPL",
+                "--normalize",
+                "--from-file",
+            ])
             .arg(fixture("cboe_chain_sample.json")),
     );
     assert_eq!(doc["symbol"], "AAPL");
@@ -678,7 +685,15 @@ fn fetch_chain_requires_a_symbol_and_rejects_date() {
         .code(1)
         .stderr(contains("--symbol"));
     cli()
-        .args(["fetch", "chain", "--symbol", "AAPL", "--date", "2026-08-05", "--from-file"])
+        .args([
+            "fetch",
+            "chain",
+            "--symbol",
+            "AAPL",
+            "--date",
+            "2026-08-05",
+            "--from-file",
+        ])
         .arg(fixture("cboe_chain_sample.json"))
         .assert()
         .code(1)
@@ -763,7 +778,9 @@ fn build_from_a_raw_cboe_chain_writes_surface_and_plot() {
     // arbitrage-free, so the repair is a recorded no-op
     let cleaned: Value = serde_json::from_str(
         &std::fs::read_to_string(
-            dir.path().join("vol_surface").join("vol_surface_cleaned.json"),
+            dir.path()
+                .join("vol_surface")
+                .join("vol_surface_cleaned.json"),
         )
         .unwrap(),
     )
@@ -773,7 +790,10 @@ fn build_from_a_raw_cboe_chain_writes_surface_and_plot() {
     assert_eq!(repair["butterfly_adjustments"], 0);
     assert_eq!(repair["calendar_adjustments"], 0);
     assert!(repair["method"].as_str().unwrap().contains("convex-hull"));
-    assert_eq!(cleaned["metadata"]["diagnostics"]["butterfly_violations"], 0);
+    assert_eq!(
+        cleaned["metadata"]["diagnostics"]["butterfly_violations"],
+        0
+    );
     assert_eq!(cleaned["metadata"]["diagnostics"]["calendar_violations"], 0);
     assert_eq!(cleaned["surface"]["type"], "strike_smiles");
     assert!(dir
@@ -795,6 +815,83 @@ fn build_from_a_raw_cboe_chain_writes_surface_and_plot() {
         .as_str()
         .unwrap()
         .contains("arbitrage-repaired"));
+
+    // the third flavor: SVI-fitted surface + analytic SVI local vol
+    let svi: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("vol_surface").join("vol_surface_svi.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let fit = &svi["metadata"]["svi_fit"];
+    let slices = fit["slices"].as_array().unwrap();
+    assert_eq!(slices.len(), 2, "one SVI slice per expiry");
+    for slice in slices {
+        assert!(
+            slice["rmse_vol_bps"].as_f64().unwrap() < 100.0,
+            "fit rmse {slice}"
+        );
+        assert!(
+            slice["min_butterfly_g"].as_f64().unwrap() > 0.0,
+            "fit carries butterfly arbitrage: {slice}"
+        );
+    }
+    // dense sampling: many more pillars than the 14 quoted strikes
+    assert!(svi["surface"]["smiles"][0].as_array().unwrap().len() >= 50);
+    // the SVI local vol is smooth: nothing near the clamps anywhere
+    let lv_svi: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("local_vol").join("local_vol_svi.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(lv_svi["metadata"]["model"]
+        .as_str()
+        .unwrap()
+        .contains("SVI"));
+    let mut max_vol: f64 = 0.0;
+    for row in lv_svi["vols"].as_array().unwrap() {
+        for v in row.as_array().unwrap() {
+            max_vol = max_vol.max(v.as_f64().unwrap());
+        }
+    }
+    assert!(
+        max_vol < 1.0,
+        "SVI local vol should be spike-free on this chain, max {max_vol}"
+    );
+    assert!(dir
+        .path()
+        .join("local_vol")
+        .join("local_vol_svi.html")
+        .exists());
+    assert!(dir
+        .path()
+        .join("vol_surface")
+        .join("vol_surface_svi.html")
+        .exists());
+
+    // every local-vol document carries its usability report
+    for stem in ["local_vol", "local_vol_cleaned", "local_vol_svi"] {
+        let doc: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("local_vol").join(format!("{stem}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        let usability = &doc["metadata"]["usability"];
+        assert!(
+            usability["roundtrip"]["points"].as_u64().unwrap() >= 2,
+            "{stem}: {usability}"
+        );
+        assert_eq!(usability["roundtrip"]["failures"], 0, "{stem}");
+        assert!(
+            usability["roundtrip"]["mean_vol_bps"].as_f64().unwrap() < 100.0,
+            "{stem}: {usability}"
+        );
+        assert!(usability["clamped_fraction"].is_number(), "{stem}");
+        assert!(usability["fallback_fraction"].is_number(), "{stem}");
+        assert!(usability["within_desk_tolerance"].is_boolean(), "{stem}");
+        // trusted region = the quoted box of that flavor's surface
+        let region = &usability["trusted_region"];
+        assert!(region["strike_lo"].as_f64().unwrap() >= 249.0, "{stem}");
+        assert!(region["strike_hi"].as_f64().unwrap() <= 381.0, "{stem}");
+    }
 }
 
 #[test]
@@ -802,7 +899,14 @@ fn fetch_normalize_pipes_into_build() {
     let dir = tempfile::tempdir().unwrap();
     let chain_path = dir.path().join("aapl_chain.json");
     cli()
-        .args(["fetch", "chain", "--symbol", "AAPL", "--normalize", "--from-file"])
+        .args([
+            "fetch",
+            "chain",
+            "--symbol",
+            "AAPL",
+            "--normalize",
+            "--from-file",
+        ])
         .arg(fixture("cboe_chain_sample.json"))
         .arg("-o")
         .arg(&chain_path)
@@ -815,8 +919,16 @@ fn fetch_normalize_pipes_into_build() {
         .arg(dir.path())
         .assert()
         .success();
-    assert!(dir.path().join("vol_surface").join("vol_surface.json").exists());
-    assert!(dir.path().join("vol_surface").join("vol_surface.html").exists());
+    assert!(dir
+        .path()
+        .join("vol_surface")
+        .join("vol_surface.json")
+        .exists());
+    assert!(dir
+        .path()
+        .join("vol_surface")
+        .join("vol_surface.html")
+        .exists());
     assert!(dir.path().join("local_vol").join("local_vol.json").exists());
     assert!(dir.path().join("local_vol").join("local_vol.html").exists());
 }
@@ -850,7 +962,10 @@ fn build_discounts_the_chain_off_a_fetched_treasury_curve() {
     assert!(discount["type"].as_str().unwrap().contains("Treasury"));
     assert_eq!(discount["curve_date"], "2026-08-05");
     assert_eq!(discount["pillars"], 14);
-    assert!(discount["source"].as_str().unwrap().contains("treasury.gov"));
+    assert!(discount["source"]
+        .as_str()
+        .unwrap()
+        .contains("treasury.gov"));
     // parity forwards still land where the quotes put them
     let forward = doc["metadata"]["forwards"]["2026-12-18"].as_f64().unwrap();
     assert!((300.0..335.0).contains(&forward), "forward {forward}");

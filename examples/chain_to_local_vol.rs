@@ -14,8 +14,8 @@ mod common;
 
 use rustyqlib::core::curves::{Compounding, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
-use rustyqlib::core::traits::Instrument;
 use rustyqlib::core::trade::PutOrCall;
+use rustyqlib::core::traits::Instrument;
 use rustyqlib::core::vols::VolSurface;
 use rustyqlib::data::cboe;
 use rustyqlib::equity::blackscholes::bs_price;
@@ -98,7 +98,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     common::section("Step 4: Dupire local vol from the implied surface");
     let lv = LocalVol::new(&surface, &curve, spot, 0.0, 0.0);
-    println!("  {:>10} {:>12} {:>12}", "level", "t=0.15", &format!("t={t:.2}"));
+    println!(
+        "  {:>10} {:>12} {:>12}",
+        "level",
+        "t=0.15",
+        &format!("t={t:.2}")
+    );
     for pct in [0.85, 0.95, 1.0, 1.05, 1.15] {
         let level = spot * pct;
         println!(

@@ -108,7 +108,7 @@ fn route(option: &EquityOption) -> Route {
                 time_bump: maturity_bump(option),
             })
         }
-        _ if option.analytic_heston() => {
+        _ if option.analytic_heston() || option.analytic_sabr() => {
             let s = option.market.spot.value();
             Route::Bump(BumpPolicy {
                 spot_bump: s * 1e-4,

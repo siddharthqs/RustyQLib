@@ -303,6 +303,67 @@ impl HestonProcess {
     }
 }
 
+// ── SABR stochastic volatility ──────────────────────────────────────────
+
+/// SABR dynamics as a 2-state, 2-factor process, state `[F, alpha]`
+/// where `F` is the **forward to the option's expiry** (driftless under
+/// its expiry measure — the measure the Hagan smile lives in):
+///
+/// ```text
+/// dF     = alpha F^beta dW_f
+/// dalpha = nu alpha dW_a,     d<W_f, W_a> = rho dt
+/// ```
+///
+/// `dw` carries **independent** increments; the correlation is applied
+/// inside (Cholesky rows in the diffusion matrix, analytically in
+/// `evolve`). The model-owned step is log-Euler on `F` with the CEV vol
+/// frozen at the step start (positivity-preserving; the absorption at
+/// zero that `beta < 1` admits is unreachable, an acceptable bias at
+/// equity-calibration vol levels) and the **exact** lognormal
+/// transition on `alpha` (a driftless GBM).
+pub struct SabrProcess {
+    pub params: crate::equity::sabr::SabrParams,
+}
+
+impl StochasticProcess for SabrProcess {
+    fn dim(&self) -> usize {
+        2
+    }
+
+    fn factors(&self) -> usize {
+        2
+    }
+
+    fn drift(&self, _t: f64, _x: &[f64], out: &mut [f64]) {
+        out[0] = 0.0;
+        out[1] = 0.0;
+    }
+
+    fn diffusion(&self, _t: f64, x: &[f64], out: &mut [f64]) {
+        let p = &self.params;
+        let (f, alpha) = (x[0].max(0.0), x[1].max(0.0));
+        // row-major 2x2: forward row, then vol row (correlation folded
+        // into the Cholesky structure)
+        out[0] = alpha * f.powf(p.beta);
+        out[1] = 0.0;
+        out[2] = p.nu * alpha * p.rho;
+        out[3] = p.nu * alpha * (1.0 - p.rho * p.rho).sqrt();
+    }
+
+    fn evolve(&self, _t: f64, x: &[f64], dt: f64, dw: &[f64], out: &mut [f64]) {
+        let p = &self.params;
+        let rho_perp = (1.0 - p.rho * p.rho).sqrt();
+        let (f, alpha) = (x[0].max(1e-12), x[1].max(0.0));
+        let dw_f = dw[0];
+        let dw_a = p.rho * dw[0] + rho_perp * dw[1];
+        // lognormal vol of the forward, frozen over the step
+        let sigma_f = alpha * f.powf(p.beta - 1.0);
+        out[0] = f * exp(-0.5 * sigma_f * sigma_f * dt + sigma_f * dw_f);
+        // exact driftless-GBM transition for alpha
+        out[1] = alpha * exp(-0.5 * p.nu * p.nu * dt + p.nu * dw_a);
+    }
+}
+
 // ── Correlated multi-asset lognormal dynamics ───────────────────────────
 
 /// N correlated lognormal assets as one N-state, N-factor process:
