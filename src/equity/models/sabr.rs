@@ -123,7 +123,10 @@ impl SabrParams {
     /// singular-perturbation expansion (eq. A.69), with the standard
     /// numerically stable evaluation of `z / x(z)` on both wings.
     pub fn vol(&self, f: f64, k: f64, t: f64) -> f64 {
-        assert!(f > 0.0 && k > 0.0, "SABR vol needs positive forward and strike");
+        assert!(
+            f > 0.0 && k > 0.0,
+            "SABR vol needs positive forward and strike"
+        );
         let (alpha, beta, rho, nu) = (self.alpha, self.beta, self.rho, self.nu);
         let omb = 1.0 - beta;
         let l = (f / k).ln();
@@ -258,7 +261,10 @@ impl SabrParams {
     ) -> SabrFit {
         let residuals = |u: &[f64]| -> Vec<f64> {
             let p = unpack(u);
-            quotes.iter().map(|&(k, v)| p.vol(forward, k, t) - v).collect()
+            quotes
+                .iter()
+                .map(|&(k, v)| p.vol(forward, k, t) - v)
+                .collect()
         };
         let fit = levenberg_marquardt(&OptimConfig::new(1e-14, 200), &residuals, None, x0);
         let params = unpack(&fit.x);
@@ -292,11 +298,7 @@ fn start_point(quotes: &[(f64, f64)], forward: f64, beta: f64) -> Vec<f64> {
         .map(|&(_, v)| v)
         .unwrap();
     let alpha0 = (atm_vol * forward.powf(1.0 - beta)).max(1e-4);
-    vec![
-        alpha0.ln(),
-        (-0.3_f64).atanh(),
-        0.5_f64.ln(),
-    ]
+    vec![alpha0.ln(), (-0.3_f64).atanh(), 0.5_f64.ln()]
 }
 
 // ── Analytic pricing (Hagan vol into Black-Scholes) ─────────────────────
@@ -524,12 +526,13 @@ impl SabrSurfaceFit {
                 })
                 .collect();
             let fit = SabrParams::calibrate(&quotes, f, t, beta);
-            let (k_lo, k_hi) = quotes
-                .iter()
-                .fold((f64::MAX, f64::MIN), |(lo, hi), &(strike, _)| {
-                    let k = (strike / f).ln();
-                    (lo.min(k), hi.max(k))
-                });
+            let (k_lo, k_hi) =
+                quotes
+                    .iter()
+                    .fold((f64::MAX, f64::MIN), |(lo, hi), &(strike, _)| {
+                        let k = (strike / f).ln();
+                        (lo.min(k), hi.max(k))
+                    });
             let min_g = (0..=200)
                 .map(|i| {
                     fit.params
@@ -864,10 +867,27 @@ mod tests {
             .map(|k| (k, truth.vol(f, k, t)))
             .collect();
         let fit = SabrParams::calibrate(&quotes, f, t, 1.0);
-        assert!(fit.rmse < 1e-7, "vol rmse {} params {:?}", fit.rmse, fit.params);
-        assert!((fit.params.alpha - truth.alpha).abs() < 1e-3, "alpha {}", fit.params.alpha);
-        assert!((fit.params.rho - truth.rho).abs() < 1e-2, "rho {}", fit.params.rho);
-        assert!((fit.params.nu - truth.nu).abs() < 1e-2, "nu {}", fit.params.nu);
+        assert!(
+            fit.rmse < 1e-7,
+            "vol rmse {} params {:?}",
+            fit.rmse,
+            fit.params
+        );
+        assert!(
+            (fit.params.alpha - truth.alpha).abs() < 1e-3,
+            "alpha {}",
+            fit.params.alpha
+        );
+        assert!(
+            (fit.params.rho - truth.rho).abs() < 1e-2,
+            "rho {}",
+            fit.params.rho
+        );
+        assert!(
+            (fit.params.nu - truth.nu).abs() < 1e-2,
+            "nu {}",
+            fit.params.nu
+        );
         assert!(fit.params.validate().is_ok());
         // off-grid strikes match too
         for i in 0..=20 {
@@ -892,16 +912,41 @@ mod tests {
             .map(|k| (k, truth.vol(f, k, t)))
             .collect();
         let fit = SabrParams::calibrate_all(&quotes, f, t);
-        assert!(fit.rmse < 5e-4, "vol rmse {} params {:?}", fit.rmse, fit.params);
+        assert!(
+            fit.rmse < 5e-4,
+            "vol rmse {} params {:?}",
+            fit.rmse,
+            fit.params
+        );
         assert!(fit.params.validate().is_ok());
     }
 
     #[test]
     fn validation_rejects_bad_params() {
-        assert!(SabrParams { alpha: 0.0, ..params() }.validate().is_err());
-        assert!(SabrParams { beta: 1.2, ..params() }.validate().is_err());
-        assert!(SabrParams { rho: -1.0, ..params() }.validate().is_err());
-        assert!(SabrParams { nu: -0.1, ..params() }.validate().is_err());
+        assert!(SabrParams {
+            alpha: 0.0,
+            ..params()
+        }
+        .validate()
+        .is_err());
+        assert!(SabrParams {
+            beta: 1.2,
+            ..params()
+        }
+        .validate()
+        .is_err());
+        assert!(SabrParams {
+            rho: -1.0,
+            ..params()
+        }
+        .validate()
+        .is_err());
+        assert!(SabrParams {
+            nu: -0.1,
+            ..params()
+        }
+        .validate()
+        .is_err());
         assert!(params().validate().is_ok());
     }
 

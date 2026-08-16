@@ -168,7 +168,9 @@ fn main() {
         sp.vol(forward, forward, 0.5) * 100.0,
         sp.vol(forward, forward, 1.0) * 100.0
     );
-    let sampled = surface_fit.to_vol_surface(41).expect("sampling must succeed");
+    let sampled = surface_fit
+        .to_vol_surface(41)
+        .expect("sampling must succeed");
     common::note(&format!(
         "sampled back into a pricing VolSurface with {} expiries (min g > 0: no butterfly arbitrage in the quoted range)",
         sampled.expiry_times().len()
@@ -177,6 +179,9 @@ fn main() {
     // smile-consistent pricing straight off the calibrated params
     common::section("Reprice a 90-strike put off the calibrated smile");
     let put = sabr_price(SPOT, 90.0, RATE, DIV, 1.0, &fit.params, PutOrCall::Put);
-    println!("  NPV {put:>10.4}   at Hagan vol {:.2}%", fit.params.vol(forward, 90.0, 1.0) * 100.0);
+    println!(
+        "  NPV {put:>10.4}   at Hagan vol {:.2}%",
+        fit.params.vol(forward, 90.0, 1.0) * 100.0
+    );
     println!();
 }

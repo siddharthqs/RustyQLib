@@ -18,7 +18,9 @@
 //!   discounting
 //! - [`risk`] — VaR / Expected Shortfall, portfolio scenario risk, volatility
 //!   estimation, performance statistics and VaR backtesting
-//! - [`cmdty`] — commodity options
+//! - [`cmdty`] — commodity swaps (fixed versus the averaged daily index
+//!   price) and Black-76 options on commodity futures, projected on
+//!   commodity forward curves
 //! - `data` *(feature `fetch`)* — free official end-of-day market data:
 //!   the US Treasury daily par yield curve, passed through as published
 //!   with provenance metadata
@@ -47,10 +49,11 @@ pub mod validation;
 
 pub use crate::bonds::{
     bootstrap_credit_curve, bootstrap_curve, conversion_factor, g_spread, BillQuote, BondFuture,
-    BondOptionality, BondQuote, CallOption, CreditCurve, CurveInstrument, DeliverableBond, Deposit,
-    FactorRounding, FixedRateBond, FloatingRateNote, Fra, Frequency, MakeWholeCall, PutOption,
-    TreasuryBill,
+    BondOptionality, BondQuote, CallOption, ConvertibleBond, ConvertibleMarket, CreditCurve,
+    CurveInstrument, DeliverableBond, Deposit, FactorRounding, FixedRateBond, FloatingRateNote,
+    Fra, Frequency, MakeWholeCall, PutOption, TreasuryBill,
 };
+pub use crate::cmdty::{CommodityForwardCurve, CommodityOption, CommoditySwap, PriceFixings};
 pub use crate::core::calendar::{
     BusinessDayConvention, Calendar, DateGeneration, Period, Schedule,
 };

@@ -9,6 +9,8 @@ Cargo.lock
 /docs
 # broker connectivity prototype (IBKR) — private for now, quantdesk-bound
 /broker
+# research papers in progress — not part of the published library
+/papers
 
 # editor backup files
 *~

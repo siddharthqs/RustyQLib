@@ -17,9 +17,15 @@
 //!   cheapest-to-deliver;
 //! - corporate bond analytics: 30/360 T+2 conventions
 //!   ([`FixedRateBond::us_corporate`]), z-spread / spread DV01 / G-spread
-//!   ([`spreads`]), yield-to-call and yield-to-worst ([`CallOption`]),
+//!   / asset-swap spread ([`spreads`]), yield-to-call/put/worst
+//!   ([`CallOption`], [`PutOption`]), step-up coupons and sinking funds,
 //!   floating rate notes with discount margins ([`FloatingRateNote`]),
-//!   and hazard-rate credit pricing ([`credit`]).
+//!   hazard-rate credit pricing and curve bootstrapping ([`credit`]),
+//!   and the Hull-White option model for calls, puts and make-wholes
+//!   ([`callable`]);
+//! - convertible bonds ([`ConvertibleBond`]): Tsiveriotis-Fernandes
+//!   pricing on an equity tree with soft calls, puts, parity/premium
+//!   analytics and implied credit spreads.
 //!
 //! Conventions follow the rest of the library: instruments carry their own
 //! [`DayCountConvention`](crate::core::daycount::DayCountConvention) for
@@ -30,6 +36,7 @@ pub mod bills;
 pub mod bootstrap;
 pub mod build_contracts;
 pub mod callable;
+pub mod convertible;
 pub mod credit;
 pub mod deposit;
 pub mod fixed_rate_bond;
@@ -44,6 +51,7 @@ pub mod spreads;
 pub use bills::TreasuryBill;
 pub use bootstrap::bootstrap_curve;
 pub use callable::{BondOptionality, MakeWholeCall};
+pub use convertible::{ConvertibleBond, ConvertibleMarket};
 pub use credit::{bootstrap_credit_curve, CreditCurve};
 pub use deposit::Deposit;
 pub use fixed_rate_bond::{CallOption, Cashflow, FixedRateBond, PutOption};

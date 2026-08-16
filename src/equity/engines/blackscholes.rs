@@ -2818,8 +2818,8 @@ mod tests {
         let s = option.effective_spot();
         let t = option.time_to_maturity();
         let (r, q) = (option.risk_free_rate(), option.carry_yield());
-        let d2 = ((s / 100.0_f64).ln() + (r - q - 0.5 * sigma_k * sigma_k) * t)
-            / (sigma_k * t.sqrt());
+        let d2 =
+            ((s / 100.0_f64).ln() + (r - q - 0.5 * sigma_k * sigma_k) * t) / (sigma_k * t.sqrt());
         let plain = (-r * t).exp() * norm_cdf(d2);
         assert!(analytic > plain, "corrected={analytic} plain={plain}");
     }
