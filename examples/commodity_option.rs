@@ -7,7 +7,9 @@ use chrono::NaiveDate;
 use rustyqlib::core::curves::{Compounding, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::core::trade::PutOrCall;
-use rustyqlib::{CommodityForwardCurve, CommodityOption, FuturesSettlement};
+use rustyqlib::{
+    AveragePriceOption, Calendar, CommodityForwardCurve, CommodityOption, FuturesSettlement,
+};
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -70,6 +72,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  margined premium {:>10.2} (undiscounted)",
         margined.price(&discount, &forward, vol)?
+    );
+
+    // the Asian-style APO on the same month: averages the daily index
+    // over June's business days, so it samples less variance and prices
+    // below the vanilla
+    let apo = AveragePriceOption::for_month(
+        1_000.0,
+        75.0,
+        PutOrCall::Call,
+        2027,
+        6,
+        Calendar::WeekendsOnly,
+    )?;
+    println!("\nJun-27 75 average price call, same size and vol:");
+    println!(
+        "  averaging      {:>12} business days, settles {}",
+        apo.pricing_days().len(),
+        apo.settlement_date()
+    );
+    println!(
+        "  premium        {:>12.2}",
+        apo.price(&discount, &forward, vol)?
+    );
+    println!(
+        "  delta          {:>12.2}",
+        apo.delta(&discount, &forward, vol)?
+    );
+    println!(
+        "  vega           {:>12.2}",
+        apo.vega(&discount, &forward, vol)?
     );
     Ok(())
 }

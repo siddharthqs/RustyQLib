@@ -53,7 +53,9 @@ pub use crate::bonds::{
     CurveInstrument, DeliverableBond, Deposit, FactorRounding, FixedRateBond, FloatingRateNote,
     Fra, Frequency, MakeWholeCall, PutOption, TreasuryBill,
 };
-pub use crate::cmdty::{CommodityForwardCurve, CommodityOption, CommoditySwap, PriceFixings};
+pub use crate::cmdty::{
+    AveragePriceOption, CommodityForwardCurve, CommodityOption, CommoditySwap, PriceFixings,
+};
 pub use crate::core::calendar::{
     BusinessDayConvention, Calendar, DateGeneration, Period, Schedule,
 };
