@@ -54,7 +54,8 @@ pub use crate::bonds::{
     Fra, Frequency, MakeWholeCall, PutOption, TreasuryBill,
 };
 pub use crate::cmdty::{
-    AveragePriceOption, CommodityForwardCurve, CommodityOption, CommoditySwap, PriceFixings,
+    AveragePriceOption, CommodityBasisSwap, CommodityForwardCurve, CommodityOption, CommoditySwap,
+    CommodityVol, PriceFixings,
 };
 pub use crate::core::calendar::{
     BusinessDayConvention, Calendar, DateGeneration, Period, Schedule,

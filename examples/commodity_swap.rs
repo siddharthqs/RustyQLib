@@ -7,7 +7,7 @@ use chrono::NaiveDate;
 use rustyqlib::core::curves::{Compounding, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::rates::PayerReceiver;
-use rustyqlib::{Calendar, CommodityForwardCurve, CommoditySwap, PriceFixings};
+use rustyqlib::{Calendar, CommodityBasisSwap, CommodityForwardCurve, CommoditySwap, PriceFixings};
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -101,6 +101,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  delta          {:>14.2} (fixed days no longer float)",
         swap.delta_with_fixings(&discount, asof)?
+    );
+
+    // WTI-vs-Brent-style basis swap: receive the WTI strip + spread,
+    // pay the Brent strip trading ~$4 over, each leg on its own calendar
+    let brent = CommodityForwardCurve::from_prices(
+        effective,
+        forward
+            .pillars()
+            .iter()
+            .map(|&(date, price)| (date, price + 4.10))
+            .collect(),
+    )?;
+    let basis = CommodityBasisSwap::monthly(
+        10_000.0,
+        0.0,
+        effective,
+        maturity,
+        Calendar::WeekendsOnly, // WTI-style pricing days
+        Calendar::UkSettlement, // Brent-style pricing days
+    )?;
+    let fair = basis.fair_spread(&discount, &forward, &brent)?;
+    println!("\n6m basis swap, receive WTI + spread vs pay Brent (+$4.10):");
+    println!("  fair spread    {:>14.4}", fair);
+    let mut at_fair = basis.clone();
+    at_fair.spread = fair;
+    println!(
+        "  PV at fair     {:>14.6}",
+        at_fair.pv(&discount, &forward, &brent)?
+    );
+    println!(
+        "  delta A / B    {:>10.2} / {:.2} (outright-flat)",
+        basis.delta_a(&discount)?,
+        basis.delta_b(&discount)?
     );
     Ok(())
 }

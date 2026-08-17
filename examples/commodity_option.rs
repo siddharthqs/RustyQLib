@@ -8,7 +8,8 @@ use rustyqlib::core::curves::{Compounding, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::core::trade::PutOrCall;
 use rustyqlib::{
-    AveragePriceOption, Calendar, CommodityForwardCurve, CommodityOption, FuturesSettlement,
+    AveragePriceOption, Calendar, CommodityForwardCurve, CommodityOption, CommodityVol,
+    FuturesSettlement,
 };
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -41,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let vol = 0.35;
     println!("Jun-27 75 call on 1,000 bbl, 35% vol:");
-    println!("  futures price  {:>12.4}", option.forward_price(&forward)?);
+    println!("  futures price  {:>12.4}", option.forward_price(&forward));
     println!(
         "  premium        {:>12.2}",
         option.price(&discount, &forward, vol)?
@@ -102,6 +103,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  vega           {:>12.2}",
         apo.vega(&discount, &forward, vol)?
+    );
+
+    // a Waha-style basis call: the strip is negative, so Black-76 cannot
+    // price it — quote a Bachelier (normal) vol instead
+    let waha = CommodityForwardCurve::from_prices(
+        valuation,
+        vec![(date(2026, 9, 1), -1.80), (date(2027, 9, 1), 0.40)],
+    )?;
+    let basis_call = CommodityOption::new(
+        10_000.0, // MMBtu
+        -0.50,
+        PutOrCall::Call,
+        date(2027, 5, 17),
+        date(2027, 6, 1),
+        FuturesSettlement::Discounted,
+    )?;
+    let normal_vol = CommodityVol::Normal(1.25); // $/MMBtu per sqrt(year)
+    println!("\nJun-27 -0.50 basis call on a negative strip, Bachelier:");
+    println!("  forward        {:>12.4}", basis_call.forward_price(&waha));
+    println!(
+        "  premium        {:>12.2}",
+        basis_call.price(&discount, &waha, normal_vol)?
+    );
+    println!(
+        "  delta          {:>12.2}",
+        basis_call.greeks(&discount, &waha, normal_vol)?.delta
     );
     Ok(())
 }

@@ -13,10 +13,20 @@
 //! Both settlement styles are supported through
 //! [`FuturesSettlement`]: `Discounted` (up-front premium, the standard
 //! Black-76) and `Margined` (futures-style, undiscounted).
+//!
+//! The distribution model travels with the vol quote
+//! ([`CommodityVol`]): a bare `f64` vol prices under Black-76, a
+//! [`CommodityVol::ShiftedLognormal`] quote under displaced Black-76
+//! (the same kernel on `F + shift`, `K + shift`), and a
+//! [`CommodityVol::Normal`] quote under [`bachelier`] —
+//! the route for underlyings that can print negative (Waha or AECO
+//! basis, WTI in an April-2020 dislocation).
 
 use chrono::NaiveDate;
 
+use crate::cmdty::bachelier;
 use crate::cmdty::forward_curve::CommodityForwardCurve;
+use crate::cmdty::vol::CommodityVol;
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::errors::RustyQLibError;
 use crate::core::results::Greeks;
@@ -59,10 +69,12 @@ impl CommodityOption {
                 format!("quantity must be positive, got {quantity}"),
             ));
         }
-        if !strike.is_finite() || strike <= 0.0 {
+        if !strike.is_finite() {
+            // sign is a model question: Black-76 needs K > 0 (checked at
+            // pricing), Bachelier takes any strike (basis can be negative)
             return Err(RustyQLibError::invalid_input(
                 "commodity option",
-                format!("strike must be positive for Black-76, got {strike}"),
+                format!("strike must be finite, got {strike}"),
             ));
         }
         if underlying_date < expiry_date {
@@ -82,58 +94,87 @@ impl CommodityOption {
     }
 
     /// The underlying futures price: the forward curve read at the
-    /// underlying's delivery date. Errors on a non-positive price —
-    /// Black-76 is lognormal and cannot price a negative underlying.
-    pub fn forward_price(&self, forward: &CommodityForwardCurve) -> Result<f64, RustyQLibError> {
-        let f = forward.price(self.underlying_date);
-        if f <= 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "commodity option",
-                format!("Black-76 needs a positive futures price, got {f}"),
-            ));
-        }
-        Ok(f)
+    /// underlying's delivery date (any sign — whether a model can price
+    /// it is checked when pricing).
+    pub fn forward_price(&self, forward: &CommodityForwardCurve) -> f64 {
+        forward.price(self.underlying_date)
     }
 
-    /// Premium for the whole contract.
+    /// Premium for the whole contract. A bare `f64` vol prices under
+    /// Black-76; pass a [`CommodityVol`] to select the shifted or
+    /// normal model.
     pub fn price(
         &self,
         discount: &YieldCurve,
         forward: &CommodityForwardCurve,
-        vol: f64,
+        vol: impl Into<CommodityVol>,
     ) -> Result<f64, RustyQLibError> {
-        let (f, r, t) = self.market_inputs(discount, forward, vol)?;
+        let quote = vol.into().validated("commodity option")?;
+        let (f, r, t) = self.market_inputs(discount, forward)?;
+        let (pc, s) = (self.put_or_call, self.settlement);
         Ok(self.quantity
-            * black76::price(f, self.strike, r, vol, t, self.put_or_call, self.settlement))
+            * match quote {
+                CommodityVol::Lognormal(v) => {
+                    let (f, k) = self.displaced_inputs(f, 0.0)?;
+                    black76::price(f, k, r, v, t, pc, s)
+                }
+                CommodityVol::ShiftedLognormal { vol, shift } => {
+                    let (f, k) = self.displaced_inputs(f, shift)?;
+                    black76::price(f, k, r, vol, t, pc, s)
+                }
+                CommodityVol::Normal(v) => bachelier::price(f, self.strike, r, v, t, pc, s),
+            })
     }
 
-    /// All Black-76 sensitivities, scaled to the contract. Delta and
-    /// gamma are with respect to the futures price, vega per unit of
-    /// vol, theta per year of calendar time, rho per unit of rate.
+    /// All sensitivities under the quote's model, scaled to the
+    /// contract. Delta and gamma are with respect to the futures price,
+    /// vega per unit of the quote's vol, theta per year of calendar
+    /// time, rho per unit of rate. (Under the shifted model, delta and
+    /// gamma with respect to `F` equal the Black Greeks on `F + shift`;
+    /// `gamma_p` is the elasticity of the displaced underlying.)
     pub fn greeks(
         &self,
         discount: &YieldCurve,
         forward: &CommodityForwardCurve,
-        vol: f64,
+        vol: impl Into<CommodityVol>,
     ) -> Result<Greeks, RustyQLibError> {
-        let (f, r, t) = self.market_inputs(discount, forward, vol)?;
-        let (k, pc, s, q) = (
-            self.strike,
-            self.put_or_call,
-            self.settlement,
-            self.quantity,
-        );
-        Ok(Greeks {
-            delta: q * black76::delta(f, k, r, vol, t, pc, s),
-            gamma: q * black76::gamma(f, k, r, vol, t, s),
-            vega: q * black76::vega(f, k, r, vol, t, s),
-            theta: q * black76::theta(f, k, r, vol, t, pc, s),
-            rho: q * black76::rho(f, k, r, vol, t, pc, s),
-            vanna: q * black76::vanna(f, k, r, vol, t, s),
-            charm: q * black76::charm(f, k, r, vol, t, pc, s),
-            // elasticity is scale-free: quantity cancels
-            gamma_p: black76::gamma_p(f, k, r, vol, t, pc, s),
-            zomma: q * black76::zomma(f, k, r, vol, t, s),
+        let quote = vol.into().validated("commodity option")?;
+        let (f, r, t) = self.market_inputs(discount, forward)?;
+        let (pc, s, q) = (self.put_or_call, self.settlement, self.quantity);
+        Ok(match quote {
+            CommodityVol::Lognormal(vol) | CommodityVol::ShiftedLognormal { vol, .. } => {
+                let shift = match quote {
+                    CommodityVol::ShiftedLognormal { shift, .. } => shift,
+                    _ => 0.0,
+                };
+                let (f, k) = self.displaced_inputs(f, shift)?;
+                Greeks {
+                    delta: q * black76::delta(f, k, r, vol, t, pc, s),
+                    gamma: q * black76::gamma(f, k, r, vol, t, s),
+                    vega: q * black76::vega(f, k, r, vol, t, s),
+                    theta: q * black76::theta(f, k, r, vol, t, pc, s),
+                    rho: q * black76::rho(f, k, r, vol, t, pc, s),
+                    vanna: q * black76::vanna(f, k, r, vol, t, s),
+                    charm: q * black76::charm(f, k, r, vol, t, pc, s),
+                    // elasticity is scale-free: quantity cancels
+                    gamma_p: black76::gamma_p(f, k, r, vol, t, pc, s),
+                    zomma: q * black76::zomma(f, k, r, vol, t, s),
+                }
+            }
+            CommodityVol::Normal(vol) => {
+                let k = self.strike;
+                Greeks {
+                    delta: q * bachelier::delta(f, k, r, vol, t, pc, s),
+                    gamma: q * bachelier::gamma(f, k, r, vol, t, s),
+                    vega: q * bachelier::vega(f, k, r, vol, t, s),
+                    theta: q * bachelier::theta(f, k, r, vol, t, pc, s),
+                    rho: q * bachelier::rho(f, k, r, vol, t, pc, s),
+                    vanna: q * bachelier::vanna(f, k, r, vol, t, s),
+                    charm: q * bachelier::charm(f, k, r, vol, t, pc, s),
+                    gamma_p: bachelier::gamma_p(f, k, r, vol, t, pc, s),
+                    zomma: q * bachelier::zomma(f, k, r, vol, t, s),
+                }
+            }
         })
     }
 
@@ -146,14 +187,60 @@ impl CommodityOption {
         forward: &CommodityForwardCurve,
         premium: f64,
     ) -> Result<f64, RustyQLibError> {
+        self.invert_premium(premium, 10.0, |v| {
+            self.price(discount, forward, CommodityVol::Lognormal(v))
+        })
+    }
+
+    /// The shifted Black-76 volatility (for the given `shift`) that
+    /// reproduces `premium`, by bisection.
+    pub fn implied_vol_shifted(
+        &self,
+        discount: &YieldCurve,
+        forward: &CommodityForwardCurve,
+        premium: f64,
+        shift: f64,
+    ) -> Result<f64, RustyQLibError> {
+        self.invert_premium(premium, 10.0, |v| {
+            self.price(
+                discount,
+                forward,
+                CommodityVol::ShiftedLognormal { vol: v, shift },
+            )
+        })
+    }
+
+    /// The Bachelier (normal) volatility that reproduces `premium`, by
+    /// bisection. Quoted in price units per √year.
+    pub fn implied_vol_normal(
+        &self,
+        discount: &YieldCurve,
+        forward: &CommodityForwardCurve,
+        premium: f64,
+    ) -> Result<f64, RustyQLibError> {
+        // a normal vol has price units: scale the bracket to the market
+        let f = self.forward_price(forward);
+        let hi = 100.0 * (f.abs() + self.strike.abs() + 1.0);
+        self.invert_premium(premium, hi, |v| {
+            self.price(discount, forward, CommodityVol::Normal(v))
+        })
+    }
+
+    /// Shared bisection on a monotone premium-in-vol function over
+    /// `[~0, hi]`.
+    fn invert_premium(
+        &self,
+        premium: f64,
+        hi: f64,
+        price_at: impl Fn(f64) -> Result<f64, RustyQLibError>,
+    ) -> Result<f64, RustyQLibError> {
         if !premium.is_finite() || premium < 0.0 {
             return Err(RustyQLibError::invalid_input(
                 "commodity option",
                 format!("premium must be non-negative, got {premium}"),
             ));
         }
-        let (mut lo, mut hi) = (1e-9, 10.0);
-        let price_at = |v: f64| self.price(discount, forward, v);
+        let (mut lo, mut hi) = (1e-9, hi);
         if price_at(lo)? > premium + 1e-12 {
             return Err(RustyQLibError::invalid_input(
                 "commodity option",
@@ -163,7 +250,7 @@ impl CommodityOption {
         if price_at(hi)? < premium {
             return Err(RustyQLibError::invalid_input(
                 "commodity option",
-                format!("premium {premium} exceeds the vol=1000% price"),
+                format!("premium {premium} exceeds the vol={hi} price"),
             ));
         }
         for _ in 0..200 {
@@ -173,29 +260,45 @@ impl CommodityOption {
             } else {
                 hi = mid;
             }
-            if hi - lo < 1e-12 {
+            if (hi - lo) < 1e-12 * hi.max(1.0) {
                 break;
             }
         }
         Ok(0.5 * (lo + hi))
     }
 
-    /// Resolve `(F, r, t)` for the Black-76 formulas: the futures price
-    /// off the forward curve, and the continuously compounded zero rate
-    /// and year fraction to expiry off the discount curve (so
-    /// `e^{-rt}` is exactly the curve's discount factor to expiry).
+    /// Shift and validate `(F, K)` for the (displaced) Black-76 kernel,
+    /// which is lognormal in `F + shift`.
+    fn displaced_inputs(&self, f: f64, shift: f64) -> Result<(f64, f64), RustyQLibError> {
+        let (fs, ks) = (f + shift, self.strike + shift);
+        if fs <= 0.0 || ks <= 0.0 {
+            let model = if shift == 0.0 {
+                "Black-76".to_string()
+            } else {
+                format!("shift {shift}")
+            };
+            return Err(RustyQLibError::invalid_input(
+                "commodity option",
+                format!(
+                    "forward {f} / strike {} not priceable under {model} \
+                     (shifted values must be positive; use a larger shift \
+                     or a normal vol)",
+                    self.strike
+                ),
+            ));
+        }
+        Ok((fs, ks))
+    }
+
+    /// Resolve `(F, r, t)`: the futures price off the forward curve, and
+    /// the continuously compounded zero rate and year fraction to expiry
+    /// off the discount curve (so `e^{-rt}` is exactly the curve's
+    /// discount factor to expiry).
     fn market_inputs(
         &self,
         discount: &YieldCurve,
         forward: &CommodityForwardCurve,
-        vol: f64,
     ) -> Result<(f64, f64, f64), RustyQLibError> {
-        if !vol.is_finite() || vol < 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "commodity option",
-                format!("volatility must be non-negative, got {vol}"),
-            ));
-        }
         let valuation = discount.reference_date();
         if self.expiry_date < valuation {
             return Err(RustyQLibError::invalid_input(
@@ -203,7 +306,7 @@ impl CommodityOption {
                 format!("option expired {} (valuing {valuation})", self.expiry_date),
             ));
         }
-        let f = self.forward_price(forward)?;
+        let f = self.forward_price(forward);
         let t = discount
             .day_count()
             .year_fraction(valuation, self.expiry_date);
@@ -294,7 +397,7 @@ mod tests {
         )
         .unwrap();
         let option = call(70.0, FuturesSettlement::Discounted);
-        assert_eq!(option.forward_price(&forward).unwrap(), 80.0);
+        assert_eq!(option.forward_price(&forward), 80.0);
         // an option reading F=80 must be worth more than one reading F=70
         let mut at_expiry = option.clone();
         at_expiry.underlying_date = d(EXPIRY.0, EXPIRY.1, EXPIRY.2);
@@ -393,10 +496,171 @@ mod tests {
         let expiry = d(EXPIRY.0, EXPIRY.1, EXPIRY.2);
         let s = FuturesSettlement::Discounted;
         assert!(CommodityOption::new(0.0, 70.0, PutOrCall::Call, expiry, expiry, s).is_err());
-        assert!(CommodityOption::new(1_000.0, -1.0, PutOrCall::Call, expiry, expiry, s).is_err());
+        assert!(
+            CommodityOption::new(1_000.0, f64::NAN, PutOrCall::Call, expiry, expiry, s).is_err()
+        );
+        // a negative strike is a legal contract (basis options); only the
+        // lognormal model refuses to price it
+        let negative_strike =
+            CommodityOption::new(1_000.0, -1.0, PutOrCall::Call, expiry, expiry, s).unwrap();
+        let discount = flat_discount(0.04);
+        let forward = CommodityForwardCurve::flat(2.0, d(REF.0, REF.1, REF.2)).unwrap();
+        assert!(negative_strike.price(&discount, &forward, 0.3).is_err());
+        assert!(negative_strike
+            .price(&discount, &forward, CommodityVol::Normal(1.5))
+            .is_ok());
         // underlying before expiry makes no sense
         assert!(
             CommodityOption::new(1_000.0, 70.0, PutOrCall::Call, expiry, d(2027, 8, 1), s).is_err()
         );
+    }
+
+    #[test]
+    fn shifted_model_is_black76_on_displaced_market() {
+        let discount = flat_discount(0.04);
+        let reference = d(REF.0, REF.1, REF.2);
+        let forward = CommodityForwardCurve::flat(72.0, reference).unwrap();
+        let option = call(70.0, FuturesSettlement::Discounted);
+        // shift 0 collapses to the plain lognormal quote
+        let plain = option.price(&discount, &forward, 0.35).unwrap();
+        let shifted0 = option
+            .price(
+                &discount,
+                &forward,
+                CommodityVol::ShiftedLognormal {
+                    vol: 0.35,
+                    shift: 0.0,
+                },
+            )
+            .unwrap();
+        assert!((plain - shifted0).abs() < 1e-12);
+        // shift s equals a plain option on the market displaced by s
+        let shift = 10.0;
+        let displaced_curve = CommodityForwardCurve::flat(82.0, reference).unwrap();
+        let displaced_option = call(80.0, FuturesSettlement::Discounted);
+        let via_shift = option
+            .price(
+                &discount,
+                &forward,
+                CommodityVol::ShiftedLognormal { vol: 0.35, shift },
+            )
+            .unwrap();
+        let via_displacement = displaced_option
+            .price(&discount, &displaced_curve, 0.35)
+            .unwrap();
+        assert!((via_shift - via_displacement).abs() < 1e-10);
+    }
+
+    #[test]
+    fn shifted_model_prices_a_negative_forward() {
+        // Waha-style: forward at -1.50, strike 0.50, shift 10 keeps the
+        // displaced market lognormal
+        let discount = flat_discount(0.04);
+        let reference = d(REF.0, REF.1, REF.2);
+        let forward = CommodityForwardCurve::flat(-1.50, reference).unwrap();
+        let option = CommodityOption::new(
+            10_000.0,
+            0.50,
+            PutOrCall::Call,
+            d(EXPIRY.0, EXPIRY.1, EXPIRY.2),
+            d(2027, 9, 20),
+            FuturesSettlement::Discounted,
+        )
+        .unwrap();
+        // plain lognormal refuses
+        assert!(option.price(&discount, &forward, 0.35).is_err());
+        let quote = CommodityVol::ShiftedLognormal {
+            vol: 0.35,
+            shift: 10.0,
+        };
+        let price = option.price(&discount, &forward, quote).unwrap();
+        assert!(price > 0.0);
+        // parity still holds: c - p = df * (F - K) * q
+        let mut put = option.clone();
+        put.put_or_call = PutOrCall::Put;
+        let df = discount.df_date(d(EXPIRY.0, EXPIRY.1, EXPIRY.2));
+        let parity = 10_000.0 * df * (-1.50 - 0.50);
+        let diff = price - put.price(&discount, &forward, quote).unwrap();
+        assert!((diff - parity).abs() < 1e-6, "{diff} vs {parity}");
+        // a shift too small to displace the forward positive still errors
+        assert!(option
+            .price(
+                &discount,
+                &forward,
+                CommodityVol::ShiftedLognormal {
+                    vol: 0.35,
+                    shift: 1.0
+                }
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn normal_model_prices_any_sign_and_matches_the_kernel() {
+        let discount = flat_discount(0.04);
+        let reference = d(REF.0, REF.1, REF.2);
+        let forward = CommodityForwardCurve::flat(-5.25, reference).unwrap();
+        let option = CommodityOption::new(
+            10_000.0,
+            -2.0,
+            PutOrCall::Call,
+            d(EXPIRY.0, EXPIRY.1, EXPIRY.2),
+            d(2027, 9, 20),
+            FuturesSettlement::Discounted,
+        )
+        .unwrap();
+        let price = option
+            .price(&discount, &forward, CommodityVol::Normal(4.5))
+            .unwrap();
+        // t = 1 exactly, r from the curve: compare against the kernel
+        let r = -discount.df_date(d(EXPIRY.0, EXPIRY.1, EXPIRY.2)).ln();
+        let kernel = crate::cmdty::bachelier::price(
+            -5.25,
+            -2.0,
+            r,
+            4.5,
+            1.0,
+            PutOrCall::Call,
+            FuturesSettlement::Discounted,
+        );
+        assert!((price - 10_000.0 * kernel).abs() < 1e-6, "{price}");
+        // normal greeks: an OTM call on a negative underlying still has
+        // positive delta and vega
+        let greeks = option
+            .greeks(&discount, &forward, CommodityVol::Normal(4.5))
+            .unwrap();
+        assert!(greeks.delta > 0.0 && greeks.vega > 0.0 && greeks.gamma > 0.0);
+    }
+
+    #[test]
+    fn shifted_and_normal_implied_vols_round_trip() {
+        let discount = flat_discount(0.04);
+        let reference = d(REF.0, REF.1, REF.2);
+        let forward = CommodityForwardCurve::flat(-1.50, reference).unwrap();
+        let option = CommodityOption::new(
+            10_000.0,
+            0.50,
+            PutOrCall::Call,
+            d(EXPIRY.0, EXPIRY.1, EXPIRY.2),
+            d(2027, 9, 20),
+            FuturesSettlement::Discounted,
+        )
+        .unwrap();
+        let shifted_quote = CommodityVol::ShiftedLognormal {
+            vol: 0.42,
+            shift: 10.0,
+        };
+        let premium = option.price(&discount, &forward, shifted_quote).unwrap();
+        let vol = option
+            .implied_vol_shifted(&discount, &forward, premium, 10.0)
+            .unwrap();
+        assert!((vol - 0.42).abs() < 1e-8, "{vol}");
+        let premium_n = option
+            .price(&discount, &forward, CommodityVol::Normal(4.5))
+            .unwrap();
+        let vol_n = option
+            .implied_vol_normal(&discount, &forward, premium_n)
+            .unwrap();
+        assert!((vol_n - 4.5).abs() < 1e-6, "{vol_n}");
     }
 }

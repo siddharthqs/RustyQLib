@@ -25,16 +25,26 @@
 //! Realized fixings shift into an adjusted strike on the remaining
 //! average, so a partially fixed (or fully fixed) option prices
 //! consistently down to its deterministic settlement value.
+//!
+//! The distribution model travels with the vol quote ([`CommodityVol`]):
+//! a bare `f64` prices under the lognormal matching above; a
+//! [`CommodityVol::ShiftedLognormal`] quote runs the same matching on
+//! the displaced observations `F_i + shift` (strike displaced alike);
+//! and a [`CommodityVol::Normal`] quote prices **exactly** — under
+//! one-factor Bachelier dynamics the arithmetic average of the
+//! observations is itself normal, so no moment-matching approximation
+//! is involved and any price sign is fine.
 
 use chrono::NaiveDate;
 
 use crate::cmdty::forward_curve::CommodityForwardCurve;
 use crate::cmdty::swap::PriceFixings;
+use crate::cmdty::vol::CommodityVol;
 use crate::core::calendar::Calendar;
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 use crate::core::trade::PutOrCall;
-use crate::core::utils::norm_cdf;
+use crate::core::utils::{norm_cdf, norm_pdf};
 use crate::rates::overnight::fixing_on_or_before;
 
 /// An average price option on one averaging period. Premium is quoted
@@ -74,10 +84,13 @@ impl AveragePriceOption {
                 format!("quantity must be positive, got {quantity}"),
             ));
         }
-        if !strike.is_finite() || strike <= 0.0 {
+        if !strike.is_finite() {
+            // sign is a model question: any strike is fine under the
+            // normal model, and the lognormal branches handle a
+            // non-positive adjusted strike as a forward
             return Err(RustyQLibError::invalid_input(
                 "average price option",
-                format!("strike must be positive, got {strike}"),
+                format!("strike must be finite, got {strike}"),
             ));
         }
         if averaging_end <= averaging_start {
@@ -152,12 +165,14 @@ impl AveragePriceOption {
     /// Premium for an option whose averaging has not started (every
     /// observation still floats). Once the discount curve's reference
     /// date is inside the averaging period, use
-    /// [`price_with_fixings`](Self::price_with_fixings).
+    /// [`price_with_fixings`](Self::price_with_fixings). A bare `f64`
+    /// vol prices under the lognormal moment matching; pass a
+    /// [`CommodityVol`] to select the shifted or (exact) normal model.
     pub fn price(
         &self,
         discount: &YieldCurve,
         forward: &CommodityForwardCurve,
-        vol: f64,
+        vol: impl Into<CommodityVol>,
     ) -> Result<f64, RustyQLibError> {
         self.price_with_fixings(discount, forward, vol, &PriceFixings::new())
     }
@@ -170,15 +185,10 @@ impl AveragePriceOption {
         &self,
         discount: &YieldCurve,
         forward: &CommodityForwardCurve,
-        vol: f64,
+        vol: impl Into<CommodityVol>,
         fixings: &PriceFixings,
     ) -> Result<f64, RustyQLibError> {
-        if !vol.is_finite() || vol < 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "average price option",
-                format!("volatility must be non-negative, got {vol}"),
-            ));
-        }
+        let quote = vol.into().validated("average price option")?;
         let valuation = discount.reference_date();
         let settlement = self.settlement_date();
         if settlement < valuation {
@@ -207,15 +217,8 @@ impl AveragePriceOption {
             if day < valuation {
                 fixed_sum += fixing_on_or_before(fixings, day)?;
             } else {
-                let f = forward.price(day);
-                if f <= 0.0 {
-                    return Err(RustyQLibError::invalid_input(
-                        "average price option",
-                        format!("moment matching needs a positive forward, got {f} at {day}"),
-                    ));
-                }
                 let t = discount.day_count().year_fraction(valuation, day);
-                unfixed.push((t.max(0.0), f));
+                unfixed.push((t.max(0.0), forward.price(day)));
             }
         }
 
@@ -230,45 +233,27 @@ impl AveragePriceOption {
         }
 
         let nu = unfixed.len() as f64;
-        let m1 = unfixed.iter().map(|&(_, f)| f).sum::<f64>() / nu;
         // remaining strike on the floating average; the realized part is a
         // known shift
         let k_eff = (n * self.strike - fixed_sum) / nu;
         let weight = self.quantity * (nu / n) * df;
-
-        // the whole distribution sits above the adjusted strike: the call
-        // is a forward purchase, the put is worthless
-        if k_eff <= 0.0 {
-            return Ok(match self.put_or_call {
-                PutOrCall::Call => weight * (m1 - k_eff),
-                PutOrCall::Put => 0.0,
-            });
-        }
-
-        // E[A^2]: with observations sorted by date, min(t_i, t_j) = t_i for
-        // j > i, so sum_ij F_i F_j e^{s^2 min} folds into one pass over
-        // suffix sums
-        let sig2 = vol * vol;
-        let mut suffix = m1 * nu; // sum of F_j for j >= i, walked down
-        let mut sum2 = 0.0;
-        for &(t, f) in &unfixed {
-            suffix -= f;
-            sum2 += (sig2 * t).exp() * f * (f + 2.0 * suffix);
-        }
-        let m2 = sum2 / (nu * nu);
-        // total variance of the lognormal proxy; clamp numerical noise
-        let v = (m2.ln() - 2.0 * m1.ln()).max(0.0);
-
-        if v <= 1e-300 {
-            return Ok(weight * intrinsic(m1 - k_eff));
-        }
-        let sq = v.sqrt();
-        let d1 = (m1 / k_eff).ln() / sq + 0.5 * sq;
-        let d2 = d1 - sq;
-        Ok(match self.put_or_call {
-            PutOrCall::Call => weight * (m1 * norm_cdf(d1) - k_eff * norm_cdf(d2)),
-            PutOrCall::Put => weight * (k_eff * norm_cdf(-d2) - m1 * norm_cdf(-d1)),
-        })
+        Ok(weight
+            * match quote {
+                CommodityVol::Lognormal(vol) => {
+                    levy_expectation(&unfixed, k_eff, vol, self.put_or_call)?
+                }
+                // displaced: the same matching on F_i + shift against
+                // K + shift (the fixings algebra displaces the adjusted
+                // strike by exactly `shift` too)
+                CommodityVol::ShiftedLognormal { vol, shift } => {
+                    let displaced: Vec<(f64, f64)> =
+                        unfixed.iter().map(|&(t, f)| (t, f + shift)).collect();
+                    levy_expectation(&displaced, k_eff + shift, vol, self.put_or_call)?
+                }
+                CommodityVol::Normal(vol) => {
+                    normal_expectation(&unfixed, k_eff, vol, self.put_or_call)
+                }
+            })
     }
 
     /// Delta against a parallel move of the forward strip, by central
@@ -278,25 +263,120 @@ impl AveragePriceOption {
         &self,
         discount: &YieldCurve,
         forward: &CommodityForwardCurve,
-        vol: f64,
+        vol: impl Into<CommodityVol>,
     ) -> Result<f64, RustyQLibError> {
+        let quote = vol.into();
         let h = 1e-4;
-        let up = self.price(discount, &forward.bumped(h)?, vol)?;
-        let down = self.price(discount, &forward.bumped(-h)?, vol)?;
+        let up = self.price(discount, &forward.bumped(h)?, quote)?;
+        let down = self.price(discount, &forward.bumped(-h)?, quote)?;
         Ok((up - down) / (2.0 * h))
     }
 
-    /// Vega per unit of volatility, by central bump.
+    /// Vega per unit of the quote's vol, by central bump.
     pub fn vega(
         &self,
         discount: &YieldCurve,
         forward: &CommodityForwardCurve,
-        vol: f64,
+        vol: impl Into<CommodityVol>,
     ) -> Result<f64, RustyQLibError> {
+        let quote = vol.into();
         let h = 1e-4;
-        let up = self.price(discount, forward, vol + h)?;
-        let down = self.price(discount, forward, (vol - h).max(0.0))?;
+        let up = self.price(discount, forward, quote.bumped_vol(h))?;
+        let down = self.price(discount, forward, quote.bumped_vol(-h))?;
         Ok((up - down) / (2.0 * h))
+    }
+}
+
+/// Levy expectation `E[(A_u - k)^+]` (or the put) of the arithmetic
+/// average of lognormal observations `(t_i, F_i)` under one-factor
+/// dynamics with flat vol. Requires every (possibly displaced)
+/// observation positive.
+fn levy_expectation(
+    unfixed: &[(f64, f64)],
+    k_eff: f64,
+    vol: f64,
+    put_or_call: PutOrCall,
+) -> Result<f64, RustyQLibError> {
+    for &(_, f) in unfixed {
+        if f <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "average price option",
+                format!(
+                    "lognormal moment matching needs positive forwards, got {f} \
+                     (after any shift); use a larger shift or a normal vol"
+                ),
+            ));
+        }
+    }
+    let nu = unfixed.len() as f64;
+    let m1 = unfixed.iter().map(|&(_, f)| f).sum::<f64>() / nu;
+
+    // the whole distribution sits above the adjusted strike: the call
+    // is a forward purchase, the put is worthless
+    if k_eff <= 0.0 {
+        return Ok(match put_or_call {
+            PutOrCall::Call => m1 - k_eff,
+            PutOrCall::Put => 0.0,
+        });
+    }
+
+    // E[A^2]: with observations sorted by date, min(t_i, t_j) = t_i for
+    // j > i, so sum_ij F_i F_j e^{s^2 min} folds into one pass over
+    // suffix sums
+    let sig2 = vol * vol;
+    let mut suffix = m1 * nu; // sum of F_j for j >= i, walked down
+    let mut sum2 = 0.0;
+    for &(t, f) in unfixed {
+        suffix -= f;
+        sum2 += (sig2 * t).exp() * f * (f + 2.0 * suffix);
+    }
+    let m2 = sum2 / (nu * nu);
+    // total variance of the lognormal proxy; clamp numerical noise
+    let v = (m2.ln() - 2.0 * m1.ln()).max(0.0);
+
+    let intrinsic = match put_or_call {
+        PutOrCall::Call => (m1 - k_eff).max(0.0),
+        PutOrCall::Put => (k_eff - m1).max(0.0),
+    };
+    if v <= 1e-300 {
+        return Ok(intrinsic);
+    }
+    let sq = v.sqrt();
+    let d1 = (m1 / k_eff).ln() / sq + 0.5 * sq;
+    let d2 = d1 - sq;
+    Ok(match put_or_call {
+        PutOrCall::Call => m1 * norm_cdf(d1) - k_eff * norm_cdf(d2),
+        PutOrCall::Put => k_eff * norm_cdf(-d2) - m1 * norm_cdf(-d1),
+    })
+}
+
+/// Exact expectation `E[(A_u - k)^+]` (or the put) under one-factor
+/// Bachelier dynamics: the average of jointly normal observations is
+/// itself normal with mean `mean(F_i)` and standard deviation
+/// `(vol/nu) * sqrt(sum_ij min(t_i, t_j))`, so no approximation is
+/// needed and any price sign is fine.
+fn normal_expectation(unfixed: &[(f64, f64)], k_eff: f64, vol: f64, put_or_call: PutOrCall) -> f64 {
+    let nu = unfixed.len() as f64;
+    let m1 = unfixed.iter().map(|&(_, f)| f).sum::<f64>() / nu;
+    // sum_ij min(t_i, t_j): with t sorted ascending, t_i is the minimum
+    // in 2*(nu - i) - 1 ordered pairs (0-based i)
+    let min_sum: f64 = unfixed
+        .iter()
+        .enumerate()
+        .map(|(i, &(t, _))| (2.0 * (nu - i as f64) - 1.0) * t)
+        .sum();
+    let sd = vol * min_sum.sqrt() / nu;
+    let moneyness = m1 - k_eff;
+    if sd <= 0.0 {
+        return match put_or_call {
+            PutOrCall::Call => moneyness.max(0.0),
+            PutOrCall::Put => (-moneyness).max(0.0),
+        };
+    }
+    let d = moneyness / sd;
+    match put_or_call {
+        PutOrCall::Call => moneyness * norm_cdf(d) + sd * norm_pdf(d),
+        PutOrCall::Put => -moneyness * norm_cdf(-d) + sd * norm_pdf(d),
     }
 }
 
@@ -553,12 +633,171 @@ mod tests {
     }
 
     #[test]
+    fn shifted_model_is_the_lognormal_on_displaced_market() {
+        let valuation = d(2026, 9, 1);
+        let discount = flat_discount(0.04, valuation);
+        let forward = CommodityForwardCurve::from_prices(
+            valuation,
+            vec![(d(2026, 9, 1), 70.0), (d(2027, 9, 1), 78.0)],
+        )
+        .unwrap();
+        let apo = jun27(75.0, PutOrCall::Call);
+        // shift 0 collapses to the plain quote
+        let plain = apo.price(&discount, &forward, 0.35).unwrap();
+        let shifted0 = apo
+            .price(
+                &discount,
+                &forward,
+                CommodityVol::ShiftedLognormal {
+                    vol: 0.35,
+                    shift: 0.0,
+                },
+            )
+            .unwrap();
+        assert!((plain - shifted0).abs() < 1e-10);
+        // shift s equals the plain model on curve + s and strike + s
+        let shift = 25.0;
+        let displaced_curve = CommodityForwardCurve::from_prices(
+            valuation,
+            vec![(d(2026, 9, 1), 95.0), (d(2027, 9, 1), 103.0)],
+        )
+        .unwrap();
+        let displaced_apo = jun27(100.0, PutOrCall::Call);
+        let via_shift = apo
+            .price(
+                &discount,
+                &forward,
+                CommodityVol::ShiftedLognormal { vol: 0.35, shift },
+            )
+            .unwrap();
+        let via_displacement = displaced_apo
+            .price(&discount, &displaced_curve, 0.35)
+            .unwrap();
+        assert!(
+            (via_shift - via_displacement).abs() < 1e-8,
+            "{via_shift} vs {via_displacement}"
+        );
+    }
+
+    #[test]
+    fn normal_model_single_observation_reduces_to_bachelier() {
+        let valuation = d(2026, 9, 1);
+        let discount = flat_discount(0.04, valuation);
+        let forward = CommodityForwardCurve::flat(-5.25, valuation).unwrap();
+        let apo = AveragePriceOption::new(
+            1_000.0,
+            -2.0,
+            PutOrCall::Call,
+            d(2027, 6, 16),
+            d(2027, 6, 17),
+            Calendar::WeekendsOnly,
+            0,
+        )
+        .unwrap();
+        let t_obs = DayCountConvention::Act365.year_fraction(valuation, d(2027, 6, 16));
+        let kernel = crate::cmdty::bachelier::price(
+            -5.25,
+            -2.0,
+            0.0,
+            4.5,
+            t_obs,
+            PutOrCall::Call,
+            FuturesSettlement::Margined,
+        );
+        let expected = 1_000.0 * discount.df_date(d(2027, 6, 17)) * kernel;
+        let price = apo
+            .price(&discount, &forward, CommodityVol::Normal(4.5))
+            .unwrap();
+        assert!((price - expected).abs() < 1e-8, "{price} vs {expected}");
+    }
+
+    #[test]
+    fn normal_model_parity_and_negative_prices() {
+        // a Waha-style negative strip: lognormal refuses, normal prices
+        let valuation = d(2026, 9, 1);
+        let discount = flat_discount(0.04, valuation);
+        let forward = CommodityForwardCurve::from_prices(
+            valuation,
+            vec![(d(2026, 9, 1), -3.0), (d(2027, 9, 1), 1.0)],
+        )
+        .unwrap();
+        let call = jun27(-0.5, PutOrCall::Call);
+        let put = jun27(-0.5, PutOrCall::Put);
+        assert!(call.price(&discount, &forward, 0.35).is_err());
+        let quote = CommodityVol::Normal(2.5);
+        let c = call.price(&discount, &forward, quote).unwrap();
+        let p = put.price(&discount, &forward, quote).unwrap();
+        assert!(c > 0.0 && p > 0.0);
+        // parity: c - p = df * (E[A] - K) * quantity
+        let days = call.pricing_days();
+        let avg = days.iter().map(|&day| forward.price(day)).sum::<f64>() / days.len() as f64;
+        let parity = 1_000.0 * discount.df_date(call.settlement_date()) * (avg + 0.5);
+        assert!((c - p - parity).abs() < 1e-8, "{} vs {parity}", c - p);
+    }
+
+    #[test]
+    fn normal_model_agrees_with_one_factor_monte_carlo() {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal};
+
+        let valuation = d(2026, 9, 1);
+        let discount = flat_discount(0.04, valuation);
+        let forward = CommodityForwardCurve::from_prices(
+            valuation,
+            vec![(d(2026, 9, 1), 70.0), (d(2027, 9, 1), 78.0)],
+        )
+        .unwrap();
+        let apo = jun27(75.0, PutOrCall::Call);
+        let vol = 20.0; // $/sqrt(year), roughly 27% lognormal at this level
+        let analytic = apo
+            .price(&discount, &forward, CommodityVol::Normal(vol))
+            .unwrap();
+
+        let days = apo.pricing_days();
+        let obs: Vec<(f64, f64)> = days
+            .iter()
+            .map(|&day| {
+                (
+                    DayCountConvention::Act365.year_fraction(valuation, day),
+                    forward.price(day),
+                )
+            })
+            .collect();
+        let df = discount.df_date(apo.settlement_date());
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(11);
+        let paths = 100_000;
+        let mut sum_payoff = 0.0;
+        for _ in 0..paths {
+            let z: Vec<f64> = (0..obs.len())
+                .map(|_| StandardNormal.sample(&mut rng))
+                .collect();
+            for sign in [1.0, -1.0] {
+                let (mut w, mut t_prev, mut avg) = (0.0, 0.0f64, 0.0);
+                for (i, &(t, f)) in obs.iter().enumerate() {
+                    w += (t - t_prev).sqrt() * sign * z[i];
+                    t_prev = t;
+                    avg += f + vol * w;
+                }
+                avg /= obs.len() as f64;
+                sum_payoff += (avg - 75.0).max(0.0);
+            }
+        }
+        let mc = 1_000.0 * df * sum_payoff / (2.0 * paths as f64);
+        // the normal APO formula is exact, so only MC noise separates them
+        let tolerance = 0.005 * analytic;
+        assert!(
+            (analytic - mc).abs() < tolerance,
+            "analytic {analytic} vs MC {mc}"
+        );
+    }
+
+    #[test]
     fn validation_and_degenerate_inputs_error() {
         let cal = Calendar::WeekendsOnly;
         let (s, e) = (d(2027, 6, 1), d(2027, 7, 1));
         let pc = PutOrCall::Call;
         assert!(AveragePriceOption::new(0.0, 75.0, pc, s, e, cal.clone(), 5).is_err());
-        assert!(AveragePriceOption::new(1e3, -75.0, pc, s, e, cal.clone(), 5).is_err());
+        assert!(AveragePriceOption::new(1e3, f64::NAN, pc, s, e, cal.clone(), 5).is_err());
         assert!(AveragePriceOption::new(1e3, 75.0, pc, e, s, cal.clone(), 5).is_err());
         assert!(AveragePriceOption::new(1e3, 75.0, pc, s, e, cal.clone(), -1).is_err());
         let valuation = d(2026, 9, 1);

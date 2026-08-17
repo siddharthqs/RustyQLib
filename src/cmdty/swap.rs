@@ -147,15 +147,7 @@ impl CommoditySwap {
     /// The averaging observations of one period: every business day `d`
     /// on the pricing calendar with `start <= d < end`.
     pub fn pricing_days(&self, period: &AccrualPeriod) -> Vec<NaiveDate> {
-        let mut days = Vec::new();
-        let mut day = period.start;
-        while day < period.end {
-            if self.calendar.is_business_day(day) {
-                days.push(day);
-            }
-            day = day.succ_opt().expect("date in range");
-        }
-        days
+        business_days_in(&self.calendar, period.start, period.end)
     }
 
     /// The floating average of one period, fully projected on the
@@ -178,25 +170,14 @@ impl CommoditySwap {
         fixings: &PriceFixings,
         asof: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
-        let days = self.pricing_days(period);
-        if days.is_empty() {
-            return Err(RustyQLibError::invalid_input(
-                "commodity swap",
-                format!(
-                    "no pricing days between {} and {}",
-                    period.start, period.end
-                ),
-            ));
-        }
-        let mut total = 0.0;
-        for &day in &days {
-            total += if day < asof {
-                fixing_on_or_before(fixings, day)?
-            } else {
-                forward.price(day)
-            };
-        }
-        Ok(total / days.len() as f64)
+        period_average(
+            &self.calendar,
+            period.start,
+            period.end,
+            forward,
+            fixings,
+            asof,
+        )
     }
 
     /// PV of the floating leg (positive, before the payer/receiver
@@ -356,6 +337,55 @@ impl CommoditySwap {
                 .map(|p| discount.df_date(p.payment))
                 .sum::<f64>())
     }
+}
+
+// ── Averaging machinery shared with the basis swap ──────────────────────
+
+/// Every business day of `calendar` in `[start, end)` — the averaging
+/// observations of one calculation period.
+pub(crate) fn business_days_in(
+    calendar: &Calendar,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<NaiveDate> {
+    let mut days = Vec::new();
+    let mut day = start;
+    while day < end {
+        if calendar.is_business_day(day) {
+            days.push(day);
+        }
+        day = day.succ_opt().expect("date in range");
+    }
+    days
+}
+
+/// Arithmetic average of the index over one period's business days:
+/// days strictly before `asof` from `fixings` (carried forward over
+/// gaps), days from `asof` onward from the forward curve.
+pub(crate) fn period_average(
+    calendar: &Calendar,
+    start: NaiveDate,
+    end: NaiveDate,
+    forward: &CommodityForwardCurve,
+    fixings: &PriceFixings,
+    asof: NaiveDate,
+) -> Result<f64, RustyQLibError> {
+    let days = business_days_in(calendar, start, end);
+    if days.is_empty() {
+        return Err(RustyQLibError::invalid_input(
+            "commodity swap",
+            format!("no pricing days between {start} and {end}"),
+        ));
+    }
+    let mut total = 0.0;
+    for &day in &days {
+        total += if day < asof {
+            fixing_on_or_before(fixings, day)?
+        } else {
+            forward.price(day)
+        };
+    }
+    Ok(total / days.len() as f64)
 }
 
 #[cfg(test)]
