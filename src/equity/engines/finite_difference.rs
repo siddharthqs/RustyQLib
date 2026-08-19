@@ -32,7 +32,7 @@ use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::bump::BumpedMarket;
-use crate::equity::local_vol::LocalVol;
+use crate::equity::local_vol::{LocalVol, LocalVolGrid};
 use crate::equity::utils::Model;
 use crate::equity::utils::Payoff;
 use crate::equity::vanilla_option::{BarrierPayoff, EquityOption};
@@ -274,16 +274,16 @@ fn solve_dispatch(
 }
 
 /// Volatility field used to assemble the PDE coefficients.
-enum FdVol<'a> {
+enum FdVol {
     Const(f64),
-    Local(LocalVol<'a>),
+    Grid(LocalVolGrid),
 }
 
-impl FdVol<'_> {
+impl FdVol {
     fn vol(&self, s: f64, calendar_t: f64) -> f64 {
         match self {
             FdVol::Const(v) => *v,
-            FdVol::Local(lv) => lv.vol(s, calendar_t),
+            FdVol::Grid(grid) => grid.vol(s, calendar_t),
         }
     }
 }
@@ -323,15 +323,19 @@ fn solve(
 
     let vol_field = match option.model {
         Model::Gbm => FdVol::Const(sigma_ref),
-        Model::LocalVol => FdVol::Local(LocalVol::new(
-            &option.market.vol_surface,
-            &option.market.discount_curve,
-            // A spot bump moves the valuation point, not the calibrated
-            // local-vol surface reference spot.
-            option.market.spot.value(),
-            q,
-            sigma_bump,
-        )),
+        Model::LocalVol => FdVol::Grid(
+            LocalVol::new(
+                &option.market.vol_surface,
+                &option.market.discount_curve,
+                // A spot bump moves the valuation point, not the calibrated
+                // local-vol surface reference spot.
+                option.market.spot.value(),
+                q,
+                sigma_bump,
+            )
+            // sampled once per solve; the backward march queries t in (0, t]
+            .to_grid(t),
+        ),
         // routed to the 2-D ADI solver in solve_dispatch
         Model::Heston(_) => unreachable!("Heston is dispatched to heston_adi::solve"),
         // rejected by check_engine_support (Monte Carlo only)

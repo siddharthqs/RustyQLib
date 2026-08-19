@@ -7,7 +7,10 @@ use chrono::NaiveDate;
 use rustyqlib::core::curves::{Compounding, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::rates::PayerReceiver;
-use rustyqlib::{Calendar, CommodityBasisSwap, CommodityForwardCurve, CommoditySwap, PriceFixings};
+use rustyqlib::{
+    Calendar, ClewlowStrickland, CommodityBasisSwap, CommodityForwardCurve, CommoditySwap,
+    CommoditySwaption, PriceFixings,
+};
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -134,6 +137,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "  delta A / B    {:>10.2} / {:.2} (outright-flat)",
         basis.delta_a(&discount)?,
         basis.delta_b(&discount)?
+    );
+
+    // swaption: the right (not obligation) to lock a $73 payer swap on
+    // the Mar-Aug 27 strip, decided next February
+    let deferred_swap = CommoditySwap::monthly(
+        10_000.0,
+        73.0,
+        PayerReceiver::Payer,
+        date(2027, 3, 1),
+        date(2027, 9, 1),
+        Calendar::WeekendsOnly,
+    )?;
+    let swaption = CommoditySwaption::new(deferred_swap, date(2027, 2, 22))?;
+    let vol = 0.30;
+    println!("\npayer swaption into a 6m 73.00 swap, expiring 2027-02-22:");
+    println!(
+        "  forward par    {:>14.4}",
+        swaption.forward_par_price(&discount, &forward)?
+    );
+    println!("  annuity        {:>14.2}", swaption.annuity(&discount)?);
+    println!(
+        "  premium        {:>14.2}",
+        swaption.price(&discount, &forward, vol)?
+    );
+    println!(
+        "  delta          {:>14.2}",
+        swaption.delta(&discount, &forward, vol)?
+    );
+    println!(
+        "  vega           {:>14.2}",
+        swaption.vega(&discount, &forward, vol)?
+    );
+
+    // Clewlow-Strickland term structure: calibrate (sigma, alpha) to a
+    // Samuelson-shaped strip of monthly option vols, then reprice the
+    // swaption with maturity-aware covariances
+    let vol_quotes = [
+        // (option expiry, futures maturity, quoted Black vol)
+        (0.10, 0.15, 0.415),
+        (0.35, 0.40, 0.345),
+        (0.60, 0.65, 0.302),
+        (0.85, 0.90, 0.272),
+    ];
+    let fit = ClewlowStrickland::calibrate(&vol_quotes)?;
+    let cs = fit.model;
+    println!("\nClewlow-Strickland fit to the monthly vol strip:");
+    println!(
+        "  sigma / alpha  {:>14.4} / {:.4}  (rmse {:.2e})",
+        cs.sigma, cs.alpha, fit.rmse
+    );
+    println!(
+        "  effective vols: 3m contract {:.4}, 12m contract {:.4}",
+        cs.effective_vol(0.20, 0.25)?,
+        cs.effective_vol(0.95, 1.0)?
+    );
+    println!(
+        "  swaption flat at sigma {:>10.2}",
+        swaption.price(&discount, &forward, cs.sigma)?
+    );
+    println!(
+        "  swaption CS            {:>10.2} (Samuelson-damped)",
+        swaption.price_cs(&discount, &forward, &cs)?
     );
     Ok(())
 }

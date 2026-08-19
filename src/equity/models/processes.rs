@@ -13,14 +13,19 @@ use crate::core::montecarlo::process::{
     numeric_diffusion_dx, DiscretizationScheme, StochasticProcess, StochasticProcess1D,
 };
 use crate::equity::heston::HestonParams;
-use crate::equity::local_vol::LocalVol;
+use crate::equity::local_vol::{LocalVol, LocalVolGrid};
 
 // ── Black-Scholes / local volatility ────────────────────────────────────
 
-/// Volatility dynamics along a path: constant (GBM) or Dupire local vol.
+/// Volatility dynamics along a path: constant (GBM) or Dupire local vol,
+/// lazy or precomputed.
 pub enum VolDynamics<'a> {
     Const(f64),
+    /// Lazy Dupire — recomputed from the implied surface per lookup.
     Local(LocalVol<'a>),
+    /// Dupire sampled and neighbour-repaired on a grid — the pricing
+    /// default (cheap lookups, no implied-vol cliffs at guarded nodes).
+    LocalGrid(LocalVolGrid),
 }
 
 /// Risk-neutral lognormal dynamics `dS = (r - q) S dt + sigma(S, t) S dW`
@@ -46,6 +51,7 @@ impl<'a> BlackScholesProcess<'a> {
         match &self.vol {
             VolDynamics::Const(v) => *v,
             VolDynamics::Local(lv) => lv.vol(s, t),
+            VolDynamics::LocalGrid(grid) => grid.vol(s, t),
         }
     }
 
@@ -94,7 +100,7 @@ impl StochasticProcess1D for BlackScholesProcess<'_> {
     fn diffusion_dx(&self, t: f64, x: f64) -> f64 {
         match &self.vol {
             VolDynamics::Const(sigma) => *sigma,
-            VolDynamics::Local(_) => numeric_diffusion_dx(self, t, x),
+            VolDynamics::Local(_) | VolDynamics::LocalGrid(_) => numeric_diffusion_dx(self, t, x),
         }
     }
 

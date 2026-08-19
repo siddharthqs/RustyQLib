@@ -324,8 +324,9 @@ impl CommoditySwap {
     }
 
     /// `quantity * sum df(pay_i)` over unsettled periods: the PV of one
-    /// unit of fixed price.
-    fn settlement_annuity(
+    /// unit of fixed price (shared with the swaption, whose value is
+    /// quoted per unit of this annuity).
+    pub(crate) fn settlement_annuity(
         &self,
         discount: &YieldCurve,
         asof: NaiveDate,
@@ -489,7 +490,6 @@ mod tests {
     #[test]
     fn fixings_blend_into_a_partially_realized_period() {
         let asof = d(2026, 9, 16);
-        let discount = flat_discount(0.04, asof);
         let forward = CommodityForwardCurve::flat(75.0, asof).unwrap();
         // every realized day fixed at 71
         let mut fixings = PriceFixings::new();

@@ -37,6 +37,7 @@
 
 use chrono::NaiveDate;
 
+use crate::cmdty::clewlow_strickland::ClewlowStrickland;
 use crate::cmdty::forward_curve::CommodityForwardCurve;
 use crate::cmdty::swap::PriceFixings;
 use crate::cmdty::vol::CommodityVol;
@@ -189,6 +190,70 @@ impl AveragePriceOption {
         fixings: &PriceFixings,
     ) -> Result<f64, RustyQLibError> {
         let quote = vol.into().validated("average price option")?;
+        let g = self.gather(discount, forward, fixings)?;
+        let Some((k_eff, weight)) = g.floating(self) else {
+            return Ok(g.deterministic_value(self));
+        };
+        Ok(weight
+            * match quote {
+                CommodityVol::Lognormal(vol) => {
+                    levy_expectation(&g.unfixed, k_eff, vol, self.put_or_call)?
+                }
+                // displaced: the same matching on F_i + shift against
+                // K + shift (the fixings algebra displaces the adjusted
+                // strike by exactly `shift` too)
+                CommodityVol::ShiftedLognormal { vol, shift } => {
+                    let displaced: Vec<(f64, f64)> =
+                        g.unfixed.iter().map(|&(t, f)| (t, f + shift)).collect();
+                    levy_expectation(&displaced, k_eff + shift, vol, self.put_or_call)?
+                }
+                CommodityVol::Normal(vol) => {
+                    normal_expectation(&g.unfixed, k_eff, vol, self.put_or_call)
+                }
+            })
+    }
+
+    /// Premium under Clewlow–Strickland forward dynamics (lognormal
+    /// only): the same Levy moment matching with the flat covariance
+    /// `sigma^2 min(t_i, t_j)` replaced by the CS integrated covariance,
+    /// each daily observation treated as the forward maturing on its own
+    /// date — so prompt observations carry more variance than distant
+    /// ones (Samuelson). `alpha = 0` reproduces
+    /// [`price`](Self::price) with the flat vol `sigma` exactly.
+    pub fn price_cs(
+        &self,
+        discount: &YieldCurve,
+        forward: &CommodityForwardCurve,
+        model: &ClewlowStrickland,
+    ) -> Result<f64, RustyQLibError> {
+        self.price_cs_with_fixings(discount, forward, model, &PriceFixings::new())
+    }
+
+    /// [`price_cs`](Self::price_cs) with realized fixings, split at the
+    /// discount curve's reference date like
+    /// [`price_with_fixings`](Self::price_with_fixings).
+    pub fn price_cs_with_fixings(
+        &self,
+        discount: &YieldCurve,
+        forward: &CommodityForwardCurve,
+        model: &ClewlowStrickland,
+        fixings: &PriceFixings,
+    ) -> Result<f64, RustyQLibError> {
+        let g = self.gather(discount, forward, fixings)?;
+        let Some((k_eff, weight)) = g.floating(self) else {
+            return Ok(g.deterministic_value(self));
+        };
+        Ok(weight * levy_expectation_cs(&g.unfixed, k_eff, model, self.put_or_call)?)
+    }
+
+    /// Split the pricing days into the realized part and the floating
+    /// observations, with the shared settlement/schedule validation.
+    fn gather(
+        &self,
+        discount: &YieldCurve,
+        forward: &CommodityForwardCurve,
+        fixings: &PriceFixings,
+    ) -> Result<Gathered, RustyQLibError> {
         let valuation = discount.reference_date();
         let settlement = self.settlement_date();
         if settlement < valuation {
@@ -209,7 +274,6 @@ impl AveragePriceOption {
         }
         let n = days.len() as f64;
         let df = discount.df_date(settlement);
-
         // realized part, and the still-floating observations
         let mut fixed_sum = 0.0;
         let mut unfixed: Vec<(f64, f64)> = Vec::with_capacity(days.len()); // (t_i, F_i)
@@ -221,39 +285,12 @@ impl AveragePriceOption {
                 unfixed.push((t.max(0.0), forward.price(day)));
             }
         }
-
-        let intrinsic = |avg_minus_k: f64| match self.put_or_call {
-            PutOrCall::Call => avg_minus_k.max(0.0),
-            PutOrCall::Put => (-avg_minus_k).max(0.0),
-        };
-
-        // fully realized: the settlement amount is deterministic
-        if unfixed.is_empty() {
-            return Ok(self.quantity * df * intrinsic(fixed_sum / n - self.strike));
-        }
-
-        let nu = unfixed.len() as f64;
-        // remaining strike on the floating average; the realized part is a
-        // known shift
-        let k_eff = (n * self.strike - fixed_sum) / nu;
-        let weight = self.quantity * (nu / n) * df;
-        Ok(weight
-            * match quote {
-                CommodityVol::Lognormal(vol) => {
-                    levy_expectation(&unfixed, k_eff, vol, self.put_or_call)?
-                }
-                // displaced: the same matching on F_i + shift against
-                // K + shift (the fixings algebra displaces the adjusted
-                // strike by exactly `shift` too)
-                CommodityVol::ShiftedLognormal { vol, shift } => {
-                    let displaced: Vec<(f64, f64)> =
-                        unfixed.iter().map(|&(t, f)| (t, f + shift)).collect();
-                    levy_expectation(&displaced, k_eff + shift, vol, self.put_or_call)?
-                }
-                CommodityVol::Normal(vol) => {
-                    normal_expectation(&unfixed, k_eff, vol, self.put_or_call)
-                }
-            })
+        Ok(Gathered {
+            n,
+            df,
+            fixed_sum,
+            unfixed,
+        })
     }
 
     /// Delta against a parallel move of the forward strip, by central
@@ -285,6 +322,98 @@ impl AveragePriceOption {
         let down = self.price(discount, forward, quote.bumped_vol(-h))?;
         Ok((up - down) / (2.0 * h))
     }
+}
+
+/// The split of one averaging period into its realized and floating
+/// parts, shared by the flat-quote and Clewlow–Strickland pricers.
+struct Gathered {
+    n: f64,
+    df: f64,
+    fixed_sum: f64,
+    unfixed: Vec<(f64, f64)>,
+}
+
+impl Gathered {
+    /// The adjusted strike and discounted weight of the floating part —
+    /// `None` when every pricing day is realized.
+    fn floating(&self, apo: &AveragePriceOption) -> Option<(f64, f64)> {
+        if self.unfixed.is_empty() {
+            return None;
+        }
+        let nu = self.unfixed.len() as f64;
+        // remaining strike on the floating average; the realized part is
+        // a known shift
+        let k_eff = (self.n * apo.strike - self.fixed_sum) / nu;
+        let weight = apo.quantity * (nu / self.n) * self.df;
+        Some((k_eff, weight))
+    }
+
+    /// Fully realized: the discounted deterministic settlement amount.
+    fn deterministic_value(&self, apo: &AveragePriceOption) -> f64 {
+        let avg_minus_k = self.fixed_sum / self.n - apo.strike;
+        let intrinsic = match apo.put_or_call {
+            PutOrCall::Call => avg_minus_k.max(0.0),
+            PutOrCall::Put => (-avg_minus_k).max(0.0),
+        };
+        apo.quantity * self.df * intrinsic
+    }
+}
+
+/// Black value `E[(X - k)^+]` (or the put) of a lognormal `X` with mean
+/// `m1 > 0` and log-variance `v`, struck at `k > 0` — the tail every
+/// lognormal moment-matching pricer shares (APO and swaption).
+pub(crate) fn black_on_lognormal_moments(m1: f64, k: f64, v: f64, put_or_call: PutOrCall) -> f64 {
+    if v <= 1e-300 {
+        return match put_or_call {
+            PutOrCall::Call => (m1 - k).max(0.0),
+            PutOrCall::Put => (k - m1).max(0.0),
+        };
+    }
+    let sq = v.sqrt();
+    let d1 = (m1 / k).ln() / sq + 0.5 * sq;
+    let d2 = d1 - sq;
+    match put_or_call {
+        PutOrCall::Call => m1 * norm_cdf(d1) - k * norm_cdf(d2),
+        PutOrCall::Put => k * norm_cdf(-d2) - m1 * norm_cdf(-d1),
+    }
+}
+
+/// Levy expectation under Clewlow–Strickland dynamics: identical to
+/// [`levy_expectation`] except `E[A^2]` uses the integrated covariance
+/// `model.covariance(t_i, t_i, t_j, t_j)` — each observation is the
+/// forward maturing on its own date — computed O(n^2).
+fn levy_expectation_cs(
+    unfixed: &[(f64, f64)],
+    k_eff: f64,
+    model: &ClewlowStrickland,
+    put_or_call: PutOrCall,
+) -> Result<f64, RustyQLibError> {
+    for &(_, f) in unfixed {
+        if f <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "average price option",
+                format!("lognormal moment matching needs positive forwards, got {f}"),
+            ));
+        }
+    }
+    let nu = unfixed.len() as f64;
+    let m1 = unfixed.iter().map(|&(_, f)| f).sum::<f64>() / nu;
+    // the whole distribution sits above the adjusted strike
+    if k_eff <= 0.0 {
+        return Ok(match put_or_call {
+            PutOrCall::Call => m1 - k_eff,
+            PutOrCall::Put => 0.0,
+        });
+    }
+    let mut sum2 = 0.0;
+    for &(t_i, f_i) in unfixed {
+        for &(t_j, f_j) in unfixed {
+            sum2 += f_i * f_j * model.covariance(t_i, t_i, t_j, t_j).exp();
+        }
+    }
+    let m2 = sum2 / (nu * nu);
+    let v = (m2.ln() - 2.0 * m1.ln()).max(0.0);
+    Ok(black_on_lognormal_moments(m1, k_eff, v, put_or_call))
 }
 
 /// Levy expectation `E[(A_u - k)^+]` (or the put) of the arithmetic
@@ -333,21 +462,7 @@ fn levy_expectation(
     let m2 = sum2 / (nu * nu);
     // total variance of the lognormal proxy; clamp numerical noise
     let v = (m2.ln() - 2.0 * m1.ln()).max(0.0);
-
-    let intrinsic = match put_or_call {
-        PutOrCall::Call => (m1 - k_eff).max(0.0),
-        PutOrCall::Put => (k_eff - m1).max(0.0),
-    };
-    if v <= 1e-300 {
-        return Ok(intrinsic);
-    }
-    let sq = v.sqrt();
-    let d1 = (m1 / k_eff).ln() / sq + 0.5 * sq;
-    let d2 = d1 - sq;
-    Ok(match put_or_call {
-        PutOrCall::Call => m1 * norm_cdf(d1) - k_eff * norm_cdf(d2),
-        PutOrCall::Put => k_eff * norm_cdf(-d2) - m1 * norm_cdf(-d1),
-    })
+    Ok(black_on_lognormal_moments(m1, k_eff, v, put_or_call))
 }
 
 /// Exact expectation `E[(A_u - k)^+]` (or the put) under one-factor
@@ -785,6 +900,107 @@ mod tests {
         let mc = 1_000.0 * df * sum_payoff / (2.0 * paths as f64);
         // the normal APO formula is exact, so only MC noise separates them
         let tolerance = 0.005 * analytic;
+        assert!(
+            (analytic - mc).abs() < tolerance,
+            "analytic {analytic} vs MC {mc}"
+        );
+    }
+
+    #[test]
+    fn cs_with_zero_alpha_reduces_to_the_flat_model() {
+        let valuation = d(2026, 9, 1);
+        let discount = flat_discount(0.04, valuation);
+        let forward = CommodityForwardCurve::from_prices(
+            valuation,
+            vec![(d(2026, 9, 1), 70.0), (d(2027, 9, 1), 78.0)],
+        )
+        .unwrap();
+        let apo = jun27(75.0, PutOrCall::Call);
+        let flat = apo.price(&discount, &forward, 0.35).unwrap();
+        let cs = ClewlowStrickland::new(0.35, 0.0).unwrap();
+        let via_cs = apo.price_cs(&discount, &forward, &cs).unwrap();
+        assert!((flat - via_cs).abs() < 1e-8 * flat, "{flat} vs {via_cs}");
+    }
+
+    #[test]
+    fn samuelson_decay_cheapens_the_apo() {
+        // with T_i = t_i each observation has accrued less variance than
+        // sigma^2 t_i, so the CS price sits below the flat price at the
+        // same sigma
+        let valuation = d(2026, 9, 1);
+        let discount = flat_discount(0.04, valuation);
+        let forward = CommodityForwardCurve::flat(75.0, valuation).unwrap();
+        let apo = jun27(75.0, PutOrCall::Call);
+        let flat = apo.price(&discount, &forward, 0.45).unwrap();
+        let cs = ClewlowStrickland::new(0.45, 1.4).unwrap();
+        let damped = apo.price_cs(&discount, &forward, &cs).unwrap();
+        assert!(damped < flat, "{damped} vs {flat}");
+        // and stronger decay dampens further
+        let cs_fast = ClewlowStrickland::new(0.45, 3.0).unwrap();
+        let more = apo.price_cs(&discount, &forward, &cs_fast).unwrap();
+        assert!(more < damped, "{more} vs {damped}");
+    }
+
+    #[test]
+    fn cs_moment_matching_agrees_with_exact_simulation() {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal};
+
+        let valuation = d(2026, 9, 1);
+        let discount = flat_discount(0.04, valuation);
+        let forward = CommodityForwardCurve::from_prices(
+            valuation,
+            vec![(d(2026, 9, 1), 70.0), (d(2027, 9, 1), 78.0)],
+        )
+        .unwrap();
+        let apo = jun27(75.0, PutOrCall::Call);
+        let cs = ClewlowStrickland::new(0.45, 1.4).unwrap();
+        let analytic = apo.price_cs(&discount, &forward, &cs).unwrap();
+
+        // exact joint law of the observations: Cholesky of the CS
+        // covariance matrix (T_i = t_i), no discretization error
+        let days = apo.pricing_days();
+        let obs: Vec<(f64, f64)> = days
+            .iter()
+            .map(|&day| {
+                (
+                    DayCountConvention::Act365.year_fraction(valuation, day),
+                    forward.price(day),
+                )
+            })
+            .collect();
+        let n = obs.len();
+        let mut chol = vec![vec![0.0f64; n]; n];
+        for i in 0..n {
+            for j in 0..=i {
+                let c = cs.covariance(obs[i].0, obs[i].0, obs[j].0, obs[j].0);
+                let s: f64 = (0..j).map(|k| chol[i][k] * chol[j][k]).sum();
+                if i == j {
+                    chol[i][j] = (c - s).sqrt();
+                } else {
+                    chol[i][j] = (c - s) / chol[j][j];
+                }
+            }
+        }
+        let df = discount.df_date(apo.settlement_date());
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(19);
+        let paths = 50_000;
+        let mut sum_payoff = 0.0;
+        for _ in 0..paths {
+            let z: Vec<f64> = (0..n).map(|_| StandardNormal.sample(&mut rng)).collect();
+            for sign in [1.0, -1.0] {
+                let mut avg = 0.0;
+                for i in 0..n {
+                    let x: f64 = (0..=i).map(|k| chol[i][k] * sign * z[k]).sum();
+                    let var = cs.covariance(obs[i].0, obs[i].0, obs[i].0, obs[i].0);
+                    avg += obs[i].1 * (x - 0.5 * var).exp();
+                }
+                avg /= n as f64;
+                sum_payoff += (avg - 75.0).max(0.0);
+            }
+        }
+        let mc = 1_000.0 * df * sum_payoff / (2.0 * paths as f64);
+        let tolerance = 0.01 * analytic;
         assert!(
             (analytic - mc).abs() < tolerance,
             "analytic {analytic} vs MC {mc}"
