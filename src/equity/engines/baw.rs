@@ -98,7 +98,13 @@ fn d1_of(s: f64, k: f64, b: f64, sigma: f64, t: f64) -> f64 {
 /// the quadratic approximation, using the finite-maturity `K` factor.
 fn quadratic_root(r: f64, b: f64, sigma: f64, t: f64, call: bool) -> f64 {
     let n = 2.0 * b / (sigma * sigma);
-    let kf = 2.0 * r / (sigma * sigma * (1.0 - (-r * t).exp()));
+    // 1 - e^{-rt} via exp_m1 for stability near r = 0; at r = 0 the
+    // 0/0 form has the finite limit 2 / (sigma^2 t).
+    let kf = if (r * t).abs() < 1e-12 {
+        2.0 / (sigma * sigma * t)
+    } else {
+        2.0 * r / (sigma * sigma * -(-r * t).exp_m1())
+    };
     let disc = ((n - 1.0).powi(2) + 4.0 * kf).sqrt();
     if call {
         (-(n - 1.0) + disc) / 2.0

@@ -377,13 +377,22 @@ impl EquityOption {
                     "Path-dependent payoffs are not supported on the Binomial engine",
                 );
             }
-            if matches!(self.engine, PricingEngine::FiniteDifference(_))
-                && !matches!(self.payoff.payoff_kind(), PayoffType::Barrier)
-            {
-                return unsupported(
-                    "Of the path-dependent payoffs only barriers price on the FD \
-                     engine; use MonteCarlo",
-                );
+            if matches!(self.engine, PricingEngine::FiniteDifference(_)) {
+                if !matches!(self.payoff.payoff_kind(), PayoffType::Barrier) {
+                    return unsupported(
+                        "Of the path-dependent payoffs only barriers price on the FD \
+                         engine; use MonteCarlo",
+                    );
+                }
+                if let Some(barrier) = self.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+                    if barrier.barrier2.is_some() || barrier.rebate != 0.0 {
+                        return unsupported(
+                            "double barriers and rebates are not supported on the FD \
+                             engine; use the Analytical engine (or MonteCarlo for \
+                             at-expiry rebates)",
+                        );
+                    }
+                }
             }
             if matches!(self.engine, PricingEngine::BlackScholes)
                 && matches!(
@@ -421,6 +430,19 @@ impl EquityOption {
                      LSMC regression cannot represent",
                 );
             }
+        }
+        if self.model == Model::LocalVol
+            && !matches!(
+                self.engine,
+                PricingEngine::MonteCarlo(_) | PricingEngine::FiniteDifference(_)
+            )
+        {
+            return unsupported(
+                "The local volatility model prices on the MonteCarlo and \
+                 FiniteDifference engines only; the Analytical, Binomial and \
+                 American-approximation engines would silently ignore the \
+                 calibrated local-vol dynamics",
+            );
         }
         if self.model.is_sabr() {
             if !matches!(

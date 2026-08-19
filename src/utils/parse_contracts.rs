@@ -8,7 +8,7 @@ use crate::core::vols::{VolInput, VolSurface};
 use crate::data::cboe;
 use crate::equity::build_contracts::build_eq_contracts_from_json;
 use crate::equity::handle_equity_contracts::handle_equity_contract;
-use crate::equity::local_vol::LocalVol;
+use crate::equity::local_vol::{LocalVol, LocalVolGrid};
 use crate::equity::option_chain::{implied_vol_surface_from_chain, FilterConfig, OptionChain};
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::sabr::SabrSurfaceFit;
@@ -256,6 +256,36 @@ fn build_chain_surface(
         },
     )?;
 
+    // the same transformation as the pricing engines consume it: sampled
+    // on the artifact axes and neighbour-repaired (guarded nodes bridged
+    // from Dupire-valid neighbours instead of implied-vol fallbacks)
+    let (levels, times) = local_vol_axes(&surface);
+    let raw_grid = LocalVolGrid::sample(&raw_local_vol, levels, times);
+    let raw_grid_note = format!(
+        "sampled + neighbour-repaired grid (the pricing engines' form); \
+         {} guarded nodes bridged from valid neighbours; clamped to [1%, 300%]",
+        raw_grid.repaired_nodes()
+    );
+    write_local_vol_artifacts(
+        &surface,
+        &|level, t| raw_grid.vol_checked(level, t),
+        spot,
+        &curve,
+        &discount_meta,
+        chain,
+        output_folder,
+        &LocalVolSpec {
+            stem: "local_vol_grid",
+            title: &format!(
+                "{} Dupire local vol (pricing grid) \u{2014} {}",
+                chain.symbol, chain.as_of
+            ),
+            model: "Dupire local volatility (sampled + neighbour-repaired grid)",
+            derived_from: "the as-quoted implied surface",
+            note: &raw_grid_note,
+        },
+    )?;
+
     // cleaned versions: minimal-change static-arbitrage repair (convex
     // hull of call prices per expiry + forward total-variance sweep),
     // then the same artifacts again from the repaired surface
@@ -324,6 +354,33 @@ fn build_chain_surface(
             model: "Dupire local volatility",
             derived_from: "the arbitrage-repaired implied surface",
             note: numeric_note,
+        },
+    )?;
+
+    let (levels, times) = local_vol_axes(&cleaned);
+    let cleaned_grid = LocalVolGrid::sample(&cleaned_local_vol, levels, times);
+    let cleaned_grid_note = format!(
+        "sampled + neighbour-repaired grid (the pricing engines' form); \
+         {} guarded nodes bridged from valid neighbours; clamped to [1%, 300%]",
+        cleaned_grid.repaired_nodes()
+    );
+    write_local_vol_artifacts(
+        &cleaned,
+        &|level, t| cleaned_grid.vol_checked(level, t),
+        spot,
+        &curve,
+        &discount_meta,
+        chain,
+        output_folder,
+        &LocalVolSpec {
+            stem: "local_vol_grid_cleaned",
+            title: &format!(
+                "{} Dupire local vol (arbitrage-repaired, pricing grid) \u{2014} {}",
+                chain.symbol, chain.as_of
+            ),
+            model: "Dupire local volatility (sampled + neighbour-repaired grid)",
+            derived_from: "the arbitrage-repaired implied surface",
+            note: &cleaned_grid_note,
         },
     )?;
 

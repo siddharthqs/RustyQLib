@@ -315,7 +315,10 @@ pub(crate) fn probabilities_with_cf(cf: &dyn Fn(Cpx) -> Cpx, forward: f64, k: f6
             }
             lo = hi;
         }
-        0.5 + total / std::f64::consts::PI
+        // integration noise on extreme parameter sets can push the
+        // probability marginally outside [0, 1]; clamp so downstream
+        // prices (binaries in particular) stay arbitrage-free
+        (0.5 + total / std::f64::consts::PI).clamp(0.0, 1.0)
     };
     (p(true), p(false))
 }

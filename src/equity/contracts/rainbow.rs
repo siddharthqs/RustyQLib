@@ -243,7 +243,12 @@ impl RainbowOption {
         let discount_curve = match &data.discount_curve {
             Some(input) => YieldCurve::from_input(input, valuation_date)?,
             None => YieldCurve::flat(
-                data.risk_free_rate.unwrap_or(0.0),
+                data.risk_free_rate.ok_or_else(|| {
+                    RustyQLibError::invalid_input(
+                        "risk_free_rate",
+                        "either risk_free_rate or discount_curve must be provided",
+                    )
+                })?,
                 valuation_date,
                 DayCountConvention::Act365,
                 Compounding::Continuous,

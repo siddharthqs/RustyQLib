@@ -332,6 +332,20 @@ impl PayoffSpec {
                         ctx.valuation_date,
                         ctx.maturity_date,
                     )?;
+                    // the payoff observes the terminal redemption at the
+                    // final date and discounts it there; a last observation
+                    // short of maturity would misdate the maturity cash flow
+                    if dates.last() != Some(&ctx.maturity_date) {
+                        return invalid(
+                            "autocall_observation_dates",
+                            format!(
+                                "the final observation must fall on the maturity date \
+                                 {}; got {}",
+                                ctx.maturity_date,
+                                dates.last().unwrap()
+                            ),
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -508,12 +522,12 @@ impl PayoffSpec {
 
 pub struct EquityOptionBuilder {
     symbol: String,
-    spot: f64,
+    spot: Option<f64>,
     strike: f64,
     vol_surface: Option<VolSurface>,
-    flat_vol: f64,
+    flat_vol: Option<f64>,
     discount_curve: Option<YieldCurve>,
-    flat_rate: f64,
+    flat_rate: Option<f64>,
     dividend_yield: f64,
     borrow_cost: f64,
     cash_dividends: Vec<(NaiveDate, f64)>,
@@ -549,12 +563,14 @@ impl EquityOptionBuilder {
     pub fn new() -> Self {
         EquityOptionBuilder {
             symbol: "TEST".to_string(),
-            spot: 100.0,
+            // spot, vol and rate carry no defaults: a forgotten setter is
+            // a build() error, never a silently priced S=100 / 20% / 0%
+            spot: None,
             strike: 100.0,
             vol_surface: None,
-            flat_vol: 0.2,
+            flat_vol: None,
             discount_curve: None,
-            flat_rate: 0.0,
+            flat_rate: None,
             dividend_yield: 0.0,
             borrow_cost: 0.0,
             cash_dividends: Vec::new(),
@@ -582,7 +598,7 @@ impl EquityOptionBuilder {
         self
     }
     pub fn spot(mut self, spot: f64) -> Self {
-        self.spot = spot;
+        self.spot = Some(spot);
         self
     }
     pub fn strike(mut self, strike: f64) -> Self {
@@ -590,7 +606,7 @@ impl EquityOptionBuilder {
         self
     }
     pub fn flat_vol(mut self, vol: f64) -> Self {
-        self.flat_vol = vol;
+        self.flat_vol = Some(vol);
         self.vol_surface = None;
         self
     }
@@ -599,7 +615,7 @@ impl EquityOptionBuilder {
         self
     }
     pub fn flat_rate(mut self, rate: f64) -> Self {
-        self.flat_rate = rate;
+        self.flat_rate = Some(rate);
         self.discount_curve = None;
         self
     }
@@ -1093,7 +1109,14 @@ impl EquityOptionBuilder {
                         crate::core::calendar::BusinessDayConvention::ModifiedFollowing,
                         crate::core::calendar::DateGeneration::Backward,
                     )?;
-                    *observation_dates = Some(schedule.dates);
+                    let mut dates = schedule.dates;
+                    // pin the final observation to expiry: the terminal
+                    // redemption is observed at maturity by definition, and
+                    // business-day adjustment must not move it earlier
+                    if let Some(last) = dates.last_mut() {
+                        *last = maturity_date;
+                    }
+                    *observation_dates = Some(dates);
                 }
                 _ => {
                     return invalid(
@@ -1103,8 +1126,11 @@ impl EquityOptionBuilder {
                 }
             }
         }
+        let spot = self
+            .spot
+            .expect("validate_market_data guarantees spot is set");
         let ctx = BuildContext {
-            spot: self.spot,
+            spot,
             strike: self.strike,
             valuation_date: self.valuation_date,
             maturity_date,
@@ -1170,7 +1196,8 @@ impl EquityOptionBuilder {
         let discount_curve = match self.discount_curve {
             Some(c) => c,
             None => YieldCurve::flat(
-                self.flat_rate,
+                self.flat_rate
+                    .expect("validate_market_data guarantees flat_rate when no curve"),
                 self.valuation_date,
                 DayCountConvention::Act365,
                 Compounding::Continuous,
@@ -1179,7 +1206,8 @@ impl EquityOptionBuilder {
         let vol_surface = match self.vol_surface {
             Some(s) => s,
             None => VolSurface::flat(
-                self.flat_vol,
+                self.flat_vol
+                    .expect("validate_market_data guarantees flat_vol when no surface"),
                 self.valuation_date,
                 DayCountConvention::Act365,
             )?,
@@ -1205,7 +1233,7 @@ impl EquityOptionBuilder {
         };
         let market = crate::equity::vanilla_option::EquityMarketData {
             valuation_date: self.valuation_date,
-            spot: Quote::new(self.spot),
+            spot: Quote::new(spot),
             dividend_yield: self.dividend_yield,
             borrow_cost: self.borrow_cost,
             cash_dividends: self.cash_dividends,
@@ -1252,23 +1280,48 @@ impl EquityOptionBuilder {
                 reason,
             })
         };
-        if !(self.spot.is_finite() && self.spot > 0.0) {
+        let spot = match self.spot {
+            Some(s) => s,
+            None => return invalid("spot", "set spot() before build()".to_string()),
+        };
+        if !(spot.is_finite() && spot > 0.0) {
             return invalid(
                 "spot",
-                format!("spot must be positive and finite, got {}", self.spot),
+                format!("spot must be positive and finite, got {spot}"),
             );
         }
-        if self.vol_surface.is_none() && !(self.flat_vol.is_finite() && self.flat_vol > 0.0) {
-            return invalid(
-                "flat_vol",
-                format!(
-                    "volatility must be positive and finite, got {}",
-                    self.flat_vol
-                ),
-            );
+        if self.vol_surface.is_none() {
+            match self.flat_vol {
+                None => {
+                    return invalid(
+                        "flat_vol",
+                        "set flat_vol() or vol_surface() before build()".to_string(),
+                    )
+                }
+                Some(v) if !(v.is_finite() && v > 0.0) => {
+                    return invalid(
+                        "flat_vol",
+                        format!("volatility must be positive and finite, got {v}"),
+                    );
+                }
+                Some(_) => {}
+            }
+        }
+        if self.discount_curve.is_none() {
+            match self.flat_rate {
+                None => {
+                    return invalid(
+                        "flat_rate",
+                        "set flat_rate() or discount_curve() before build()".to_string(),
+                    )
+                }
+                Some(r) if !r.is_finite() => {
+                    return invalid("flat_rate", format!("flat_rate must be finite, got {r}"));
+                }
+                Some(_) => {}
+            }
         }
         for (name, x) in [
-            ("flat_rate", self.flat_rate),
             ("dividend_yield", self.dividend_yield),
             ("borrow_cost", self.borrow_cost),
         ] {
@@ -1314,6 +1367,8 @@ mod tests {
     fn builder_carries_dividends_and_borrow() {
         let option = EquityOptionBuilder::new()
             .spot(100.0)
+            .flat_vol(0.2)
+            .flat_rate(0.05)
             .dividend_yield(0.01)
             .borrow_cost(0.02)
             .years_to_maturity(1.0)
@@ -1330,6 +1385,8 @@ mod tests {
         for build_order_reversed in [false, true] {
             let b = EquityOptionBuilder::new()
                 .spot(100.0)
+                .flat_vol(0.2)
+                .flat_rate(0.05)
                 .years_to_maturity(1.0)
                 .engine(Engine::Binomial);
             let b = if build_order_reversed {
@@ -1358,6 +1415,9 @@ mod tests {
 
         let base = || {
             EquityOptionBuilder::new()
+                .spot(100.0)
+                .flat_vol(0.2)
+                .flat_rate(0.05)
                 .years_to_maturity(1.0)
                 .vanilla(PutOrCall::Call)
         };
@@ -1365,8 +1425,49 @@ mod tests {
         assert_eq!(field(base().spot(-1.0).build()), "spot");
         assert_eq!(field(base().flat_vol(0.0).build()), "flat_vol");
         assert_eq!(field(base().strike(f64::NAN).build()), "strike");
+        // spot, vol and rate carry no defaults: forgetting one is an error
         assert_eq!(
-            field(EquityOptionBuilder::new().vanilla(PutOrCall::Call).build()),
+            field(
+                EquityOptionBuilder::new()
+                    .flat_vol(0.2)
+                    .flat_rate(0.05)
+                    .years_to_maturity(1.0)
+                    .vanilla(PutOrCall::Call)
+                    .build()
+            ),
+            "spot"
+        );
+        assert_eq!(
+            field(
+                EquityOptionBuilder::new()
+                    .spot(100.0)
+                    .flat_rate(0.05)
+                    .years_to_maturity(1.0)
+                    .vanilla(PutOrCall::Call)
+                    .build()
+            ),
+            "flat_vol"
+        );
+        assert_eq!(
+            field(
+                EquityOptionBuilder::new()
+                    .spot(100.0)
+                    .flat_vol(0.2)
+                    .years_to_maturity(1.0)
+                    .vanilla(PutOrCall::Call)
+                    .build()
+            ),
+            "flat_rate"
+        );
+        assert_eq!(
+            field(
+                EquityOptionBuilder::new()
+                    .spot(100.0)
+                    .flat_vol(0.2)
+                    .flat_rate(0.05)
+                    .vanilla(PutOrCall::Call)
+                    .build()
+            ),
             "maturity_date"
         );
         assert_eq!(
@@ -1374,7 +1475,14 @@ mod tests {
             "maturity_date"
         );
         assert_eq!(
-            field(EquityOptionBuilder::new().years_to_maturity(1.0).build()),
+            field(
+                EquityOptionBuilder::new()
+                    .spot(100.0)
+                    .flat_vol(0.2)
+                    .flat_rate(0.05)
+                    .years_to_maturity(1.0)
+                    .build()
+            ),
             "payoff"
         );
         assert_eq!(
@@ -1420,6 +1528,8 @@ mod tests {
         // an option that builds must price: engine support is checked here
         let result = EquityOptionBuilder::new()
             .spot(100.0)
+            .flat_vol(0.2)
+            .flat_rate(0.05)
             .years_to_maturity(1.0)
             .vanilla(PutOrCall::Call)
             .american()
@@ -1434,6 +1544,8 @@ mod tests {
         // grid does not carry; formerly a pricing-time panic
         let result = EquityOptionBuilder::new()
             .spot(100.0)
+            .flat_vol(0.2)
+            .flat_rate(0.05)
             .years_to_maturity(1.0)
             .barrier(PutOrCall::Call, BarrierDirection::Up, KnockType::Out, 120.0)
             .barrier_rebate(5.0, true)
@@ -1521,6 +1633,9 @@ mod tests {
         };
         let base = || {
             EquityOptionBuilder::new()
+                .spot(100.0)
+                .flat_vol(0.25)
+                .flat_rate(0.03)
                 .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
                 .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 4).unwrap())
                 .autocallable(105.0, 70.0, 0.02, 4, 100.0)
@@ -1541,10 +1656,22 @@ mod tests {
             field(base().autocall_observation_dates(late).build()),
             "autocall_observation_dates"
         );
+        // final observation short of maturity
+        let early_last = vec![
+            NaiveDate::from_ymd_opt(2026, 7, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
+        ];
+        assert_eq!(
+            field(base().autocall_observation_dates(early_last).build()),
+            "autocall_observation_dates"
+        );
         // schedule on a non-autocallable payoff
         assert_eq!(
             field(
                 EquityOptionBuilder::new()
+                    .spot(100.0)
+                    .flat_vol(0.25)
+                    .flat_rate(0.03)
                     .years_to_maturity(1.0)
                     .vanilla(PutOrCall::Call)
                     .autocall_observation_dates(vec![NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()])
@@ -1802,6 +1929,8 @@ mod tests {
     fn autocallable_initial_fixing_uses_the_final_spot() {
         // spot() after autocallable() must still set the initial fixing
         let option = EquityOptionBuilder::new()
+            .flat_vol(0.2)
+            .flat_rate(0.03)
             .years_to_maturity(1.0)
             .autocallable(1.0, 0.7, 0.05, 4, 100.0)
             .spot(250.0)

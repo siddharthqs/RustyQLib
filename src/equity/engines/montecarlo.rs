@@ -1640,6 +1640,7 @@ fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let allowed = exercise_mask(option, p.t, steps);
     let disc = exp(-p.r * dt);
     let process = bs_process(option, p);
+    let divs = dividends_per_step(option, p.t, steps);
     let seed_regression = cfg.seed ^ 0xA11C_E5ED;
     let seed_valuation = cfg.seed ^ 0xB0B5_1EED;
 
@@ -1653,6 +1654,9 @@ fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         let mut s = p.s0;
         for (i, d) in dw.iter().enumerate() {
             s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
+            if let Some(divs) = &divs {
+                s = (s - divs[i]).max(1e-8);
+            }
             path.push(s);
         }
     };
@@ -1805,6 +1809,7 @@ fn heston_american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         scheme,
     };
     let sqrt_dt = dt.sqrt();
+    let divs = dividends_per_step(option, p.t, steps);
     let seed_regression = cfg.seed ^ 0xA11C_E5ED;
     let seed_valuation = cfg.seed ^ 0xB0B5_1EED;
 
@@ -1818,6 +1823,9 @@ fn heston_american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         for j in 0..steps {
             let dw = [sign * sqrt_dt * z[2 * j], sign * sqrt_dt * z[2 * j + 1]];
             process.evolve(j as f64 * dt, &x, dt, &dw, &mut x_next);
+            if let Some(divs) = &divs {
+                x_next[0] = (x_next[0] - divs[j]).max(1e-8);
+            }
             x = x_next;
             spots[j] = x[0];
             vars[j] = x[1].max(0.0);

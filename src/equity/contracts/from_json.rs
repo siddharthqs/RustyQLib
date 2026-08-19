@@ -72,7 +72,12 @@ impl EquityOption {
         // ── market objects ──────────────────────────────────────────────
         builder = match &data.discount_curve {
             Some(input) => builder.discount_curve(YieldCurve::from_input(input, valuation_date)?),
-            None => builder.flat_rate(data.base.risk_free_rate.unwrap_or(0.0)),
+            None => builder.flat_rate(data.base.risk_free_rate.ok_or_else(|| {
+                RustyQLibError::invalid_input(
+                    "risk_free_rate",
+                    "either risk_free_rate or discount_curve must be provided",
+                )
+            })?),
         };
         builder = match &data.vol_surface {
             Some(input) => builder.vol_surface(VolSurface::from_input(input, valuation_date)?),
@@ -118,8 +123,15 @@ impl EquityOption {
                 })?;
                 builder.bermudan(parse_date_list("exercise_dates", dates)?)
             }
-            // unknown styles fall back to European, as before
-            _ => builder,
+            "European" | "european" => builder,
+            other => {
+                return Err(RustyQLibError::invalid_input(
+                    "exercise_style",
+                    format!(
+                        "unknown exercise_style '{other}' (use 'European', 'American' or 'Bermudan')"
+                    ),
+                ))
+            }
         };
 
         let side = match data.put_or_call.trim() {

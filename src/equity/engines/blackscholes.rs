@@ -41,7 +41,9 @@ impl BlackScholesPricer {
             PayoffType::Lookback => Self::lookback_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0),
             PayoffType::ForwardStart => self.npv_forward_start(bsd_option),
             PayoffType::Chooser => Self::chooser_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0),
-            _ => 0.0,
+            other => unreachable!(
+                "check_engine_support admits only analytic payoffs here; got {other:?}"
+            ),
         }
     }
     pub fn delta(&self, bsd_option: &EquityOption) -> f64 {
@@ -65,7 +67,9 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.delta_forward_start(bsd_option),
             PayoffType::Lookback => self.delta_lookback(bsd_option),
             PayoffType::Chooser => self.delta_chooser(bsd_option),
-            _ => 0.0,
+            other => unreachable!(
+                "check_engine_support admits only analytic payoffs here; got {other:?}"
+            ),
         }
     }
     pub fn gamma(&self, bsd_option: &EquityOption) -> f64 {
@@ -80,7 +84,9 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.gamma_forward_start(bsd_option),
             PayoffType::Lookback => self.gamma_lookback(bsd_option),
             PayoffType::Chooser => self.gamma_chooser(bsd_option),
-            _ => 0.0,
+            other => unreachable!(
+                "check_engine_support admits only analytic payoffs here; got {other:?}"
+            ),
         }
     }
     pub fn vega(&self, bsd_option: &EquityOption) -> f64 {
@@ -95,7 +101,9 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.vega_forward_start(bsd_option),
             PayoffType::Lookback => self.vega_lookback(bsd_option),
             PayoffType::Chooser => self.vega_chooser(bsd_option),
-            _ => 0.0,
+            other => unreachable!(
+                "check_engine_support admits only analytic payoffs here; got {other:?}"
+            ),
         }
     }
     pub fn theta(&self, bsd_option: &EquityOption) -> f64 {
@@ -110,7 +118,9 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.theta_forward_start(bsd_option),
             PayoffType::Lookback => self.theta_lookback(bsd_option),
             PayoffType::Chooser => self.theta_chooser(bsd_option),
-            _ => 0.0,
+            other => unreachable!(
+                "check_engine_support admits only analytic payoffs here; got {other:?}"
+            ),
         }
     }
     pub fn rho(&self, bsd_option: &EquityOption) -> f64 {
@@ -125,7 +135,9 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.rho_forward_start(bsd_option),
             PayoffType::Lookback => self.rho_lookback(bsd_option),
             PayoffType::Chooser => self.rho_chooser(bsd_option),
-            _ => 0.0,
+            other => unreachable!(
+                "check_engine_support admits only analytic payoffs here; got {other:?}"
+            ),
         }
     }
     /// Vanna (`d delta / d volatility`).  Vanilla and Black-76 options use
@@ -514,7 +526,7 @@ impl BlackScholesPricer {
             }
             BinaryType::AssetOrNothing => {
                 // e^{-qT} (N(+-d1) +- dN(d1)/(sigma sqrt(T)))
-                let df_q = exp(-bsd_option.market.dividend_yield * t);
+                let df_q = exp(-bsd_option.carry_yield() * t);
                 let d1 = bsd_option.d1();
                 match bsd_option.payoff.put_or_call() {
                     PutOrCall::Call => df_q * (norm_cdf(d1) + norm_pdf(d1) / vol_sqrt_t),
@@ -538,7 +550,7 @@ impl BlackScholesPricer {
             }
             BinaryType::AssetOrNothing => {
                 // e^{-qT} dN(d1) (1 - d1/(sigma sqrt(T))) / (S sigma sqrt(T))
-                let df_q = exp(-bsd_option.market.dividend_yield * t);
+                let df_q = exp(-bsd_option.carry_yield() * t);
                 let d1 = bsd_option.d1();
                 df_q * norm_pdf(d1) * (1.0 - d1 / vol_sqrt_t) / (s * vol_sqrt_t)
             }
@@ -561,7 +573,7 @@ impl BlackScholesPricer {
             }
             BinaryType::AssetOrNothing => {
                 // - S e^{-qT} dN(d1) d2 / sigma
-                let df_q = exp(-bsd_option.market.dividend_yield * t);
+                let df_q = exp(-bsd_option.carry_yield() * t);
                 -s * df_q * norm_pdf(bsd_option.d1()) * bsd_option.d2() / sigma
             }
         };
@@ -628,7 +640,7 @@ impl BlackScholesPricer {
             }
             BinaryType::AssetOrNothing => {
                 // +- S e^{-qT} dN(d1) sqrt(T)/sigma
-                let df_q = exp(-bsd_option.market.dividend_yield * t);
+                let df_q = exp(-bsd_option.carry_yield() * t);
                 let rho_call = s * df_q * norm_pdf(bsd_option.d1()) * t.sqrt() / sigma;
                 match bsd_option.payoff.put_or_call() {
                     PutOrCall::Call => rho_call,
@@ -2961,6 +2973,86 @@ mod tests {
             (fd.npv() - escrowed).abs() < 0.3,
             "fd={} escrowed={escrowed}",
             fd.npv()
+        );
+    }
+
+    #[test]
+    fn american_lsmc_prices_cash_dividends() {
+        use crate::equity::builder::EquityOptionBuilder;
+        // the LSMC path generation must subtract discrete dividends like
+        // every European route. Two bounds that dividend-blind paths
+        // violate for puts: American >= European under the same dividends,
+        // and the dividend must raise the put versus the dividend-free
+        // American.
+        let build = |american: bool, dividend: bool| {
+            let b = EquityOptionBuilder::new()
+                .spot(100.0)
+                .strike(100.0)
+                .flat_vol(0.3)
+                .flat_rate(0.05)
+                .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+                .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+                .vanilla(PutOrCall::Put)
+                .engine(Engine::MonteCarlo)
+                .paths(50_000)
+                .mc_time_steps(100)
+                .seed(42);
+            let b = if dividend {
+                b.cash_dividend(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), 8.0)
+            } else {
+                b
+            };
+            let b = if american { b.american() } else { b };
+            b.build().expect("option must build").npv()
+        };
+        let euro_div = build(false, true);
+        let amer_div = build(true, true);
+        let amer_nodiv = build(true, false);
+        assert!(
+            amer_div >= euro_div - 0.15,
+            "american {amer_div} must dominate european {euro_div}"
+        );
+        assert!(
+            amer_div > amer_nodiv + 1.0,
+            "an 8.0 dividend must raise the american put: {amer_div} vs \
+             dividend-free {amer_nodiv}"
+        );
+    }
+
+    #[test]
+    fn heston_american_lsmc_prices_cash_dividends() {
+        use crate::equity::builder::EquityOptionBuilder;
+        // same arbitrage bound for the Heston LSMC route, which generates
+        // its (spot, variance) paths separately from the GBM route
+        let params = crate::equity::heston::HestonParams {
+            v0: 0.09,
+            kappa: 2.0,
+            theta: 0.09,
+            vol_of_vol: 0.4,
+            rho: -0.7,
+        };
+        let build = |american: bool| {
+            let b = EquityOptionBuilder::new()
+                .spot(100.0)
+                .strike(100.0)
+                .flat_vol(0.3)
+                .flat_rate(0.05)
+                .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+                .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+                .cash_dividend(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), 8.0)
+                .vanilla(PutOrCall::Put)
+                .heston(params)
+                .engine(Engine::MonteCarlo)
+                .paths(50_000)
+                .seed(42);
+            let b = if american { b.american() } else { b };
+            b.build().expect("option must build").npv()
+        };
+        let euro = build(false);
+        let amer = build(true);
+        assert!(
+            amer >= euro - 0.2,
+            "heston american {amer} must dominate european {euro}"
         );
     }
 

@@ -733,6 +733,7 @@ mod tests {
             .symbol("ACCU")
             .spot(100.0)
             .strike(95.0)
+            .flat_vol(0.25)
             .flat_rate(0.03)
             .dividend_yield(0.01)
             .years_to_maturity(1.0)

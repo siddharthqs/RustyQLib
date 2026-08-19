@@ -180,6 +180,9 @@ pub struct LocalVolGrid {
     times: Vec<f64>,
     /// `vols[i][j]` is the local vol at `(levels[i], times[j])`.
     vols: Vec<Vec<f64>>,
+    /// `valid[i][j]` is false where the Dupire guard fired during
+    /// sampling — the node was repaired, or kept its fallback value.
+    valid: Vec<Vec<bool>>,
     /// Nodes whose guard fired and were bridged from valid neighbours.
     repaired: usize,
 }
@@ -215,6 +218,7 @@ impl LocalVolGrid {
             levels,
             times,
             vols,
+            valid,
             repaired,
         }
     }
@@ -227,6 +231,21 @@ impl LocalVolGrid {
         let lo = self.vols[i0][j0] + wj * (self.vols[i0][j1] - self.vols[i0][j0]);
         let hi = self.vols[i1][j0] + wj * (self.vols[i1][j1] - self.vols[i1][j0]);
         lo + wi * (hi - lo)
+    }
+
+    /// [`vol`](Self::vol) plus whether any node the lookup interpolates
+    /// between had its Dupire guard fire during sampling — the value
+    /// leans on repaired (or fallback) nodes rather than pure Dupire
+    /// values. Mirrors [`LocalVol::vol_checked`], so the artifact
+    /// writers can instrument either form the same way.
+    pub fn vol_checked(&self, level: f64, t: f64) -> (f64, bool) {
+        let (i0, i1, _) = bracket(&self.levels, level);
+        let (j0, j1, _) = bracket(&self.times, t);
+        let guarded = !(self.valid[i0][j0]
+            && self.valid[i0][j1]
+            && self.valid[i1][j0]
+            && self.valid[i1][j1]);
+        (self.vol(level, t), guarded)
     }
 
     /// How many nodes the neighbour repair changed — the grid analogue
@@ -363,8 +382,9 @@ mod tests {
         let grid = lv.to_grid(2.0);
         for level in [70.0, 100.0, 133.7] {
             for t in [0.05, 0.5, 1.9] {
-                let v = grid.vol(level, t);
+                let (v, guarded) = grid.vol_checked(level, t);
                 assert!((v - 0.25).abs() < 1e-6, "level={level} t={t}: {v}");
+                assert!(!guarded, "level={level} t={t}");
             }
         }
         assert_eq!(grid.repaired_nodes(), 0);

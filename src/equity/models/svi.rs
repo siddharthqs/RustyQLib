@@ -82,7 +82,7 @@ impl SviParams {
                 "b must be non-negative",
             ));
         }
-        if !(-1.0..1.0).contains(&self.rho) && self.rho != -1.0 {
+        if !(-1.0..1.0).contains(&self.rho) || self.rho == -1.0 {
             return Err(RustyQLibError::invalid_input(
                 "svi params",
                 "rho must be in (-1, 1)",
@@ -625,7 +625,7 @@ impl Ssvi {
     /// butterfly bounds `theta phi (1 + |rho|) <= 4` and
     /// `theta phi^2 (1 + |rho|) <= 4`.
     pub fn validate(&self) -> Result<(), RustyQLibError> {
-        if !(-1.0..1.0).contains(&self.rho) {
+        if !(-1.0..1.0).contains(&self.rho) || self.rho == -1.0 {
             return Err(RustyQLibError::invalid_input(
                 "svi params",
                 "rho must be in (-1, 1)",
