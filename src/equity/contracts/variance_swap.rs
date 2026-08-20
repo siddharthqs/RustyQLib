@@ -325,13 +325,16 @@ impl VarianceSwap {
                 format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
             )
         })?;
-        let t = (maturity - today).num_days() as f64 / 365.0;
+        let t = crate::equity::conventions::year_fraction(today, maturity);
         if t <= 0.0 {
             return Err(RustyQLibError::invalid_input(
                 "maturity",
                 "variance swap is expired",
             ));
         }
+        crate::equity::conventions::check_vol_band("volatility", data.volatility)?;
+        crate::equity::conventions::check_vol_band("strike_vol", data.strike_vol)?;
+        crate::equity::conventions::check_rate_band("risk_free_rate", data.risk_free_rate)?;
         let q = data.dividend.unwrap_or(0.0);
         let forward = data.underlying_price * ((data.risk_free_rate - q) * t).exp();
         let surface = data

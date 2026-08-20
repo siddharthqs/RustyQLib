@@ -27,6 +27,7 @@ impl<'a> Var<'a> {
     pub fn grad(self) -> Gradients {
         Gradients {
             adjoints: self.tape.backward(self.idx),
+            tape_id: self.tape as *const Tape as usize,
         }
     }
 

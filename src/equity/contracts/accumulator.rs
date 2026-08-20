@@ -253,7 +253,7 @@ impl Accumulator {
                 format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
             )
         })?;
-        let t = (maturity - today).num_days() as f64 / 365.0;
+        let t = crate::equity::conventions::year_fraction(today, maturity);
         if t <= 0.0 {
             return Err(RustyQLibError::invalid_input(
                 "maturity",
@@ -282,6 +282,8 @@ impl Accumulator {
                 ))
             }
         };
+        crate::equity::conventions::check_vol_band("volatility", data.volatility)?;
+        crate::equity::conventions::check_rate_band("risk_free_rate", data.risk_free_rate)?;
         let out = Accumulator {
             side,
             s0: data.underlying_price,

@@ -148,7 +148,7 @@ fn date_list_to_times(
             ));
         }
         prev = *date;
-        times.push((*date - valuation_date).num_days() as f64 / 365.0);
+        times.push(crate::equity::conventions::year_fraction(valuation_date, *date));
     }
     Ok(times)
 }
@@ -482,7 +482,7 @@ impl PayoffSpec {
                 let observation_times = observation_dates.as_ref().map(|dates| {
                     dates
                         .iter()
-                        .map(|d| (*d - ctx.valuation_date).num_days() as f64 / 365.0)
+                        .map(|d| crate::equity::conventions::year_fraction(ctx.valuation_date, *d))
                         .collect::<Vec<f64>>()
                 });
                 let observations = observation_dates
@@ -1304,7 +1304,7 @@ impl EquityOptionBuilder {
                         format!("volatility must be positive and finite, got {v}"),
                     );
                 }
-                Some(_) => {}
+                Some(v) => crate::equity::conventions::check_vol_band("flat_vol", v)?,
             }
         }
         if self.discount_curve.is_none() {
@@ -1318,7 +1318,7 @@ impl EquityOptionBuilder {
                 Some(r) if !r.is_finite() => {
                     return invalid("flat_rate", format!("flat_rate must be finite, got {r}"));
                 }
-                Some(_) => {}
+                Some(r) => crate::equity::conventions::check_rate_band("flat_rate", r)?,
             }
         }
         for (name, x) in [
@@ -1328,6 +1328,7 @@ impl EquityOptionBuilder {
             if !x.is_finite() {
                 return invalid(name, format!("{name} must be finite, got {x}"));
             }
+            crate::equity::conventions::check_rate_band(name, x)?;
         }
         for (date, amount) in &self.cash_dividends {
             if !(amount.is_finite() && *amount >= 0.0) {
@@ -1425,6 +1426,10 @@ mod tests {
         assert_eq!(field(base().spot(-1.0).build()), "spot");
         assert_eq!(field(base().flat_vol(0.0).build()), "flat_vol");
         assert_eq!(field(base().strike(f64::NAN).build()), "strike");
+        // percent-vs-decimal unit slips are rejected with a hint
+        assert_eq!(field(base().flat_vol(20.0).build()), "flat_vol");
+        assert_eq!(field(base().flat_rate(5.0).build()), "flat_rate");
+        assert_eq!(field(base().dividend_yield(3.0).build()), "dividend_yield");
         // spot, vol and rate carry no defaults: forgetting one is an error
         assert_eq!(
             field(

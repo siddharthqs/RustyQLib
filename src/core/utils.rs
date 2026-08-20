@@ -184,7 +184,7 @@ pub struct ContractOutput {
     pub vanna: f64,
     /// Change in delta per year of calendar time.
     pub charm: f64,
-    /// Delta elasticity, `S * gamma / delta`.
+    /// Percentage gamma (Haug's GammaP), `S * gamma / 100`.
     pub gamma_p: f64,
     /// Change in gamma per unit change in implied volatility.
     pub zomma: f64,

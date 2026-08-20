@@ -6,6 +6,5 @@ pub mod interactive;
 pub mod parse_contracts;
 pub mod plot3d;
 pub mod rng;
-pub mod stochastic_processes;
 #[cfg(feature = "cli")]
 pub mod style;

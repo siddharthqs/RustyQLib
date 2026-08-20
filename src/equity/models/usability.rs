@@ -37,6 +37,7 @@ use crate::core::traits::Instrument;
 use crate::core::vols::{SmileCoordinate, VolInput, VolSurface};
 use crate::equity::builder::EquityOptionBuilder;
 use crate::equity::engines::blackscholes::implied_vol_from_price;
+use crate::equity::smoothed_surface::{MAX_LOCAL_VOL, MIN_LOCAL_VOL};
 use crate::equity::utils::{Engine, Model};
 use crate::validation::martingale::{martingale_report, MartingaleConfig, MartingaleReport};
 
@@ -162,7 +163,9 @@ pub fn usability_report(
         for &t in times {
             let (vol, guarded) = local_vol_checked(level, t);
             total += 1;
-            if vol <= 0.0101 || vol >= 2.999 {
+            // detect values pinned at the shared clamp bounds (with a 1%
+            // margin for interpolation between a clamped and a free node)
+            if vol <= MIN_LOCAL_VOL * 1.01 || vol >= MAX_LOCAL_VOL * 0.999 {
                 clamped += 1;
             }
             if guarded {
@@ -189,7 +192,7 @@ pub fn usability_report(
     let mut errors: Vec<f64> = Vec::new();
     for &t in &selected {
         let maturity = reference + Days::new((t * 365.0).round().max(3.0) as u64);
-        let t_eff = (maturity - reference).num_days() as f64 / 365.0;
+        let t_eff = crate::equity::conventions::year_fraction(reference, maturity);
         let rate = curve.zero_rate_with(t_eff, Compounding::Continuous);
         let forward = spot * (rate * t_eff).exp();
         let n = config.strikes_per_expiry.max(1);

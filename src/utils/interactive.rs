@@ -28,10 +28,9 @@ use crate::equity::contracts::barrier::{BarrierDirection, KnockType};
 use crate::equity::contracts::chooser::ChooserPayoff;
 use crate::equity::finite_difference::FdConfig;
 use crate::equity::montecarlo::MonteCarloConfig;
-use crate::equity::utils::{LongShort, Model, Payoff, PricingEngine};
+use crate::equity::utils::{Payoff, PricingEngine};
 use crate::equity::vanilla_option::{
-    AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityMarketData, EquityOption,
-    EquityOptionBase, LookbackPayoff, LookbackType, VanillaPayoff,
+    AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityOption, LookbackPayoff, LookbackType, VanillaPayoff,
 };
 
 /// True when the error is the user backing out (Esc / Ctrl-C) rather
@@ -414,56 +413,45 @@ fn prompt_futures_settlement() -> Result<crate::equity::black76::FuturesSettleme
     })
 }
 
-/// Assemble an option from prompted terms with a flat curve and flat
-/// vol, ready to price on `engine`.
+/// Assemble an option from prompted terms through
+/// [`EquityOptionBuilder`] — the same construction and validation path
+/// as JSON contracts and library users, so the wizard can no longer
+/// drift from the builder's rules (it used to assemble the structs by
+/// hand and skip validation entirely).
 fn build_option(
     payoff: Box<dyn Payoff>,
     engine: PricingEngine,
     terms: &MarketTerms,
     futures_settlement: Option<crate::equity::black76::FuturesSettlement>,
 ) -> Result<EquityOption> {
-    let valuation_date = Local::now().date_naive();
-    let discount_curve = YieldCurve::flat(
-        terms.rate,
-        valuation_date,
-        DayCountConvention::Act365,
-        Compounding::Continuous,
-    )
-    .context("invalid risk-free rate")?;
-    let vol_surface = VolSurface::flat(terms.vol, valuation_date, DayCountConvention::Act365)
-        .context("invalid volatility")?;
-    let base = EquityOptionBase {
-        symbol: "TERMINAL".to_string(),
-        currency: None,
-        exchange: None,
-        name: None,
-        cusip: None,
-        isin: None,
-        settlement_type: None,
-        strike_price: terms.strike,
-        maturity_date: terms.maturity,
-        futures_settlement,
-        multiplier: 1.0,
-        current_price: Quote::new(0.0),
-        entry_price: 0.0,
-        long_short: LongShort::LONG,
+    use crate::equity::builder::EquityOptionBuilder;
+    use crate::equity::utils::Engine;
+    let mut b = EquityOptionBuilder::new()
+        .symbol("TERMINAL")
+        .spot(terms.spot)
+        .strike(terms.strike)
+        .flat_vol(terms.vol)
+        .flat_rate(terms.rate)
+        .dividend_yield(terms.dividend)
+        .maturity_date(terms.maturity);
+    // futures options price as European vanillas on Black-76; the
+    // builder's on_future route wants the vanilla spec, not a custom box
+    b = if let Some(settlement) = futures_settlement {
+        b.vanilla(*payoff.put_or_call()).on_future(settlement)
+    } else {
+        // prompted payoffs carry their exercise style embedded, which is
+        // exactly the builder's custom-payoff contract
+        b.payoff(payoff)
     };
-    let market = EquityMarketData {
-        valuation_date,
-        spot: Quote::new(terms.spot),
-        dividend_yield: terms.dividend,
-        borrow_cost: 0.0,
-        cash_dividends: vec![],
-        vol_surface: std::sync::Arc::new(vol_surface),
-        discount_curve: std::sync::Arc::new(discount_curve),
+    b = match engine {
+        PricingEngine::BlackScholes => b.engine(Engine::BlackScholes),
+        PricingEngine::MonteCarlo(cfg) => b.engine(Engine::MonteCarlo).mc_config(cfg),
+        PricingEngine::Binomial(cfg) => b.engine(Engine::Binomial).lattice_config(cfg),
+        PricingEngine::FiniteDifference(cfg) => b.engine(Engine::FiniteDifference).fd_config(cfg),
+        PricingEngine::BaroneAdesiWhaley => b.engine(Engine::BaroneAdesiWhaley),
+        PricingEngine::BjerksundStensland => b.engine(Engine::BjerksundStensland),
     };
-    Ok(EquityOption {
-        base,
-        market,
-        payoff,
-        engine,
-        model: Model::Gbm,
-    })
+    Ok(b.build()?)
 }
 
 /// Price `option` and print the value with its Greeks (and the Monte

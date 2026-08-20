@@ -503,6 +503,47 @@ impl YieldCurve {
         worst
     }
 
+    /// The same market re-anchored at a later reference date: discount
+    /// factors become their forwards, `df_new(t) = df(tau + t) / df(tau)`
+    /// with `tau` the year fraction from the old to the new reference —
+    /// this is what a time (theta) scenario means, the market unchanged
+    /// in date space while the anchor moves forward. Pillars at or
+    /// before the new reference drop out; surviving pillars keep their
+    /// dates. Errors if `new_reference` precedes the current reference
+    /// or if no pillar survives the roll.
+    pub fn rolled(&self, new_reference: NaiveDate) -> Result<YieldCurve, CurveError> {
+        let tau = self.day_count.year_fraction(self.reference_date, new_reference);
+        if tau < 0.0 {
+            return Err(CurveError::NonPositiveTime(tau));
+        }
+        if tau == 0.0 {
+            return Ok(self.clone());
+        }
+        let df_tau = self.df(tau);
+        let mut times = vec![0.0];
+        let mut dfs = vec![1.0];
+        let mut dates = vec![Some(new_reference)];
+        for (i, &t) in self.times.iter().enumerate() {
+            if t > tau + 1e-12 {
+                times.push(t - tau);
+                dfs.push(self.dfs[i] / df_tau);
+                dates.push(self.dates[i]);
+            }
+        }
+        if times.len() < 2 {
+            return Err(CurveError::Empty);
+        }
+        Ok(YieldCurve {
+            reference_date: new_reference,
+            day_count: self.day_count,
+            compounding: self.compounding,
+            interpolation: self.interpolation,
+            times,
+            dfs,
+            dates,
+        })
+    }
+
     // ── Queries ─────────────────────────────────────────────────────────
 
     /// Discount factor at year fraction `t` from the reference date.
@@ -766,6 +807,45 @@ mod tests {
             Compounding::Continuous,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn rolled_curve_is_the_forward_curve() {
+        // upward-sloping zeros so the roll actually changes shape
+        let curve = YieldCurve::from_zero_rates(
+            &[
+                Tenor::YearFraction(0.25),
+                Tenor::YearFraction(1.0),
+                Tenor::YearFraction(5.0),
+                Tenor::YearFraction(10.0),
+            ],
+            &[0.03, 0.04, 0.05, 0.055],
+            asof(),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+            InterpolationMethod::LogLinearDf,
+        )
+        .unwrap();
+        let new_ref = asof() + chrono::Duration::days(91);
+        let tau = 91.0 / 365.0;
+        let rolled = curve.rolled(new_ref).unwrap();
+        let df_tau = curve.df(tau);
+        // same market re-anchored: df_new(t) = df(tau + t) / df(tau)
+        // exactly at the surviving pillars, and to interpolation error
+        // in between (both curves interpolate log-linearly in df)
+        for t in [1.0 - tau, 5.0 - tau, 10.0 - tau] {
+            assert!(
+                (rolled.df(t) - curve.df(tau + t) / df_tau).abs() < 1e-12,
+                "t={t}: rolled {} vs forward {}",
+                rolled.df(t),
+                curve.df(tau + t) / df_tau
+            );
+        }
+        // rolling to the same date is the identity; rolling backwards errors
+        assert!((curve.rolled(asof()).unwrap().df(1.0) - curve.df(1.0)).abs() < 1e-15);
+        assert!(curve
+            .rolled(asof() - chrono::Duration::days(1))
+            .is_err());
     }
 
     #[test]

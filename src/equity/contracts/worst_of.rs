@@ -99,6 +99,9 @@ impl WorstOfAutocallable {
                 "spots, vols and dividends must have the same length",
             ));
         }
+        for (i, v) in vols.iter().enumerate() {
+            crate::equity::conventions::check_vol_band(&format!("vols[{i}]"), *v)?;
+        }
         if correlations.len() != n || correlations.iter().any(|row| row.len() != n) {
             return Err(RustyQLibError::invalid_input(
                 "correlations",
@@ -135,7 +138,7 @@ impl WorstOfAutocallable {
     }
 
     pub fn time_to_maturity(&self) -> f64 {
-        (self.maturity_date - self.valuation_date).num_days() as f64 / 365.0
+        crate::equity::conventions::year_fraction(self.valuation_date, self.maturity_date)
     }
 
     fn params(&self) -> Params {
@@ -209,7 +212,7 @@ impl WorstOfAutocallable {
 
         const CHUNK: usize = 4096;
         let chunks = self.mc.paths.div_ceil(CHUNK);
-        let partials: Vec<(f64, f64)> = (0..chunks)
+        let partials: Vec<crate::equity::montecarlo::PathAccum> = (0..chunks)
             .into_par_iter()
             .map(|chunk| {
                 let mut scratch = FactorScratch::new(n, steps);
@@ -217,7 +220,7 @@ impl WorstOfAutocallable {
                 let mut x = vec![0.0; n];
                 let mut x_next = vec![0.0; n];
                 let mut worst = vec![0.0; steps];
-                let (mut sum, mut sum_sq) = (0.0, 0.0);
+                let mut acc = crate::equity::montecarlo::PathAccum::default();
                 for i in chunk * CHUNK..((chunk + 1) * CHUNK).min(self.mc.paths) {
                     draws.fill(i, n, steps, &mut scratch, &mut dw);
                     x.copy_from_slice(&p.spots);
@@ -236,25 +239,21 @@ impl WorstOfAutocallable {
                             .fold(f64::MAX, f64::min);
                         worst[j] = fixing * w;
                     }
-                    let v = self.payoff.path_value(&worst, &obs_idx, &dfs);
-                    sum += v;
-                    sum_sq += v * v;
+                    acc.push(i, self.payoff.path_value(&worst, &obs_idx, &dfs));
                 }
-                (sum, sum_sq)
+                acc
             })
             .collect();
-        let (sum, sum_sq) = partials
+        let acc = partials
             .into_iter()
-            .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
-        let nf = self.mc.paths as f64;
-        let mean = sum / nf;
-        let var = (sum_sq / nf - mean * mean).max(0.0);
-        McStats {
-            pv: mean,
-            std_err: (var / nf).sqrt(),
-            paths: self.mc.paths,
+            .fold(crate::equity::montecarlo::PathAccum::default(), crate::equity::montecarlo::PathAccum::merge);
+        crate::equity::montecarlo::summarize(
+            acc,
+            self.mc.paths,
             steps,
-        }
+            0.0,
+            matches!(self.mc.sampler, crate::equity::montecarlo::Sampler::Sobol),
+        )
     }
 
     fn price_with(&self, p: &Params) -> f64 {
@@ -326,7 +325,7 @@ impl Instrument for WorstOfAutocallable {
                 rho: self.rho(),
                 ..Default::default()
             },
-            std_err: Some(stats.std_err),
+            std_err: stats.std_err,
         })
     }
 }
@@ -413,12 +412,12 @@ mod tests {
             .npv();
         let wof = note(2, 1.0, 100_000);
         let stats = wof.npv_with_stats();
+        let se = stats.std_err.unwrap_or(0.05);
         assert!(
-            (stats.pv - single).abs() < 4.0 * stats.std_err.max(0.05),
-            "worst-of {} vs single-asset {} (se {})",
+            (stats.pv - single).abs() < 4.0 * se.max(0.05),
+            "worst-of {} vs single-asset {} (se {se})",
             stats.pv,
             single,
-            stats.std_err
         );
     }
 

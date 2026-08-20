@@ -222,10 +222,10 @@ fn solution_bumped(option: &EquityOption, bump: Bump) -> LatticeSolution {
     )
 }
 
-// Bump sizes shared with the finite-difference engine's Greeks.
-const VOL_BUMP: f64 = 1e-3;
-const RATE_BUMP: f64 = 1e-4;
-const VOLGA_BUMP: f64 = 1e-2;
+// Bump sizes shared with the finite-difference engine's Greeks — one
+// authoritative set in `equity::conventions` so the two engines cannot
+// drift apart again.
+use crate::equity::conventions::{RATE_BUMP, VOLGA_BUMP, VOL_BUMP};
 
 pub fn delta(option: &EquityOption) -> f64 {
     solution(option).delta
@@ -291,11 +291,7 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
     let charm = (solution_bumped(option, Bump::spot(hs)).theta
         - solution_bumped(option, Bump::spot(-hs)).theta)
         / (2.0 * hs);
-    let gamma_p = if base.delta == 0.0 {
-        f64::NAN
-    } else {
-        option.market.spot.value() * base.gamma / base.delta
-    };
+    let gamma_p = option.market.spot.value() * base.gamma / 100.0;
     PricingResult {
         pv: base.price,
         greeks: Greeks {

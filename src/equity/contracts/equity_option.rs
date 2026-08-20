@@ -200,7 +200,7 @@ impl EquityOptionBase {
 // date), so they live on the pairing — the option — not on either half.
 impl EquityOption {
     pub fn time_to_maturity(&self) -> f64 {
-        (self.base.maturity_date - self.market.valuation_date).num_days() as f64 / 365.0
+        crate::equity::conventions::year_fraction(self.market.valuation_date, self.base.maturity_date)
     }
     /// Discount factor from the valuation date to maturity, off the curve.
     pub fn maturity_discount_factor(&self) -> f64 {
@@ -240,7 +240,7 @@ impl EquityOption {
                 *date > self.market.valuation_date && *date <= self.base.maturity_date
             })
             .map(|(date, amount)| {
-                let t = (*date - self.market.valuation_date).num_days() as f64 / 365.0;
+                let t = crate::equity::conventions::year_fraction(self.market.valuation_date, *date);
                 // df(t) = e^{-r t}; multiplying by e^{carry t} discounts at
                 // the net carry (r - carry), generalizing to any curve shape.
                 amount * self.market.discount_curve.df(t) * (carry * t).exp()
@@ -415,83 +415,135 @@ impl EquityOption {
                 }
             }
         }
-        if self.model.is_rbergomi() {
-            if !matches!(self.engine, PricingEngine::MonteCarlo(_)) {
+        // ── the model × engine table ────────────────────────────────────
+        // One exhaustive match over every (Model, PricingEngine) pair —
+        // no wildcard in either position, so adding a model or an engine
+        // variant fails compilation here until its row is decided.
+        // Support holes like the silently ignored LocalVol model
+        // (review 2026-08-19) can no longer hide. Payoff- and
+        // exercise-specific refinements live inside the arms;
+        // model-independent engine rules follow after the table.
+        match (&self.model, &self.engine) {
+            // constant-vol Black-Scholes dynamics price on every engine
+            (
+                Model::Gbm,
+                PricingEngine::BlackScholes
+                | PricingEngine::MonteCarlo(_)
+                | PricingEngine::Binomial(_)
+                | PricingEngine::FiniteDifference(_)
+                | PricingEngine::BaroneAdesiWhaley
+                | PricingEngine::BjerksundStensland,
+            ) => {}
+
+            (
+                Model::LocalVol,
+                PricingEngine::MonteCarlo(_) | PricingEngine::FiniteDifference(_),
+            ) => {}
+            (
+                Model::LocalVol,
+                PricingEngine::BlackScholes
+                | PricingEngine::Binomial(_)
+                | PricingEngine::BaroneAdesiWhaley
+                | PricingEngine::BjerksundStensland,
+            ) => {
+                return unsupported(
+                    "The local volatility model prices on the MonteCarlo and \
+                     FiniteDifference engines only; the Analytical, Binomial and \
+                     American-approximation engines would silently ignore the \
+                     calibrated local-vol dynamics",
+                )
+            }
+
+            (Model::Heston(_), PricingEngine::Binomial(_)) => {
+                return unsupported(
+                    "The Heston model is supported on the Analytical, MonteCarlo and \
+                     FiniteDifference (2-D ADI) engines, not Binomial",
+                )
+            }
+            (Model::Heston(_), PricingEngine::FiniteDifference(_)) => {
+                if !matches!(
+                    self.payoff.payoff_kind(),
+                    PayoffType::Vanilla | PayoffType::Binary
+                ) {
+                    return unsupported(
+                        "The Heston ADI engine prices vanilla and binary payoffs; \
+                         use MonteCarlo for path-dependent payoffs",
+                    );
+                }
+            }
+            // BAW/BS2002 under Heston are refused by the engine rules below
+            (
+                Model::Heston(_),
+                PricingEngine::BlackScholes
+                | PricingEngine::MonteCarlo(_)
+                | PricingEngine::BaroneAdesiWhaley
+                | PricingEngine::BjerksundStensland,
+            ) => {}
+
+            (Model::RBergomi(_), PricingEngine::MonteCarlo(_)) => {
+                if american {
+                    return unsupported(
+                        "rough Bergomi supports European exercise only: the exercise decision \
+                         depends on the whole variance history, which the (spot, variance) \
+                         LSMC regression cannot represent",
+                    );
+                }
+            }
+            (
+                Model::RBergomi(_),
+                PricingEngine::BlackScholes
+                | PricingEngine::Binomial(_)
+                | PricingEngine::FiniteDifference(_)
+                | PricingEngine::BaroneAdesiWhaley
+                | PricingEngine::BjerksundStensland,
+            ) => {
                 return unsupported(
                     "The rough Bergomi model prices on the MonteCarlo engine only: the \
                      non-Markovian Volterra variance has no characteristic function and \
                      no finite-dimensional PDE or lattice state",
-                );
+                )
             }
-            if american {
-                return unsupported(
-                    "rough Bergomi supports European exercise only: the exercise decision \
-                     depends on the whole variance history, which the (spot, variance) \
-                     LSMC regression cannot represent",
-                );
+
+            (Model::Sabr(_), PricingEngine::BlackScholes) => {
+                if !matches!(
+                    self.payoff.payoff_kind(),
+                    PayoffType::Vanilla | PayoffType::Binary
+                ) {
+                    return unsupported(
+                        "The SABR analytic pricer covers vanilla and binary payoffs; \
+                         use MonteCarlo for path-dependent payoffs",
+                    );
+                }
+                if american {
+                    return unsupported(
+                        "SABR supports European exercise only: the (forward, alpha) LSMC \
+                         regression basis is not implemented",
+                    );
+                }
             }
-        }
-        if self.model == Model::LocalVol
-            && !matches!(
-                self.engine,
-                PricingEngine::MonteCarlo(_) | PricingEngine::FiniteDifference(_)
-            )
-        {
-            return unsupported(
-                "The local volatility model prices on the MonteCarlo and \
-                 FiniteDifference engines only; the Analytical, Binomial and \
-                 American-approximation engines would silently ignore the \
-                 calibrated local-vol dynamics",
-            );
-        }
-        if self.model.is_sabr() {
-            if !matches!(
-                self.engine,
-                PricingEngine::BlackScholes | PricingEngine::MonteCarlo(_)
-            ) {
+            (Model::Sabr(_), PricingEngine::MonteCarlo(_)) => {
+                if american {
+                    return unsupported(
+                        "SABR supports European exercise only: the (forward, alpha) LSMC \
+                         regression basis is not implemented",
+                    );
+                }
+            }
+            (
+                Model::Sabr(_),
+                PricingEngine::Binomial(_)
+                | PricingEngine::FiniteDifference(_)
+                | PricingEngine::BaroneAdesiWhaley
+                | PricingEngine::BjerksundStensland,
+            ) => {
                 return unsupported(
                     "The SABR model prices on the Analytical engine (Hagan implied vol \
                      into the Black-Scholes closed forms) and on MonteCarlo (two-factor \
                      path simulation), not on lattice or PDE engines",
-                );
-            }
-            if matches!(self.engine, PricingEngine::BlackScholes)
-                && !matches!(
-                    self.payoff.payoff_kind(),
-                    PayoffType::Vanilla | PayoffType::Binary
                 )
-            {
-                return unsupported(
-                    "The SABR analytic pricer covers vanilla and binary payoffs; \
-                     use MonteCarlo for path-dependent payoffs",
-                );
-            }
-            if american {
-                return unsupported(
-                    "SABR supports European exercise only: the (forward, alpha) LSMC \
-                     regression basis is not implemented",
-                );
             }
         }
         let heston = self.model.is_heston();
-        if heston && matches!(self.engine, PricingEngine::Binomial(_)) {
-            return unsupported(
-                "The Heston model is supported on the Analytical, MonteCarlo and \
-                 FiniteDifference (2-D ADI) engines, not Binomial",
-            );
-        }
-        if heston
-            && matches!(self.engine, PricingEngine::FiniteDifference(_))
-            && !matches!(
-                self.payoff.payoff_kind(),
-                PayoffType::Vanilla | PayoffType::Binary
-            )
-        {
-            return unsupported(
-                "The Heston ADI engine prices vanilla and binary payoffs; \
-                 use MonteCarlo for path-dependent payoffs",
-            );
-        }
         match self.engine {
             PricingEngine::BlackScholes if american => unsupported(
                 "Analytical engine cannot price early exercise; \
@@ -561,10 +613,11 @@ impl Instrument for EquityOption {
 /// central-difference stencils with per-engine bump sizes.
 impl EquityOption {
     pub(crate) fn analytic_heston(&self) -> bool {
-        matches!(
-            self.engine,
-            PricingEngine::BlackScholes | PricingEngine::Binomial(_)
-        ) && self.model.is_heston()
+        // BlackScholes only: Heston + Binomial is refused by the support
+        // table, so the former Binomial arm here was dead — and if such
+        // an option were ever assembled directly it should route to the
+        // tree, not silently reprice analytically
+        matches!(self.engine, PricingEngine::BlackScholes) && self.model.is_heston()
     }
     /// Analytical engine with SABR dynamics: Hagan implied vol into the
     /// Black-Scholes closed forms.
@@ -594,7 +647,7 @@ impl EquityOption {
     pub fn charm(&self) -> f64 {
         greeks::charm(self)
     }
-    /// Delta elasticity (`S * gamma / delta`), also called percentage gamma.
+    /// Percentage gamma (Haug's GammaP), `S * gamma / 100`.
     pub fn gamma_p(&self) -> f64 {
         greeks::gamma_p(self)
     }

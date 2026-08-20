@@ -195,15 +195,8 @@ fn z_over_x(z: f64, rho: f64) -> f64 {
 
 // ── Calibration ─────────────────────────────────────────────────────────
 
-/// Result of a SABR smile calibration.
-#[derive(Debug, Clone)]
-pub struct SabrFit {
-    pub params: SabrParams,
-    /// Root-mean-square error in implied vol.
-    pub rmse: f64,
-    pub iterations: usize,
-    pub converged: bool,
-}
+/// Result of a SABR smile calibration (`rmse` in implied vol).
+pub type SabrFit = crate::equity::models::calibration::Fit<SabrParams>;
 
 impl SabrParams {
     /// Calibrate `(alpha, rho, nu)` at fixed `beta` to one expiry's

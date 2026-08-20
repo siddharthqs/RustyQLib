@@ -131,10 +131,13 @@ impl HestonParams {
         }
     }
 
-    /// Map to the unconstrained calibration space: `ln` for the positive
-    /// parameters and `atanh` for the correlation, so any point the
-    /// optimizer visits maps back to a valid parameter set.
-    pub(crate) fn to_unconstrained(self) -> Vec<f64> {
+}
+
+/// `ln` for the positive parameters and `atanh` for the correlation,
+/// so any point the optimizer visits maps back to a valid parameter
+/// set.
+impl crate::equity::models::calibration::TransformSpace for HestonParams {
+    fn to_unconstrained(&self) -> Vec<f64> {
         vec![
             self.v0.ln(),
             self.kappa.ln(),
@@ -145,7 +148,7 @@ impl HestonParams {
         ]
     }
 
-    pub(crate) fn from_unconstrained(u: &[f64]) -> HestonParams {
+    fn from_unconstrained(u: &[f64]) -> HestonParams {
         HestonParams {
             v0: u[0].exp(),
             kappa: u[1].exp(),
@@ -169,15 +172,9 @@ pub struct HestonQuote {
     pub put_or_call: PutOrCall,
 }
 
-/// Calibration outcome: fitted parameters plus fit diagnostics.
-#[derive(Debug, Clone)]
-pub struct HestonFit {
-    pub params: HestonParams,
-    /// Root-mean-square price error over the quotes.
-    pub rmse: f64,
-    pub iterations: usize,
-    pub converged: bool,
-}
+/// Calibration outcome: fitted parameters plus fit diagnostics
+/// (`rmse` in price units).
+pub type HestonFit = crate::equity::models::calibration::Fit<HestonParams>;
 
 /// Calibrate Heston parameters to European vanilla quotes.
 ///
@@ -196,41 +193,10 @@ pub fn calibrate(
     quotes: &[HestonQuote],
     start: &HestonParams,
 ) -> HestonFit {
-    use crate::core::optimization::{levenberg_marquardt, OptimConfig};
-
-    assert!(!quotes.is_empty(), "calibration needs at least one quote");
     start.validate().expect("invalid starting parameters");
-    // COS pricing amortizes the CF sweep across every strike of an
-    // expiry, which is where the LM objective spends its life
-    let groups = crate::equity::cos::group_by_maturity(quotes.iter().map(|q| q.maturity));
-    let residuals = |u: &[f64]| -> Vec<f64> {
-        let p = HestonParams::from_unconstrained(u);
-        let mut out = vec![0.0; quotes.len()];
-        for (t, idxs) in &groups {
-            let pricer = crate::equity::cos::CosPricer::new(
-                &|uu| characteristic_fn(uu, s, r, q, *t, &p),
-                r,
-                *t,
-                crate::equity::cos::CALIBRATION_TERMS,
-            );
-            for &i in idxs {
-                out[i] = pricer.price(quotes[i].strike, quotes[i].put_or_call) - quotes[i].price;
-            }
-        }
-        out
-    };
-    let fit = levenberg_marquardt(
-        &OptimConfig::new(1e-12, 100),
-        &residuals,
-        None,
-        &start.to_unconstrained(),
-    );
-    HestonFit {
-        params: HestonParams::from_unconstrained(&fit.x),
-        rmse: (fit.value / quotes.len() as f64).sqrt(),
-        iterations: fit.iterations,
-        converged: fit.converged,
-    }
+    crate::equity::models::calibration::calibrate_generic(quotes, start, r, 1e-12, |p, u, t| {
+        characteristic_fn(u, s, r, q, t, p)
+    })
 }
 
 // ── Characteristic function and pricing ─────────────────────────────────

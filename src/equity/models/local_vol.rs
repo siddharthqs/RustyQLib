@@ -23,8 +23,9 @@ use crate::core::vols::VolSurface;
 
 const TIME_BUMP: f64 = 1.0 / 365.0;
 const LOG_STRIKE_BUMP: f64 = 0.01;
-const MIN_LOCAL_VOL: f64 = 0.01;
-const MAX_LOCAL_VOL: f64 = 3.0;
+// one authoritative clamp pair, shared with the parametric fits and the
+// usability report
+use crate::equity::smoothed_surface::{MAX_LOCAL_VOL, MIN_LOCAL_VOL};
 
 /// Default pricing-grid resolution and level span (in ATM standard
 /// deviations around the spot) for [`LocalVol::to_grid`].

@@ -259,7 +259,7 @@ impl Cliquet {
                 format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
             )
         })?;
-        let t = (maturity - today).num_days() as f64 / 365.0;
+        let t = crate::equity::conventions::year_fraction(today, maturity);
         if t <= 0.0 {
             return Err(RustyQLibError::invalid_input(
                 "maturity",
@@ -271,6 +271,26 @@ impl Cliquet {
                 "resets",
                 "need at least one reset period",
             ));
+        }
+        if !(data.volatility.is_finite() && data.volatility > 0.0) {
+            // sigma = 0 divides by sd = 0 in the per-period closed form
+            return Err(RustyQLibError::invalid_input(
+                "volatility",
+                format!(
+                    "volatility must be positive and finite, got {}",
+                    data.volatility
+                ),
+            ));
+        }
+        crate::equity::conventions::check_vol_band("volatility", data.volatility)?;
+        crate::equity::conventions::check_rate_band("risk_free_rate", data.risk_free_rate)?;
+        if let Some(notional) = data.notional {
+            if !(notional.is_finite() && notional > 0.0) {
+                return Err(RustyQLibError::invalid_input(
+                    "notional",
+                    format!("notional must be positive and finite, got {notional}"),
+                ));
+            }
         }
         if let Some(hp) = &data.heston {
             hp.validate()?;

@@ -61,9 +61,12 @@ impl<'a> BumpedMarket<'a> {
         self.market
     }
 
-    /// Bumped raw spot (no dividend escrow).
+    /// Bumped raw spot (no dividend escrow), floored just above zero so
+    /// a deep down-bump cannot hand the engines a negative spot (see
+    /// [`conventions::MIN_BUMPED_SPOT_FRAC`](crate::equity::conventions::MIN_BUMPED_SPOT_FRAC)).
     pub fn spot(&self) -> f64 {
-        self.market.spot.value() + self.bump.d_spot
+        let base = self.market.spot.value();
+        (base + self.bump.d_spot).max(base * crate::equity::conventions::MIN_BUMPED_SPOT_FRAC)
     }
 
     /// Total continuous carry (dividend yield + borrow); no bump dimension.
@@ -78,7 +81,7 @@ impl<'a> BumpedMarket<'a> {
     }
 
     fn base_time_to_maturity(&self, maturity: NaiveDate) -> f64 {
-        (maturity - self.market.valuation_date).num_days() as f64 / 365.0
+        crate::equity::conventions::year_fraction(self.market.valuation_date, maturity)
     }
 
     fn base_rate(&self, maturity: NaiveDate) -> f64 {
@@ -104,18 +107,22 @@ impl<'a> BumpedMarket<'a> {
             .iter()
             .filter(|(date, _)| *date > self.market.valuation_date && *date <= maturity)
             .map(|(date, amount)| {
-                let t = (*date - self.market.valuation_date).num_days() as f64 / 365.0;
+                let t = crate::equity::conventions::year_fraction(self.market.valuation_date, *date);
                 amount * self.market.discount_curve.df(t) * (carry * t).exp()
             })
             .sum()
     }
 
     /// Bumped escrowed spot: base spot minus the PV of cash dividends,
-    /// plus `d_spot`.
+    /// plus `d_spot` — floored just above zero, so a deep spot-down
+    /// stress prices at a near-zero escrowed spot (intrinsic for puts,
+    /// worthless calls) instead of feeding the engines a negative one.
+    /// Dividends exceeding the *base* spot remain a data error.
     pub fn effective_spot(&self, maturity: NaiveDate) -> f64 {
-        let s = self.market.spot.value() - self.pv_cash_dividends(maturity);
+        let base = self.market.spot.value();
+        let s = base - self.pv_cash_dividends(maturity);
         assert!(s > 0.0, "cash dividends exceed the spot price");
-        s + self.bump.d_spot
+        (s + self.bump.d_spot).max(base * crate::equity::conventions::MIN_BUMPED_SPOT_FRAC)
     }
 
     fn base_forward(&self, maturity: NaiveDate) -> f64 {
@@ -125,18 +132,86 @@ impl<'a> BumpedMarket<'a> {
     }
 
     /// Bumped Black vol for `strike`, looked up at the **base** forward
-    /// and maturity (sticky-strike; see module docs).
+    /// and maturity (sticky-strike; see module docs). Floored at
+    /// [`conventions::MIN_BUMPED_VOL`](crate::equity::conventions::MIN_BUMPED_VOL)
+    /// so a vega down-bump on a tiny-vol option cannot hand the engines
+    /// a non-positive vol.
     pub fn volatility(&self, strike: f64, maturity: NaiveDate) -> f64 {
         let t = self.base_time_to_maturity(maturity);
-        self.market
+        (self
+            .market
             .vol_surface
             .vol(strike, self.base_forward(maturity), t)
-            + self.bump.d_vol
+            + self.bump.d_vol)
+            .max(crate::equity::conventions::MIN_BUMPED_VOL)
     }
 
     /// Bumped vol at an explicit surface point — for engines that manage
     /// their own forward/tenor (futures options, term-structure lattices).
+    /// Floored like [`volatility`](Self::volatility).
     pub fn vol_at(&self, strike: f64, forward: f64, t: f64) -> f64 {
-        self.market.vol_surface.vol(strike, forward, t) + self.bump.d_vol
+        (self.market.vol_surface.vol(strike, forward, t) + self.bump.d_vol)
+            .max(crate::equity::conventions::MIN_BUMPED_VOL)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::trade::PutOrCall;
+    use crate::core::traits::Instrument;
+    use crate::equity::builder::EquityOptionBuilder;
+    use crate::equity::utils::Engine;
+    use chrono::NaiveDate;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn degenerate_bumps_price_at_the_floors_instead_of_panicking() {
+        // a tiny-vol option on the Monte Carlo (bump-route) engine: the
+        // 1% vega down-bump used to push sigma negative
+        let option = EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.005)
+            .flat_rate(0.03)
+            .valuation_date(date(2026, 1, 1))
+            .maturity_date(date(2027, 1, 1))
+            .vanilla(PutOrCall::Call)
+            .engine(Engine::MonteCarlo)
+            .paths(4_000)
+            .build()
+            .expect("tiny-vol option must build");
+        let result = option.price().expect("bumped Greeks must not panic");
+        assert!(result.pv.is_finite() && result.greeks.vega.is_finite());
+
+        // a deep spot-down stress on a cash-dividend name: the escrowed
+        // spot floors just above zero instead of going negative
+        let divd = EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.3)
+            .flat_rate(0.03)
+            .valuation_date(date(2026, 1, 1))
+            .maturity_date(date(2027, 1, 1))
+            .cash_dividend(date(2026, 7, 1), 5.0)
+            .vanilla(PutOrCall::Put)
+            .build()
+            .expect("dividend option must build");
+        let crushed = BumpedMarket::new(
+            &divd.market,
+            Bump {
+                d_spot: -150.0,
+                d_vol: 0.0,
+                d_rate: 0.0,
+                d_time: 0.0,
+            },
+        );
+        let pv = divd.price_bumped(&crushed);
+        assert!(pv.is_finite(), "stress must value, got {pv}");
+        // an ATM put on a near-zero spot is worth ~ the discounted strike
+        assert!(pv > 90.0, "deep-crash put must be near max value: {pv}");
     }
 }

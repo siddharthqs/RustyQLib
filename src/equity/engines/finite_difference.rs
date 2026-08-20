@@ -32,6 +32,7 @@ use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::bump::BumpedMarket;
+use crate::equity::conventions::{RATE_BUMP, SPOT_REL_BUMP, VOLGA_BUMP, VOL_BUMP};
 use crate::equity::local_vol::{LocalVol, LocalVolGrid};
 use crate::equity::utils::Model;
 use crate::equity::utils::Payoff;
@@ -133,31 +134,31 @@ pub fn theta(option: &EquityOption) -> f64 {
 pub fn vega(option: &EquityOption) -> f64 {
     // parallel vol bump: constant-vol solves shift sigma, local vol solves
     // shift the implied surface before the Dupire transform
-    let h = 1e-3;
+    let h = VOL_BUMP;
     (solve_dispatch(option, h, 0.0, 0.0).npv - solve_dispatch(option, -h, 0.0, 0.0).npv) / (2.0 * h)
 }
 pub fn rho(option: &EquityOption) -> f64 {
-    let h = 1e-4;
+    let h = RATE_BUMP;
     (solve_dispatch(option, 0.0, h, 0.0).npv - solve_dispatch(option, 0.0, -h, 0.0).npv) / (2.0 * h)
 }
 
 /// Vanna from the change in the grid delta under a parallel vol bump.
 pub fn vanna(option: &EquityOption) -> f64 {
-    let h = 1e-3;
+    let h = VOL_BUMP;
     (solve_dispatch(option, h, 0.0, 0.0).delta - solve_dispatch(option, -h, 0.0, 0.0).delta)
         / (2.0 * h)
 }
 
 /// Charm from the spot derivative of the grid's calendar theta.
 pub fn charm(option: &EquityOption) -> f64 {
-    let h = option.market.spot.value() * 1e-3;
+    let h = option.market.spot.value() * SPOT_REL_BUMP;
     (solve_dispatch(option, 0.0, 0.0, h).theta - solve_dispatch(option, 0.0, 0.0, -h).theta)
         / (2.0 * h)
 }
 
 /// Zomma from the change in the grid gamma under a parallel vol bump.
 pub fn zomma(option: &EquityOption) -> f64 {
-    let h = 1e-3;
+    let h = VOL_BUMP;
     (solve_dispatch(option, h, 0.0, 0.0).gamma - solve_dispatch(option, -h, 0.0, 0.0).gamma)
         / (2.0 * h)
 }
@@ -166,7 +167,7 @@ pub fn zomma(option: &EquityOption) -> f64 {
 /// step than the first-order Greeks tempers the roundoff amplification of a
 /// second difference against the grid's own discretization error.
 pub fn volga(option: &EquityOption) -> f64 {
-    let h = 1e-2;
+    let h = VOLGA_BUMP;
     (solve_dispatch(option, h, 0.0, 0.0).npv - 2.0 * solve_dispatch(option, 0.0, 0.0, 0.0).npv
         + solve_dispatch(option, -h, 0.0, 0.0).npv)
         / (h * h)
@@ -186,22 +187,18 @@ pub fn solution(option: &EquityOption) -> FdSolution {
 pub fn pricing_result(option: &EquityOption) -> crate::core::results::PricingResult {
     use crate::core::results::{Greeks, PricingResult};
     let base = solution(option);
-    let hv = 1e-3;
+    let hv = VOL_BUMP;
     let vol_up = solve_dispatch(option, hv, 0.0, 0.0);
     let vol_down = solve_dispatch(option, -hv, 0.0, 0.0);
-    let hr = 1e-4;
+    let hr = RATE_BUMP;
     let rho = (solve_dispatch(option, 0.0, hr, 0.0).npv
         - solve_dispatch(option, 0.0, -hr, 0.0).npv)
         / (2.0 * hr);
-    let hs = option.market.spot.value() * 1e-3;
+    let hs = option.market.spot.value() * SPOT_REL_BUMP;
     let charm = (solve_dispatch(option, 0.0, 0.0, hs).theta
         - solve_dispatch(option, 0.0, 0.0, -hs).theta)
         / (2.0 * hs);
-    let gamma_p = if base.delta == 0.0 {
-        f64::NAN
-    } else {
-        option.market.spot.value() * base.gamma / base.delta
-    };
+    let gamma_p = option.market.spot.value() * base.gamma / 100.0;
     PricingResult {
         pv: base.npv,
         greeks: Greeks {
@@ -392,7 +389,7 @@ fn solve(
         .cash_dividends
         .iter()
         .filter_map(|(date, amount)| {
-            let td = (*date - option.market.valuation_date).num_days() as f64 / 365.0;
+            let td = crate::equity::conventions::year_fraction(option.market.valuation_date, *date);
             (td > 0.0 && td <= t).then_some((td, *amount))
         })
         .collect();

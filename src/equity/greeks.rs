@@ -379,14 +379,10 @@ greek!(
     volga
 );
 
-/// Delta elasticity `S * gamma / delta`; `NaN` when delta is zero.
+/// Percentage gamma (Haug's GammaP), `S * gamma / 100`: the change in
+/// delta per 1% move in the underlying.
 pub fn gamma_p(option: &EquityOption) -> f64 {
-    let delta = delta(option);
-    if delta == 0.0 {
-        f64::NAN
-    } else {
-        option.market.spot.value() * gamma(option) / delta
-    }
+    option.market.spot.value() * gamma(option) / 100.0
 }
 
 // ── The batch entry point ───────────────────────────────────────────────
@@ -421,7 +417,7 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
             let (pv, std_err) = match option.engine {
                 PricingEngine::MonteCarlo(_) => {
                     let stats = montecarlo::stats(option, None);
-                    (stats.pv, Some(stats.std_err))
+                    (stats.pv, stats.std_err)
                 }
                 _ => (
                     option.price_bumped(&BumpedMarket::base(&option.market)),
@@ -459,11 +455,7 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
                 .map(|g| g.rho)
                 .unwrap_or_else(|| bump_rho(repricer, &bumps));
             let gamma = bump_gamma(repricer, &bumps);
-            let gamma_p = if delta == 0.0 {
-                f64::NAN
-            } else {
-                option.market.spot.value() * gamma / delta
-            };
+            let gamma_p = option.market.spot.value() * gamma / 100.0;
             PricingResult {
                 pv,
                 greeks: Greeks {

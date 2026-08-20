@@ -147,8 +147,6 @@ impl EquityOption {
 
         // ── payoff ──────────────────────────────────────────────────────
         builder = match payoff_type {
-            // not reachable from JSON yet: PayoffType::from_str does not
-            // produce Accumulator; build through EquityOptionBuilder
             PayoffType::Accumulator => {
                 return Err(RustyQLibError::invalid_input(
                     "payoff_type",

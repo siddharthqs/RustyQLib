@@ -135,17 +135,6 @@ impl fmt::Display for VolError {
 
 impl std::error::Error for VolError {}
 
-/// How query `(strike, forward)` maps onto the stored smile coordinate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SmileCoord {
-    /// coordinate = absolute strike (forward unused)
-    Strike,
-    /// coordinate = K/F
-    Moneyness,
-    /// coordinate = ln(K/F)
-    LogMoneyness,
-}
-
 /// One expiry's smile: `(coordinate, vol)` points sorted by coordinate.
 #[derive(Debug, Clone, Serialize)]
 struct Smile {
@@ -169,39 +158,8 @@ enum SurfaceData {
     Term {
         times: Vec<f64>,
         smiles: Vec<Smile>,
-        coord: SmileCoord,
+        coord: SmileCoordinate,
     },
-}
-
-// manual impl so SmileCoord needn't be public-serializable
-impl Serialize for SmileCoord {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(match self {
-            SmileCoord::Strike => "strike",
-            SmileCoord::Moneyness => "moneyness",
-            SmileCoord::LogMoneyness => "log_moneyness",
-        })
-    }
-}
-
-impl From<SmileCoordinate> for SmileCoord {
-    fn from(c: SmileCoordinate) -> SmileCoord {
-        match c {
-            SmileCoordinate::Strike => SmileCoord::Strike,
-            SmileCoordinate::Moneyness => SmileCoord::Moneyness,
-            SmileCoordinate::LogMoneyness => SmileCoord::LogMoneyness,
-        }
-    }
-}
-
-impl From<SmileCoord> for SmileCoordinate {
-    fn from(c: SmileCoord) -> SmileCoordinate {
-        match c {
-            SmileCoord::Strike => SmileCoordinate::Strike,
-            SmileCoord::Moneyness => SmileCoordinate::Moneyness,
-            SmileCoord::LogMoneyness => SmileCoordinate::LogMoneyness,
-        }
-    }
 }
 
 /// Time-dimension interpolation of total variance between expiry pillars
@@ -340,6 +298,53 @@ impl VolSurfaceDocument {
 }
 
 impl VolSurface {
+    /// The same market re-anchored at a later reference date: each
+    /// pillar smile stays attached to its expiry (the quotes are
+    /// unchanged in date space), while the pillar year fractions are
+    /// re-measured from the new anchor. Pillars expiring at or before
+    /// the new reference drop out. Errors if `new_reference` precedes
+    /// the current reference or if no pillar survives.
+    pub fn rolled(&self, new_reference: NaiveDate) -> Result<VolSurface, VolError> {
+        let tau = self.day_count.year_fraction(self.reference_date, new_reference);
+        if tau < 0.0 {
+            return Err(VolError::NonPositiveTime(tau));
+        }
+        if tau == 0.0 {
+            return Ok(self.clone());
+        }
+        let data = match &self.data {
+            SurfaceData::Flat(v) => SurfaceData::Flat(*v),
+            SurfaceData::Term {
+                times,
+                smiles,
+                coord,
+            } => {
+                let mut new_times = Vec::with_capacity(times.len());
+                let mut new_smiles = Vec::with_capacity(smiles.len());
+                for (t, smile) in times.iter().zip(smiles) {
+                    if *t > tau + 1e-12 {
+                        new_times.push(t - tau);
+                        new_smiles.push(smile.clone());
+                    }
+                }
+                if new_times.is_empty() {
+                    return Err(VolError::Empty);
+                }
+                SurfaceData::Term {
+                    times: new_times,
+                    smiles: new_smiles,
+                    coord: *coord,
+                }
+            }
+        };
+        Ok(VolSurface {
+            reference_date: new_reference,
+            day_count: self.day_count,
+            data,
+            time_interp: self.time_interp,
+        })
+    }
+
     // ── Constructors ────────────────────────────────────────────────────
 
     /// Constant volatility for all strikes and expiries.
@@ -373,7 +378,7 @@ impl VolSurface {
             vols,
             reference_date,
             day_count,
-            SmileCoord::Strike,
+            SmileCoordinate::Strike,
         )
     }
 
@@ -391,7 +396,7 @@ impl VolSurface {
             vols,
             reference_date,
             day_count,
-            SmileCoord::Moneyness,
+            SmileCoordinate::Moneyness,
         )
     }
 
@@ -434,7 +439,7 @@ impl VolSurface {
             data: SurfaceData::Term {
                 times,
                 smiles,
-                coord: SmileCoord::LogMoneyness,
+                coord: SmileCoordinate::LogMoneyness,
             },
             time_interp: TimeInterpolation::default(),
         })
@@ -500,7 +505,7 @@ impl VolSurface {
             data: SurfaceData::Term {
                 times,
                 smiles,
-                coord: coordinate.into(),
+                coord: coordinate,
             },
             time_interp: TimeInterpolation::default(),
         })
@@ -555,7 +560,7 @@ impl VolSurface {
             } => VolInput::StrikeSmiles {
                 expiries: times.iter().map(|&t| Tenor::YearFraction(t)).collect(),
                 smiles: smiles.iter().map(|s| s.points.clone()).collect(),
-                coordinate: (*coord).into(),
+                coordinate: *coord,
                 day_count: self.day_count,
             },
         }
@@ -586,9 +591,9 @@ impl VolSurface {
             return report;
         };
         let to_strike = |x: f64, f: f64| match coord {
-            SmileCoord::Strike => x,
-            SmileCoord::Moneyness => x * f,
-            SmileCoord::LogMoneyness => x.exp() * f,
+            SmileCoordinate::Strike => x,
+            SmileCoordinate::Moneyness => x * f,
+            SmileCoordinate::LogMoneyness => x.exp() * f,
         };
 
         // butterfly: convexity of undiscounted calls at the pillar strikes
@@ -692,9 +697,9 @@ impl VolSurface {
                 coord,
             } => {
                 let x = match coord {
-                    SmileCoord::Strike => strike,
-                    SmileCoord::Moneyness => strike / forward,
-                    SmileCoord::LogMoneyness => (strike / forward).ln(),
+                    SmileCoordinate::Strike => strike,
+                    SmileCoordinate::Moneyness => strike / forward,
+                    SmileCoordinate::LogMoneyness => (strike / forward).ln(),
                 };
                 let n = times.len();
                 if t <= times[0] {
@@ -809,7 +814,7 @@ impl VolSurface {
         vols: &[Vec<f64>],
         reference_date: NaiveDate,
         day_count: DayCountConvention,
-        coord: SmileCoord,
+        coord: SmileCoordinate,
     ) -> Result<Self, VolError> {
         let times = Self::resolve_expiries(expiries, reference_date, day_count)?;
         Self::validate_grid(&times, axis, vols)?;

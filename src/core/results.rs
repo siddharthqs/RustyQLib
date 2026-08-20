@@ -23,7 +23,8 @@ pub struct Greeks {
     pub vanna: f64,
     /// Change in delta per year of calendar time, `d²V/(dS dt)`.
     pub charm: f64,
-    /// Delta elasticity, `S * gamma / delta`.
+    /// Percentage gamma (Haug's GammaP), `S * gamma / 100`: the change
+    /// in delta per 1% move in the underlying.
     pub gamma_p: f64,
     /// Change in gamma per unit change in implied volatility, `d³V/(dS² dσ)`.
     pub zomma: f64,
@@ -93,11 +94,17 @@ mod tests {
 
     #[test]
     fn monte_carlo_price_reports_std_err_and_reproducible_pv() {
-        let option = vanilla(Engine::MonteCarlo);
+        // the default low-discrepancy sampler reports no standard error
+        // (deterministic points have no sample variance to report)
+        let sobol = vanilla(Engine::MonteCarlo);
+        assert_eq!(sobol.price().unwrap().std_err, None);
+
+        let mut option = vanilla(Engine::MonteCarlo);
+        option.mc_cfg_mut().sampler = crate::equity::montecarlo::Sampler::PseudoRandom;
         let result = option.price().unwrap();
         let se = result
             .std_err
-            .expect("MC engine must report a standard error");
+            .expect("pseudo-random MC must report a standard error");
         assert!(se > 0.0 && se.is_finite());
         // bit-reproducible MC: price() sees the same paths as npv()
         assert_eq!(result.pv, option.npv());

@@ -117,8 +117,8 @@ pub fn gamma(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSett
     df * norm_pdf(d1) / (f * sigma * t.sqrt())
 }
 
-/// Delta elasticity (also called percentage gamma), `F * gamma / delta`.
-/// It is undefined when delta is zero and returns `NaN` in that case.
+/// Percentage gamma (Haug's GammaP), `F * gamma / 100`: the change in
+/// delta per 1% move in the futures price.
 pub fn gamma_p(
     f: f64,
     k: f64,
@@ -128,12 +128,9 @@ pub fn gamma_p(
     put_or_call: PutOrCall,
     settlement: FuturesSettlement,
 ) -> f64 {
-    let d = delta(f, k, r, sigma, t, put_or_call, settlement);
-    if d == 0.0 {
-        f64::NAN
-    } else {
-        f * gamma(f, k, r, sigma, t, settlement) / d
-    }
+    // side kept for signature stability; GammaP is side-free
+    let _ = put_or_call;
+    f * gamma(f, k, r, sigma, t, settlement) / 100.0
 }
 
 /// Zomma, the change in futures gamma per unit change in volatility.

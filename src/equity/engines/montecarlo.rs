@@ -164,20 +164,90 @@ impl MonteCarloConfig {
 
 /// Price with sampling diagnostics.
 ///
-/// `std_err` is the standard error of the mean over paths. For the
-/// low-discrepancy sampler the points are not independent, so treat it as
-/// an indicative scale rather than a rigorous confidence bound; for the
-/// LSMC it reflects valuation-pass noise only (not regression uncertainty).
+/// `std_err` is the standard error of the mean, computed over
+/// **antithetic pair averages** (pair members are negatively correlated
+/// by construction, so the naive per-path estimator misstates the
+/// error; for independent draws the pair-averaged estimator is equally
+/// unbiased). It is `None` under the low-discrepancy sampler, whose
+/// deterministic points admit no sample-variance error estimate. For
+/// the LSMC it reflects valuation-pass noise only (not regression
+/// uncertainty).
 #[derive(Debug, Clone, Copy)]
 pub struct McStats {
     pub pv: f64,
-    pub std_err: f64,
+    pub std_err: Option<f64>,
     pub paths: usize,
     pub steps: usize,
 }
 
-fn summarize(sum: f64, sum_sq: f64, n: usize, steps: usize, offset: f64) -> McStats {
-    let (mean, std_err) = crate::core::montecarlo::mean_std_err(sum, sum_sq, n);
+/// Deterministic per-chunk accumulator for path values: the mean sums
+/// every path; the standard error treats each antithetic pair
+/// (2k, 2k+1) as one sample. Chunk boundaries are pair-aligned
+/// ([`PATH_CHUNK`] is even), so pairs never straddle chunks.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PathAccum {
+    sum: f64,
+    pair_sum: f64,
+    pair_sq: f64,
+    pairs: usize,
+    pending: f64,
+    has_pending: bool,
+}
+
+impl PathAccum {
+    pub(crate) fn push(&mut self, index: usize, value: f64) {
+        self.sum += value;
+        if index % 2 == 0 {
+            self.pending = value;
+            self.has_pending = true;
+        } else {
+            let p = 0.5 * (self.pending + value);
+            self.pair_sum += p;
+            self.pair_sq += p * p;
+            self.pairs += 1;
+            self.has_pending = false;
+        }
+    }
+
+    /// Count a trailing unpaired path (odd path count) as its own sample.
+    fn flush(&mut self) {
+        if self.has_pending {
+            let p = self.pending;
+            self.pair_sum += p;
+            self.pair_sq += p * p;
+            self.pairs += 1;
+            self.has_pending = false;
+        }
+    }
+
+    /// Fold two chunk accumulators in deterministic order.
+    pub(crate) fn merge(mut self, mut other: PathAccum) -> PathAccum {
+        self.flush();
+        other.flush();
+        PathAccum {
+            sum: self.sum + other.sum,
+            pair_sum: self.pair_sum + other.pair_sum,
+            pair_sq: self.pair_sq + other.pair_sq,
+            pairs: self.pairs + other.pairs,
+            pending: 0.0,
+            has_pending: false,
+        }
+    }
+}
+
+pub(crate) fn summarize(mut acc: PathAccum, n: usize, steps: usize, offset: f64, qmc: bool) -> McStats {
+    acc.flush();
+    // the price is the plain mean over every path — identical to the
+    // pre-pairing computation to the last bit
+    let mean = acc.sum / n as f64;
+    let std_err = if qmc || acc.pairs == 0 {
+        None
+    } else {
+        let m = acc.pairs as f64;
+        let pair_mean = acc.pair_sum / m;
+        let var = (acc.pair_sq / m - pair_mean * pair_mean).max(0.0);
+        Some((var / m).sqrt())
+    };
     McStats {
         pv: mean + offset,
         std_err,
@@ -219,7 +289,7 @@ fn dividends_per_step(option: &EquityOption, t: f64, steps: usize) -> Option<Vec
     let dt = t / steps as f64;
     let mut buckets = vec![0.0; steps];
     for (date, amount) in &option.market.cash_dividends {
-        let td = (*date - option.market.valuation_date).num_days() as f64 / 365.0;
+        let td = crate::equity::conventions::year_fraction(option.market.valuation_date, *date);
         if td > 0.0 && td <= t {
             let idx = (((td / dt).ceil() as usize).max(1) - 1).min(steps - 1);
             buckets[idx] += amount;
@@ -239,7 +309,7 @@ fn escrowed_spot(option: &EquityOption, p: &MarketParams) -> f64 {
     let dr = p.r - option.risk_free_rate();
     let mut pv = 0.0;
     for (date, amount) in &option.market.cash_dividends {
-        let td = (*date - option.market.valuation_date).num_days() as f64 / 365.0;
+        let td = crate::equity::conventions::year_fraction(option.market.valuation_date, *date);
         if td > 0.0 && td <= p.t {
             // df(td) e^{-dr td} discounts at the bumped rate p.r;
             // e^{p.q td} moves it to the net carry (p.r - p.q).
@@ -620,33 +690,35 @@ fn effective_steps(cfg: &MonteCarloConfig, model: &Model) -> usize {
 /// reproducible regardless of thread scheduling.
 const PATH_CHUNK: usize = 4096;
 
+/// Low-discrepancy points are deterministic, so a sample-variance
+/// standard error has no statistical meaning for them.
+fn is_qmc(cfg: &MonteCarloConfig) -> bool {
+    matches!(cfg.sampler, Sampler::Sobol)
+}
+
 /// Parallel map-reduce over paths: `eval(dw, scratch)` values one path from
-/// its Brownian increments; returns (sum, sum of squares) deterministically.
-fn run_paths<F>(paths: usize, steps: usize, draws: &PathDraws, eval: F) -> (f64, f64)
+/// its Brownian increments; returns the pair-aware sums deterministically.
+fn run_paths<F>(paths: usize, steps: usize, draws: &PathDraws, eval: F) -> PathAccum
 where
     F: Fn(&[f64], &mut Vec<f64>) -> f64 + Sync,
 {
     let chunks = paths.div_ceil(PATH_CHUNK);
-    let partials: Vec<(f64, f64)> = (0..chunks)
+    let partials: Vec<PathAccum> = (0..chunks)
         .into_par_iter()
         .map(|chunk| {
             let mut z = vec![0.0; steps];
             let mut w = vec![0.0; steps];
             let mut dw = vec![0.0; steps];
             let mut scratch = Vec::new();
-            let (mut sum, mut sum_sq) = (0.0, 0.0);
+            let mut acc = PathAccum::default();
             for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(paths) {
                 draws.fill(i, &mut z, &mut w, &mut dw);
-                let v = eval(&dw, &mut scratch);
-                sum += v;
-                sum_sq += v * v;
+                acc.push(i, eval(&dw, &mut scratch));
             }
-            (sum, sum_sq)
+            acc
         })
         .collect();
-    partials
-        .into_iter()
-        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
+    partials.into_iter().fold(PathAccum::default(), PathAccum::merge)
 }
 
 // ── European ────────────────────────────────────────────────────────────
@@ -694,31 +766,29 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
             Sampler::Sobol => sobol_normals(cfg.paths),
             Sampler::PseudoRandom => pseudo_normals(cfg.paths, cfg.seed),
         };
-        let partials: Vec<(f64, f64)> = z
+        let partials: Vec<PathAccum> = z
             .par_chunks(PATH_CHUNK)
-            .map(|chunk| {
-                let (mut sum, mut sum_sq) = (0.0, 0.0);
-                for z in chunk {
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let mut acc = PathAccum::default();
+                for (j, z) in chunk.iter().enumerate() {
                     let v = df
                         * option
                             .payoff
                             .payoff(s0 * exp(drift + vol_sqrt_t * z), p.strike);
-                    sum += v;
-                    sum_sq += v * v;
+                    acc.push(chunk_idx * PATH_CHUNK + j, v);
                 }
-                (sum, sum_sq)
+                acc
             })
             .collect();
-        let (sum, sum_sq) = partials
-            .into_iter()
-            .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
-        return summarize(sum, sum_sq, cfg.paths, 1, 0.0);
+        let acc = partials.into_iter().fold(PathAccum::default(), PathAccum::merge);
+        return summarize(acc, cfg.paths, 1, 0.0, is_qmc(cfg));
     }
     let dt = p.t / steps as f64;
     let process = bs_process(option, p);
     let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let divs = dividends_per_step(option, p.t, steps);
-    let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, _| {
+    let acc = run_paths(cfg.paths, steps, &draws, |dw, _| {
         let mut s = p.s0;
         for (i, d) in dw.iter().enumerate() {
             s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
@@ -728,7 +798,7 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         }
         df * option.payoff.payoff(s, p.strike)
     });
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
 /// Path-dependent pricing through [`Payoff::path_payoff`] on discretely
@@ -741,7 +811,7 @@ fn generic_path_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let process = bs_process(option, p);
     let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let divs = dividends_per_step(option, p.t, steps);
-    let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
+    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
         path.clear();
         let mut s = p.s0;
         for (i, d) in dw.iter().enumerate() {
@@ -753,7 +823,7 @@ fn generic_path_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         }
         df * option.payoff.path_payoff(path, p.strike)
     });
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
 /// Asian pricing. Arithmetic fixed-strike Asians under plain GBM use the
@@ -777,7 +847,7 @@ fn asian_npv(option: &EquityOption, asian: &AsianPayoff, p: &MarketParams) -> Mc
     let drift_dt = (p.r - p.q - 0.5 * p.sigma * p.sigma) * dt;
     let df = exp(-p.r * p.t);
     let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
-    let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, _| {
+    let acc = run_paths(cfg.paths, steps, &draws, |dw, _| {
         let mut s = p.s0;
         let mut sum_s = 0.0;
         let mut log_sum = 0.0;
@@ -801,7 +871,7 @@ fn asian_npv(option: &EquityOption, asian: &AsianPayoff, p: &MarketParams) -> Mc
         Some(steps),
         *option.payoff.put_or_call(),
     );
-    summarize(sum, sum_sq, cfg.paths, steps, geo_closed)
+    summarize(acc, cfg.paths, steps, geo_closed, is_qmc(cfg))
 }
 
 /// Barrier pricing with a Brownian-bridge crossing correction: each path
@@ -819,7 +889,7 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
     if knocked_at_start && out {
         return McStats {
             pv: 0.0,
-            std_err: 0.0,
+            std_err: None,
             paths: cfg.paths,
             steps,
         };
@@ -828,7 +898,7 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
     let process = bs_process(option, p);
     let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let divs = dividends_per_step(option, p.t, steps);
-    let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, _| {
+    let acc = run_paths(cfg.paths, steps, &draws, |dw, _| {
         let mut s = p.s0;
         let mut survival = if knocked_at_start { 0.0 } else { 1.0 };
         for (i, d) in dw.iter().enumerate() {
@@ -859,7 +929,7 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
         let weight = if out { survival } else { 1.0 - survival };
         df * weight * vanilla_leg
     });
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
 /// Observation grid for an autocallable on a path of `steps` steps over
@@ -929,7 +999,7 @@ fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketPara
     let divs = dividends_per_step(option, p.t, steps);
     let process = bs_process(option, p);
     let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
-    let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
+    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
         path.clear();
         let mut s = p.s0;
         for (i, d) in dw.iter().enumerate() {
@@ -941,7 +1011,7 @@ fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketPara
         }
         auto.path_value(path, &obs_idx, &dfs)
     });
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
 /// Accumulator valuation: daily accruals land on their own observation
@@ -962,7 +1032,7 @@ fn accumulator_npv(option: &EquityOption, accu: &AccumulatorPayoff, p: &MarketPa
     let divs = dividends_per_step(option, p.t, steps);
     let process = bs_process(option, p);
     let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
-    let (sum, sum_sq) = run_paths(cfg.paths, steps, &draws, |dw, path| {
+    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
         path.clear();
         let mut s = p.s0;
         for (i, d) in dw.iter().enumerate() {
@@ -974,7 +1044,7 @@ fn accumulator_npv(option: &EquityOption, accu: &AccumulatorPayoff, p: &MarketPa
         }
         accu.path_value(path, &obs_idx, &dfs, p.strike)
     });
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
 // ── Heston stochastic volatility paths ──────────────────────────────────
@@ -982,6 +1052,131 @@ fn accumulator_npv(option: &EquityOption, accu: &AccumulatorPayoff, p: &MarketPa
 /// Heston simulation on seeded per-path pseudo-random streams. The
 /// default (`Exact`) scheme selects Andersen QE with martingale
 /// correction; `mc_scheme: euler`/`milstein` select full-truncation
+/// One payoff-routing implementation shared by every stochastic-vol
+/// path route (Heston, SABR, rough Bergomi): barriers get the
+/// Brownian-bridge crossing correction, autocallables and accumulators
+/// price on observation-aligned step grids, and everything else routes
+/// through `path_payoff` (path-dependent) or the terminal payoff.
+///
+/// `run(steps, dt, eval)` generates the model's paths on the given grid
+/// and folds `eval(spots, vols)` over them — the only model-specific
+/// part. What used to be three ~90-line copies of this block (one per
+/// model) is now one site; a change to the bridge logic or the
+/// observation alignment cannot silently miss a model again.
+fn route_sv_paths(
+    option: &EquityOption,
+    p: &MarketParams,
+    steps: usize,
+    run: impl Fn(usize, f64, &(dyn Fn(&[f64], &[f64]) -> f64 + Sync)) -> PathAccum,
+) -> McStats {
+    let cfg = option.mc_cfg();
+    let dt = p.t / steps as f64;
+    let df = exp(-p.r * p.t);
+
+    if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+        let down = barrier.direction == BarrierDirection::Down;
+        let out = barrier.knock == KnockType::Out;
+        let h = barrier.barrier;
+        let knocked_at_start = if down { p.s0 <= h } else { p.s0 >= h };
+        if knocked_at_start && out {
+            return McStats {
+                pv: 0.0,
+                std_err: None,
+                paths: cfg.paths,
+                steps,
+            };
+        }
+        let eval = |spots: &[f64], vols: &[f64]| {
+            let weight = bridge_survival(spots, vols, p.s0, h, down, dt, knocked_at_start, out);
+            df * weight * option.payoff.payoff(*spots.last().unwrap(), p.strike)
+        };
+        let acc = run(steps, dt, &eval);
+        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+    }
+
+    if let Some(auto) = option.payoff.as_any().downcast_ref::<AutocallablePayoff>() {
+        let n_obs = auto.observations.max(1);
+        let steps = steps.div_ceil(n_obs) * n_obs;
+        let dt = p.t / steps as f64;
+        let (obs_idx, dfs) = observation_grid(
+            option,
+            n_obs,
+            auto.observation_times.as_ref(),
+            p.t,
+            p.r,
+            steps,
+        );
+        let eval = |spots: &[f64], _: &[f64]| auto.path_value(spots, &obs_idx, &dfs);
+        let acc = run(steps, dt, &eval);
+        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+    }
+
+    if let Some(accu) = option.payoff.as_any().downcast_ref::<AccumulatorPayoff>() {
+        let n_obs = accu.observations.max(1);
+        let steps = steps.div_ceil(n_obs) * n_obs;
+        let dt = p.t / steps as f64;
+        let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
+        let eval = |spots: &[f64], _: &[f64]| accu.path_value(spots, &obs_idx, &dfs, p.strike);
+        let acc = run(steps, dt, &eval);
+        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+    }
+
+    let path_dependent = option.payoff.is_path_dependent();
+    let eval = |spots: &[f64], _: &[f64]| {
+        let v = if path_dependent {
+            option.payoff.path_payoff(spots, p.strike)
+        } else {
+            option.payoff.payoff(*spots.last().unwrap(), p.strike)
+        };
+        df * v
+    };
+    let acc = run(steps, dt, &eval);
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+}
+
+/// Brownian-bridge survival weight of one simulated path against a
+/// single continuously-monitored barrier: per step, crossing at the
+/// node kills the path outright, otherwise the bridge crossing
+/// probability `exp(-2ab / (sigma^2 dt))` discounts the survival.
+/// Returns the knock-out survival weight, or its complement for
+/// knock-ins.
+#[allow(clippy::too_many_arguments)]
+fn bridge_survival(
+    spots: &[f64],
+    vols: &[f64],
+    s0: f64,
+    h: f64,
+    down: bool,
+    dt: f64,
+    knocked_at_start: bool,
+    out: bool,
+) -> f64 {
+    let mut survival = if knocked_at_start { 0.0 } else { 1.0 };
+    let mut s_prev = s0;
+    for (i, &s_next) in spots.iter().enumerate() {
+        if survival > 0.0 {
+            let crossed = if down { s_next <= h } else { s_next >= h };
+            if crossed {
+                survival = 0.0;
+            } else {
+                let (a, b) = if down {
+                    ((s_prev / h).ln(), (s_next / h).ln())
+                } else {
+                    ((h / s_prev).ln(), (h / s_next).ln())
+                };
+                let sigma = vols[i].max(1e-8);
+                survival *= 1.0 - (-2.0 * a * b / (sigma * sigma * dt)).exp();
+            }
+        }
+        s_prev = s_next;
+    }
+    if out {
+        survival
+    } else {
+        1.0 - survival
+    }
+}
+
 /// Euler. Vega bumps map to a parallel shift of the instantaneous and
 /// long-run vol.
 fn heston_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
@@ -997,87 +1192,9 @@ fn heston_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     } else {
         effective_steps(cfg, &option.model)
     };
-    let dt = p.t / steps as f64;
-    let df = exp(-p.r * p.t);
-
-    if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
-        let down = barrier.direction == BarrierDirection::Down;
-        let out = barrier.knock == KnockType::Out;
-        let h = barrier.barrier;
-        let knocked_at_start = if down { p.s0 <= h } else { p.s0 >= h };
-        if knocked_at_start && out {
-            return McStats {
-                pv: 0.0,
-                std_err: 0.0,
-                paths: cfg.paths,
-                steps,
-            };
-        }
-        let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, vols| {
-            let mut survival = if knocked_at_start { 0.0 } else { 1.0 };
-            let mut s_prev = p.s0;
-            for (i, &s_next) in spots.iter().enumerate() {
-                if survival > 0.0 {
-                    let crossed = if down { s_next <= h } else { s_next >= h };
-                    if crossed {
-                        survival = 0.0;
-                    } else {
-                        let (a, b) = if down {
-                            ((s_prev / h).ln(), (s_next / h).ln())
-                        } else {
-                            ((h / s_prev).ln(), (h / s_next).ln())
-                        };
-                        let sigma = vols[i].max(1e-8);
-                        survival *= 1.0 - (-2.0 * a * b / (sigma * sigma * dt)).exp();
-                    }
-                }
-                s_prev = s_next;
-            }
-            let weight = if out { survival } else { 1.0 - survival };
-            df * weight * option.payoff.payoff(s_prev, p.strike)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    if let Some(auto) = option.payoff.as_any().downcast_ref::<AutocallablePayoff>() {
-        let n_obs = auto.observations.max(1);
-        let steps = steps.div_ceil(n_obs) * n_obs;
-        let dt = p.t / steps as f64;
-        let (obs_idx, dfs) = observation_grid(
-            option,
-            n_obs,
-            auto.observation_times.as_ref(),
-            p.t,
-            p.r,
-            steps,
-        );
-        let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, _| {
-            auto.path_value(spots, &obs_idx, &dfs)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    if let Some(accu) = option.payoff.as_any().downcast_ref::<AccumulatorPayoff>() {
-        let n_obs = accu.observations.max(1);
-        let steps = steps.div_ceil(n_obs) * n_obs;
-        let dt = p.t / steps as f64;
-        let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
-        let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, _| {
-            accu.path_value(spots, &obs_idx, &dfs, p.strike)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    let path_dependent = option.payoff.is_path_dependent();
-    let (sum, sum_sq) = run_heston_paths(option, p, &hp, steps, dt, |spots, _| {
-        let v = if path_dependent {
-            option.payoff.path_payoff(spots, p.strike)
-        } else {
-            option.payoff.payoff(*spots.last().unwrap(), p.strike)
-        };
-        df * v
-    });
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    route_sv_paths(option, p, steps, |steps, dt, eval| {
+        run_heston_paths(option, p, &hp, steps, dt, eval)
+    })
 }
 
 /// Parallel Heston path generation through the two-factor
@@ -1092,7 +1209,7 @@ fn run_heston_paths<F>(
     steps: usize,
     dt: f64,
     eval: F,
-) -> (f64, f64)
+) -> PathAccum
 where
     F: Fn(&[f64], &[f64]) -> f64 + Sync,
 {
@@ -1111,13 +1228,13 @@ where
     let sqrt_dt = dt.sqrt();
     let divs = dividends_per_step(option, p.t, steps);
     let chunks = cfg.paths.div_ceil(PATH_CHUNK);
-    let partials: Vec<(f64, f64)> = (0..chunks)
+    let partials: Vec<PathAccum> = (0..chunks)
         .into_par_iter()
         .map(|chunk| {
             let mut z = vec![0.0; 2 * steps];
             let mut spots = vec![0.0; steps];
             let mut vols = vec![0.0; steps];
-            let (mut sum, mut sum_sq) = (0.0, 0.0);
+            let mut acc = PathAccum::default();
             for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
                 // antithetic pairs share a stream with negated draws
                 path_normals(cfg.seed, (i / 2) as u64, &mut z);
@@ -1135,16 +1252,12 @@ where
                     x = x_next;
                     spots[j] = x[0];
                 }
-                let value = eval(&spots, &vols);
-                sum += value;
-                sum_sq += value * value;
+                acc.push(i, eval(&spots, &vols));
             }
-            (sum, sum_sq)
+            acc
         })
         .collect();
-    partials
-        .into_iter()
-        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
+    partials.into_iter().fold(PathAccum::default(), PathAccum::merge)
 }
 
 // ── SABR stochastic volatility paths ────────────────────────────────────
@@ -1171,87 +1284,9 @@ fn sabr_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     } else {
         effective_steps(cfg, &option.model)
     };
-    let dt = p.t / steps as f64;
-    let df = exp(-p.r * p.t);
-
-    if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
-        let down = barrier.direction == BarrierDirection::Down;
-        let out = barrier.knock == KnockType::Out;
-        let h = barrier.barrier;
-        let knocked_at_start = if down { p.s0 <= h } else { p.s0 >= h };
-        if knocked_at_start && out {
-            return McStats {
-                pv: 0.0,
-                std_err: 0.0,
-                paths: cfg.paths,
-                steps,
-            };
-        }
-        let (sum, sum_sq) = run_sabr_paths(option, p, &sp, steps, dt, |spots, vols| {
-            let mut survival = if knocked_at_start { 0.0 } else { 1.0 };
-            let mut s_prev = p.s0;
-            for (i, &s_next) in spots.iter().enumerate() {
-                if survival > 0.0 {
-                    let crossed = if down { s_next <= h } else { s_next >= h };
-                    if crossed {
-                        survival = 0.0;
-                    } else {
-                        let (a, b) = if down {
-                            ((s_prev / h).ln(), (s_next / h).ln())
-                        } else {
-                            ((h / s_prev).ln(), (h / s_next).ln())
-                        };
-                        let sigma = vols[i].max(1e-8);
-                        survival *= 1.0 - (-2.0 * a * b / (sigma * sigma * dt)).exp();
-                    }
-                }
-                s_prev = s_next;
-            }
-            let weight = if out { survival } else { 1.0 - survival };
-            df * weight * option.payoff.payoff(s_prev, p.strike)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    if let Some(auto) = option.payoff.as_any().downcast_ref::<AutocallablePayoff>() {
-        let n_obs = auto.observations.max(1);
-        let steps = steps.div_ceil(n_obs) * n_obs;
-        let dt = p.t / steps as f64;
-        let (obs_idx, dfs) = observation_grid(
-            option,
-            n_obs,
-            auto.observation_times.as_ref(),
-            p.t,
-            p.r,
-            steps,
-        );
-        let (sum, sum_sq) = run_sabr_paths(option, p, &sp, steps, dt, |spots, _| {
-            auto.path_value(spots, &obs_idx, &dfs)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    if let Some(accu) = option.payoff.as_any().downcast_ref::<AccumulatorPayoff>() {
-        let n_obs = accu.observations.max(1);
-        let steps = steps.div_ceil(n_obs) * n_obs;
-        let dt = p.t / steps as f64;
-        let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
-        let (sum, sum_sq) = run_sabr_paths(option, p, &sp, steps, dt, |spots, _| {
-            accu.path_value(spots, &obs_idx, &dfs, p.strike)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    let path_dependent = option.payoff.is_path_dependent();
-    let (sum, sum_sq) = run_sabr_paths(option, p, &sp, steps, dt, |spots, _| {
-        let v = if path_dependent {
-            option.payoff.path_payoff(spots, p.strike)
-        } else {
-            option.payoff.payoff(*spots.last().unwrap(), p.strike)
-        };
-        df * v
-    });
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    route_sv_paths(option, p, steps, |steps, dt, eval| {
+        run_sabr_paths(option, p, &sp, steps, dt, eval)
+    })
 }
 
 /// Parallel SABR path generation through the two-factor [`SabrProcess`]
@@ -1267,7 +1302,7 @@ fn run_sabr_paths<F>(
     steps: usize,
     dt: f64,
     eval: F,
-) -> (f64, f64)
+) -> PathAccum
 where
     F: Fn(&[f64], &[f64]) -> f64 + Sync,
 {
@@ -1283,13 +1318,13 @@ where
         .collect();
     let f0 = p.s0 * exp(carry * p.t);
     let chunks = cfg.paths.div_ceil(PATH_CHUNK);
-    let partials: Vec<(f64, f64)> = (0..chunks)
+    let partials: Vec<PathAccum> = (0..chunks)
         .into_par_iter()
         .map(|chunk| {
             let mut z = vec![0.0; 2 * steps];
             let mut spots = vec![0.0; steps];
             let mut vols = vec![0.0; steps];
-            let (mut sum, mut sum_sq) = (0.0, 0.0);
+            let mut acc = PathAccum::default();
             for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
                 // antithetic pairs share a stream with negated draws
                 path_normals(cfg.seed, (i / 2) as u64, &mut z);
@@ -1309,16 +1344,12 @@ where
                     x = x_next;
                     spots[j] = x[0] * spot_factor[j];
                 }
-                let value = eval(&spots, &vols);
-                sum += value;
-                sum_sq += value * value;
+                acc.push(i, eval(&spots, &vols));
             }
-            (sum, sum_sq)
+            acc
         })
         .collect();
-    partials
-        .into_iter()
-        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
+    partials.into_iter().fold(PathAccum::default(), PathAccum::merge)
 }
 
 // ── Rough Bergomi stochastic volatility paths ───────────────────────────
@@ -1351,8 +1382,6 @@ fn rbergomi_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     } else {
         effective_steps(cfg, &option.model)
     };
-    let dt = p.t / steps as f64;
-    let df = exp(-p.r * p.t);
 
     if option
         .payoff
@@ -1364,84 +1393,9 @@ fn rbergomi_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         return rbergomi_vanilla_mixed(option, p, &rp, steps);
     }
 
-    if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
-        let down = barrier.direction == BarrierDirection::Down;
-        let out = barrier.knock == KnockType::Out;
-        let h = barrier.barrier;
-        let knocked_at_start = if down { p.s0 <= h } else { p.s0 >= h };
-        if knocked_at_start && out {
-            return McStats {
-                pv: 0.0,
-                std_err: 0.0,
-                paths: cfg.paths,
-                steps,
-            };
-        }
-        let (sum, sum_sq) = run_rbergomi_paths(option, p, &rp, steps, dt, |spots, vols| {
-            let mut survival = if knocked_at_start { 0.0 } else { 1.0 };
-            let mut s_prev = p.s0;
-            for (i, &s_next) in spots.iter().enumerate() {
-                if survival > 0.0 {
-                    let crossed = if down { s_next <= h } else { s_next >= h };
-                    if crossed {
-                        survival = 0.0;
-                    } else {
-                        let (a, b) = if down {
-                            ((s_prev / h).ln(), (s_next / h).ln())
-                        } else {
-                            ((h / s_prev).ln(), (h / s_next).ln())
-                        };
-                        let sigma = vols[i].max(1e-8);
-                        survival *= 1.0 - (-2.0 * a * b / (sigma * sigma * dt)).exp();
-                    }
-                }
-                s_prev = s_next;
-            }
-            let weight = if out { survival } else { 1.0 - survival };
-            df * weight * option.payoff.payoff(s_prev, p.strike)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    if let Some(auto) = option.payoff.as_any().downcast_ref::<AutocallablePayoff>() {
-        let n_obs = auto.observations.max(1);
-        let steps = steps.div_ceil(n_obs) * n_obs;
-        let dt = p.t / steps as f64;
-        let (obs_idx, dfs) = observation_grid(
-            option,
-            n_obs,
-            auto.observation_times.as_ref(),
-            p.t,
-            p.r,
-            steps,
-        );
-        let (sum, sum_sq) = run_rbergomi_paths(option, p, &rp, steps, dt, |spots, _| {
-            auto.path_value(spots, &obs_idx, &dfs)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    if let Some(accu) = option.payoff.as_any().downcast_ref::<AccumulatorPayoff>() {
-        let n_obs = accu.observations.max(1);
-        let steps = steps.div_ceil(n_obs) * n_obs;
-        let dt = p.t / steps as f64;
-        let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
-        let (sum, sum_sq) = run_rbergomi_paths(option, p, &rp, steps, dt, |spots, _| {
-            accu.path_value(spots, &obs_idx, &dfs, p.strike)
-        });
-        return summarize(sum, sum_sq, cfg.paths, steps, 0.0);
-    }
-
-    let path_dependent = option.payoff.is_path_dependent();
-    let (sum, sum_sq) = run_rbergomi_paths(option, p, &rp, steps, dt, |spots, _| {
-        let v = if path_dependent {
-            option.payoff.path_payoff(spots, p.strike)
-        } else {
-            option.payoff.payoff(*spots.last().unwrap(), p.strike)
-        };
-        df * v
-    });
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    route_sv_paths(option, p, steps, |steps, dt, eval| {
+        run_rbergomi_paths(option, p, &rp, steps, dt, eval)
+    })
 }
 
 /// Conditional (mixed) estimator for European vanillas under rough
@@ -1474,14 +1428,14 @@ fn rbergomi_vanilla_mixed(
     let put_or_call = *option.payoff.put_or_call();
     let (rho, orth) = (rp.rho, 1.0 - rp.rho * rp.rho);
     let chunks = cfg.paths.div_ceil(PATH_CHUNK);
-    let partials: Vec<(f64, f64)> = (0..chunks)
+    let partials: Vec<PathAccum> = (0..chunks)
         .into_par_iter()
         .map(|chunk| {
             let mut z = vec![0.0; 2 * steps];
             let mut dwv = vec![0.0; steps];
             let mut volterra = vec![0.0; steps];
             let mut scratch: Vec<Complex> = Vec::new();
-            let (mut sum, mut sum_sq) = (0.0, 0.0);
+            let mut acc = PathAccum::default();
             for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
                 // antithetic pairs share a stream with a negated draw
                 path_normals(cfg.seed, (i / 2) as u64, &mut z);
@@ -1501,16 +1455,13 @@ fn rbergomi_vanilla_mixed(
                 let f_cond = forward * exp(rho * stoch_int - 0.5 * rho * rho * int_var);
                 let value =
                     df * black_on_forward(f_cond, p.strike, (orth * int_var).sqrt(), put_or_call);
-                sum += value;
-                sum_sq += value * value;
+                acc.push(i, value);
             }
-            (sum, sum_sq)
+            acc
         })
         .collect();
-    let (sum, sum_sq) = partials
-        .into_iter()
-        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+    let acc = partials.into_iter().fold(PathAccum::default(), PathAccum::merge);
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
 /// Parallel rough Bergomi spot-path generation on the exact scheme:
@@ -1527,7 +1478,7 @@ fn run_rbergomi_paths<F>(
     steps: usize,
     dt: f64,
     eval: F,
-) -> (f64, f64)
+) -> PathAccum
 where
     F: Fn(&[f64], &[f64]) -> f64 + Sync,
 {
@@ -1539,7 +1490,7 @@ where
     let drift_dt = (p.r - p.q) * dt;
     let divs = dividends_per_step(option, p.t, steps);
     let chunks = cfg.paths.div_ceil(PATH_CHUNK);
-    let partials: Vec<(f64, f64)> = (0..chunks)
+    let partials: Vec<PathAccum> = (0..chunks)
         .into_par_iter()
         .map(|chunk| {
             let mut z = vec![0.0; 3 * steps];
@@ -1548,7 +1499,7 @@ where
             let mut spots = vec![0.0; steps];
             let mut vols = vec![0.0; steps];
             let mut scratch: Vec<Complex> = Vec::new();
-            let (mut sum, mut sum_sq) = (0.0, 0.0);
+            let mut acc = PathAccum::default();
             for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
                 // antithetic pairs share a stream with a negated draw
                 path_normals(cfg.seed, (i / 2) as u64, &mut z);
@@ -1571,16 +1522,12 @@ where
                     spots[j] = s;
                     v_left = rp.variance(gen.times()[j], volterra[j]);
                 }
-                let value = eval(&spots, &vols);
-                sum += value;
-                sum_sq += value * value;
+                acc.push(i, eval(&spots, &vols));
             }
-            (sum, sum_sq)
+            acc
         })
         .collect();
-    partials
-        .into_iter()
-        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
+    partials.into_iter().fold(PathAccum::default(), PathAccum::merge)
 }
 
 // ── American: two-pass Longstaff-Schwartz ───────────────────────────────
@@ -1613,14 +1560,133 @@ fn exercise_mask(option: &EquityOption, t: f64, steps: usize) -> Vec<bool> {
     }
 }
 
-/// Two-pass least-squares Monte Carlo (Longstaff-Schwartz):
-/// pass 1 fits the per-date continuation-value regressions on one set of
-/// paths; pass 2 applies the fitted exercise rule to an independent set,
-/// which removes the foresight (in-sample) bias of single-pass LSMC.
-/// Always uses pseudo-random per-path streams. Heston takes its own
-/// route ([`heston_american_npv`]): the exercise decision there depends
-/// on the variance state, so both the paths and the regression basis are
-/// two-dimensional.
+/// Two-pass least-squares Monte Carlo (Longstaff-Schwartz), generic
+/// over the path simulator and the regression basis: pass 1 fits the
+/// per-date continuation-value regressions on one set of paths; pass 2
+/// applies the fitted exercise rule to an independent set, which
+/// removes the foresight (in-sample) bias of single-pass LSMC. Always
+/// uses pseudo-random per-path streams.
+///
+/// `simulate(seed, i, scratch, spots, aux)` fills path `i`'s spot
+/// levels and an auxiliary state series (the variance path under
+/// Heston; ignored by one-dimensional bases). `basis(s / s0, aux_j)`
+/// maps the state at one exercise date to the regression features.
+/// One scaffold instead of the former two verbatim copies — which is
+/// how the dividend bug of 2026-08-19 managed to exist twice.
+fn lsmc_two_pass<const K: usize, S: Send>(
+    option: &EquityOption,
+    p: &MarketParams,
+    steps: usize,
+    new_scratch: impl Fn() -> S + Sync + Send,
+    simulate: impl Fn(u64, usize, &mut S, &mut [f64], &mut [f64]) + Sync,
+    basis: impl Fn(f64, f64) -> [f64; K] + Sync,
+) -> McStats {
+    let cfg = option.mc_cfg();
+    let dt = p.t / steps as f64;
+    let allowed = exercise_mask(option, p.t, steps);
+    let disc = exp(-p.r * dt);
+    let seed_regression = cfg.seed ^ 0xA11C_E5ED;
+    let seed_valuation = cfg.seed ^ 0xB0B5_1EED;
+
+    // ── pass 1: simulate and fit regressions backwards
+    let paths_sv: Vec<(Vec<f64>, Vec<f64>)> = (0..cfg.paths)
+        .into_par_iter()
+        .map_init(&new_scratch, |scratch, i| {
+            let mut spots = vec![0.0; steps];
+            let mut aux = vec![0.0; steps];
+            simulate(seed_regression, i, scratch, &mut spots, &mut aux);
+            (spots, aux)
+        })
+        .collect();
+
+    let mut cashflow: Vec<f64> = paths_sv
+        .iter()
+        .map(|(spots, _)| option.payoff.payoff(spots[steps - 1], p.strike))
+        .collect();
+    let mut betas: Vec<Option<[f64; K]>> = vec![None; steps.saturating_sub(1)];
+    for step_idx in (0..steps - 1).rev() {
+        for cf in cashflow.iter_mut() {
+            *cf *= disc;
+        }
+        if !allowed[step_idx] {
+            // no exercise right at this date: continuation only, no
+            // regression fitted, so pass 2 cannot exercise here either
+            continue;
+        }
+        let itm: Vec<usize> = (0..paths_sv.len())
+            .filter(|&i| option.payoff.payoff(paths_sv[i].0[step_idx], p.strike) > 0.0)
+            .collect();
+        if itm.len() < K {
+            continue;
+        }
+        let rows: Vec<([f64; K], f64)> = itm
+            .iter()
+            .map(|&i| {
+                let (spots, aux) = &paths_sv[i];
+                (basis(spots[step_idx] / p.s0, aux[step_idx]), cashflow[i])
+            })
+            .collect();
+        let Some(beta) = least_squares(&rows) else {
+            continue;
+        };
+        for &i in &itm {
+            let (spots, aux) = &paths_sv[i];
+            let s = spots[step_idx];
+            let pay = option.payoff.payoff(s, p.strike);
+            let continuation = dot(&beta, &basis(s / p.s0, aux[step_idx]));
+            if pay > continuation {
+                cashflow[i] = pay;
+            }
+        }
+        betas[step_idx] = Some(beta);
+    }
+    drop(paths_sv);
+    drop(cashflow);
+
+    // ── pass 2: apply the fitted exercise rule to independent paths
+    let partials: Vec<PathAccum> = (0..cfg.paths.div_ceil(PATH_CHUNK))
+        .into_par_iter()
+        .map(|chunk| {
+            let mut scratch = new_scratch();
+            let mut spots = vec![0.0; steps];
+            let mut aux = vec![0.0; steps];
+            let mut acc = PathAccum::default();
+            for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
+                simulate(seed_valuation, i, &mut scratch, &mut spots, &mut aux);
+                let mut value = 0.0;
+                let mut exercised = false;
+                for k in 0..steps - 1 {
+                    let pay = option.payoff.payoff(spots[k], p.strike);
+                    if pay > 0.0 {
+                        if let Some(beta) = &betas[k] {
+                            let continuation = dot(beta, &basis(spots[k] / p.s0, aux[k]));
+                            if pay > continuation {
+                                value = pay * disc.powi(k as i32 + 1);
+                                exercised = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !exercised {
+                    value =
+                        option.payoff.payoff(spots[steps - 1], p.strike) * disc.powi(steps as i32);
+                }
+                acc.push(i, value);
+            }
+            acc
+        })
+        .collect();
+    let acc = partials.into_iter().fold(PathAccum::default(), PathAccum::merge);
+    // LSMC always simulates on pseudo-random per-path streams
+    summarize(acc, cfg.paths, steps, 0.0, false)
+}
+
+/// American/Bermudan pricing by [`lsmc_two_pass`] over one-dimensional
+/// GBM / local-vol paths with the cubic spot basis ([`lsmc_basis`]).
+/// Heston takes its own instantiation ([`heston_american_npv`]): the
+/// exercise decision there depends on the variance state, so both the
+/// paths and the regression basis are two-dimensional.
 fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let cfg = option.mc_cfg();
     if option.model.is_heston() {
@@ -1637,127 +1703,27 @@ fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         1
     });
     let dt = p.t / steps as f64;
-    let allowed = exercise_mask(option, p.t, steps);
-    let disc = exp(-p.r * dt);
     let process = bs_process(option, p);
     let divs = dividends_per_step(option, p.t, steps);
-    let seed_regression = cfg.seed ^ 0xA11C_E5ED;
-    let seed_valuation = cfg.seed ^ 0xB0B5_1EED;
-
-    let simulate = |draws: &PathDraws,
-                    index: usize,
-                    bufs: &mut (Vec<f64>, Vec<f64>, Vec<f64>),
-                    path: &mut Vec<f64>| {
-        let (z, w, dw) = bufs;
-        draws.fill(index, z, w, dw);
-        path.clear();
-        let mut s = p.s0;
-        for (i, d) in dw.iter().enumerate() {
-            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
-            if let Some(divs) = &divs {
-                s = (s - divs[i]).max(1e-8);
-            }
-            path.push(s);
-        }
-    };
-
-    // ── pass 1: simulate and fit regressions backwards
-    let reg_draws = PathDraws::pseudo(seed_regression, dt);
-    let spots: Vec<Vec<f64>> = (0..cfg.paths)
-        .into_par_iter()
-        .map_init(
-            || (vec![0.0; steps], vec![0.0; steps], vec![0.0; steps]),
-            |bufs, i| {
-                let mut path = Vec::with_capacity(steps);
-                simulate(&reg_draws, i, bufs, &mut path);
-                path
-            },
-        )
-        .collect();
-
-    let mut cashflow: Vec<f64> = spots
-        .iter()
-        .map(|path| option.payoff.payoff(path[steps - 1], p.strike))
-        .collect();
-    let mut betas: Vec<Option<[f64; LSMC_BASIS]>> = vec![None; steps.saturating_sub(1)];
-    for step_idx in (0..steps - 1).rev() {
-        for cf in cashflow.iter_mut() {
-            *cf *= disc;
-        }
-        if !allowed[step_idx] {
-            // no exercise right at this date: continuation only, no
-            // regression fitted, so pass 2 cannot exercise here either
-            continue;
-        }
-        let itm: Vec<usize> = (0..spots.len())
-            .filter(|&i| option.payoff.payoff(spots[i][step_idx], p.strike) > 0.0)
-            .collect();
-        if itm.len() < LSMC_BASIS {
-            continue;
-        }
-        let rows: Vec<([f64; LSMC_BASIS], f64)> = itm
-            .iter()
-            .map(|&i| {
-                let s = spots[i][step_idx];
-                (lsmc_basis(s / p.s0), cashflow[i])
-            })
-            .collect();
-        let Some(beta) = least_squares(&rows) else {
-            continue;
-        };
-        for &i in &itm {
-            let s = spots[i][step_idx];
-            let pay = option.payoff.payoff(s, p.strike);
-            let continuation = dot(&beta, &lsmc_basis(s / p.s0));
-            if pay > continuation {
-                cashflow[i] = pay;
-            }
-        }
-        betas[step_idx] = Some(beta);
-    }
-    drop(spots);
-    drop(cashflow);
-
-    // ── pass 2: apply the fitted exercise rule to independent paths
-    let val_draws = PathDraws::pseudo(seed_valuation, dt);
-    let partials: Vec<(f64, f64)> = (0..cfg.paths.div_ceil(PATH_CHUNK))
-        .into_par_iter()
-        .map(|chunk| {
-            let mut bufs = (vec![0.0; steps], vec![0.0; steps], vec![0.0; steps]);
-            let mut path = Vec::with_capacity(steps);
-            let (mut c_sum, mut c_sum_sq) = (0.0, 0.0);
-            for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
-                simulate(&val_draws, i, &mut bufs, &mut path);
-                let mut value = 0.0;
-                let mut exercised = false;
-                for k in 0..steps - 1 {
-                    let s = path[k];
-                    let pay = option.payoff.payoff(s, p.strike);
-                    if pay > 0.0 {
-                        if let Some(beta) = &betas[k] {
-                            let continuation = dot(beta, &lsmc_basis(s / p.s0));
-                            if pay > continuation {
-                                value = pay * disc.powi(k as i32 + 1);
-                                exercised = true;
-                                break;
-                            }
-                        }
-                    }
+    lsmc_two_pass(
+        option,
+        p,
+        steps,
+        || (vec![0.0; steps], vec![0.0; steps], vec![0.0; steps]),
+        |seed, i, bufs, spots, _aux| {
+            let (z, w, dw) = bufs;
+            PathDraws::pseudo(seed, dt).fill(i, z, w, dw);
+            let mut s = p.s0;
+            for (j, d) in dw.iter().enumerate() {
+                s = process.evolve(cfg.scheme, j as f64 * dt, s, dt, *d);
+                if let Some(divs) = &divs {
+                    s = (s - divs[j]).max(1e-8);
                 }
-                if !exercised {
-                    value =
-                        option.payoff.payoff(path[steps - 1], p.strike) * disc.powi(steps as i32);
-                }
-                c_sum += value;
-                c_sum_sq += value * value;
+                spots[j] = s;
             }
-            (c_sum, c_sum_sq)
-        })
-        .collect();
-    let (sum, sum_sq) = partials
-        .into_iter()
-        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+        },
+        |x, _| lsmc_basis(x),
+    )
 }
 
 // ── American under Heston ───────────────────────────────────────────────
@@ -1772,15 +1738,14 @@ fn heston_lsmc_basis(x: f64, v: f64) -> [f64; HESTON_LSMC_BASIS] {
     [1.0, x, x * x, x * x * x, v, x * v]
 }
 
-/// Two-pass Longstaff-Schwartz under Heston dynamics, stepping the
-/// two-factor [`HestonProcess`] (Andersen QE-M under the default `Exact`
-/// scheme, full-truncation Euler otherwise) and regressing on the
-/// `(spot, variance)` state. Same structure as [`american_npv`]:
-/// regression pass on one set of antithetic pseudo-random paths,
-/// valuation pass on an independent set. QE's coarse-grid accuracy is
-/// what makes this affordable — the exercise grid (default
-/// [`LSMC_DEFAULT_STEPS`]) is all the resolution it needs, where
-/// full-truncation Euler must step at [`HESTON_MIN_STEPS`].
+/// Two-pass Longstaff-Schwartz under Heston dynamics
+/// ([`lsmc_two_pass`] over the two-factor [`HestonProcess`] — Andersen
+/// QE-M under the default `Exact` scheme, full-truncation Euler
+/// otherwise — regressing on the `(spot, variance)` state). QE's
+/// coarse-grid accuracy is what makes this affordable: the exercise
+/// grid (default [`LSMC_DEFAULT_STEPS`]) is all the resolution it
+/// needs, where full-truncation Euler must step at
+/// [`HESTON_MIN_STEPS`].
 fn heston_american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let hp = option
         .heston_params()
@@ -1801,8 +1766,6 @@ fn heston_american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     }
     .max(floor);
     let dt = p.t / steps as f64;
-    let allowed = exercise_mask(option, p.t, steps);
-    let disc = exp(-p.r * dt);
     let process = HestonProcess {
         drift_rate: p.r - p.q,
         params: hp,
@@ -1810,127 +1773,30 @@ fn heston_american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     };
     let sqrt_dt = dt.sqrt();
     let divs = dividends_per_step(option, p.t, steps);
-    let seed_regression = cfg.seed ^ 0xA11C_E5ED;
-    let seed_valuation = cfg.seed ^ 0xB0B5_1EED;
-
-    // fill one path's spot and (truncated) variance levels; antithetic
-    // pairs (2k, 2k+1) share a stream with negated draws, as everywhere
-    let simulate = |seed: u64, i: usize, z: &mut [f64], spots: &mut [f64], vars: &mut [f64]| {
-        path_normals(seed, (i / 2) as u64, z);
-        let sign = if i.is_multiple_of(2) { 1.0 } else { -1.0 };
-        let mut x = [p.s0, hp.v0];
-        let mut x_next = [0.0; 2];
-        for j in 0..steps {
-            let dw = [sign * sqrt_dt * z[2 * j], sign * sqrt_dt * z[2 * j + 1]];
-            process.evolve(j as f64 * dt, &x, dt, &dw, &mut x_next);
-            if let Some(divs) = &divs {
-                x_next[0] = (x_next[0] - divs[j]).max(1e-8);
-            }
-            x = x_next;
-            spots[j] = x[0];
-            vars[j] = x[1].max(0.0);
-        }
-    };
-
-    // ── pass 1: simulate (S, v) paths and fit regressions backwards
-    let paths_sv: Vec<(Vec<f64>, Vec<f64>)> = (0..cfg.paths)
-        .into_par_iter()
-        .map_init(
-            || vec![0.0; 2 * steps],
-            |z, i| {
-                let mut spots = vec![0.0; steps];
-                let mut vars = vec![0.0; steps];
-                simulate(seed_regression, i, z, &mut spots, &mut vars);
-                (spots, vars)
-            },
-        )
-        .collect();
-
-    let mut cashflow: Vec<f64> = paths_sv
-        .iter()
-        .map(|(spots, _)| option.payoff.payoff(spots[steps - 1], p.strike))
-        .collect();
-    let mut betas: Vec<Option<[f64; HESTON_LSMC_BASIS]>> = vec![None; steps.saturating_sub(1)];
-    for step_idx in (0..steps - 1).rev() {
-        for cf in cashflow.iter_mut() {
-            *cf *= disc;
-        }
-        if !allowed[step_idx] {
-            continue;
-        }
-        let itm: Vec<usize> = (0..paths_sv.len())
-            .filter(|&i| option.payoff.payoff(paths_sv[i].0[step_idx], p.strike) > 0.0)
-            .collect();
-        if itm.len() < HESTON_LSMC_BASIS {
-            continue;
-        }
-        let rows: Vec<([f64; HESTON_LSMC_BASIS], f64)> = itm
-            .iter()
-            .map(|&i| {
-                let (spots, vars) = &paths_sv[i];
-                (
-                    heston_lsmc_basis(spots[step_idx] / p.s0, vars[step_idx]),
-                    cashflow[i],
-                )
-            })
-            .collect();
-        let Some(beta) = least_squares(&rows) else {
-            continue;
-        };
-        for &i in &itm {
-            let (spots, vars) = &paths_sv[i];
-            let s = spots[step_idx];
-            let pay = option.payoff.payoff(s, p.strike);
-            let continuation = dot(&beta, &heston_lsmc_basis(s / p.s0, vars[step_idx]));
-            if pay > continuation {
-                cashflow[i] = pay;
-            }
-        }
-        betas[step_idx] = Some(beta);
-    }
-    drop(paths_sv);
-    drop(cashflow);
-
-    // ── pass 2: apply the fitted exercise rule to independent paths
-    let partials: Vec<(f64, f64)> = (0..cfg.paths.div_ceil(PATH_CHUNK))
-        .into_par_iter()
-        .map(|chunk| {
-            let mut z = vec![0.0; 2 * steps];
-            let mut spots = vec![0.0; steps];
-            let mut vars = vec![0.0; steps];
-            let (mut c_sum, mut c_sum_sq) = (0.0, 0.0);
-            for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
-                simulate(seed_valuation, i, &mut z, &mut spots, &mut vars);
-                let mut value = 0.0;
-                let mut exercised = false;
-                for k in 0..steps - 1 {
-                    let pay = option.payoff.payoff(spots[k], p.strike);
-                    if pay > 0.0 {
-                        if let Some(beta) = &betas[k] {
-                            let continuation =
-                                dot(beta, &heston_lsmc_basis(spots[k] / p.s0, vars[k]));
-                            if pay > continuation {
-                                value = pay * disc.powi(k as i32 + 1);
-                                exercised = true;
-                                break;
-                            }
-                        }
-                    }
+    lsmc_two_pass(
+        option,
+        p,
+        steps,
+        || vec![0.0; 2 * steps],
+        |seed, i, z: &mut Vec<f64>, spots, vars| {
+            // antithetic pairs (2k, 2k+1) share a stream with negated draws
+            path_normals(seed, (i / 2) as u64, z);
+            let sign = if i.is_multiple_of(2) { 1.0 } else { -1.0 };
+            let mut x = [p.s0, hp.v0];
+            let mut x_next = [0.0; 2];
+            for j in 0..steps {
+                let dw = [sign * sqrt_dt * z[2 * j], sign * sqrt_dt * z[2 * j + 1]];
+                process.evolve(j as f64 * dt, &x, dt, &dw, &mut x_next);
+                if let Some(divs) = &divs {
+                    x_next[0] = (x_next[0] - divs[j]).max(1e-8);
                 }
-                if !exercised {
-                    value =
-                        option.payoff.payoff(spots[steps - 1], p.strike) * disc.powi(steps as i32);
-                }
-                c_sum += value;
-                c_sum_sq += value * value;
+                x = x_next;
+                spots[j] = x[0];
+                vars[j] = x[1].max(0.0);
             }
-            (c_sum, c_sum_sq)
-        })
-        .collect();
-    let (sum, sum_sq) = partials
-        .into_iter()
-        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
-    summarize(sum, sum_sq, cfg.paths, steps, 0.0)
+        },
+        heston_lsmc_basis,
+    )
 }
 
 fn dot<const K: usize>(a: &[f64; K], b: &[f64; K]) -> f64 {

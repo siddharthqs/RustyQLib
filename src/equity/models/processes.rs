@@ -145,6 +145,10 @@ pub enum HestonScheme {
 /// variance samplers (any value in [1, 2] is valid; 1.5 is his choice).
 const QE_PSI_SWITCH: f64 = 1.5;
 
+/// Forward level below which a CEV (`beta < 1`) SABR path is treated
+/// as absorbed at zero (the process's true boundary behavior).
+const CEV_ABSORB: f64 = 1e-10;
+
 /// Which QE sampler fired, with the parameters the martingale correction
 /// needs.
 enum QeBranch {
@@ -359,14 +363,23 @@ impl StochasticProcess for SabrProcess {
     fn evolve(&self, _t: f64, x: &[f64], dt: f64, dw: &[f64], out: &mut [f64]) {
         let p = &self.params;
         let rho_perp = (1.0 - p.rho * p.rho).sqrt();
-        let (f, alpha) = (x[0].max(1e-12), x[1].max(0.0));
+        let (f, alpha) = (x[0].max(0.0), x[1].max(0.0));
         let dw_f = dw[0];
         let dw_a = p.rho * dw[0] + rho_perp * dw[1];
+        // exact driftless-GBM transition for alpha
+        out[1] = alpha * exp(-0.5 * p.nu * p.nu * dt + p.nu * dw_a);
+        // CEV forwards absorb at zero for beta < 1: a floored tiny
+        // forward would explode through alpha * f^(beta-1) (for
+        // beta = 0.5 and f = 1e-12 the frozen lognormal vol is ~1e6
+        // alpha, overflowing exp), so once the path is numerically at
+        // the origin it stays there
+        if f <= CEV_ABSORB {
+            out[0] = 0.0;
+            return;
+        }
         // lognormal vol of the forward, frozen over the step
         let sigma_f = alpha * f.powf(p.beta - 1.0);
         out[0] = f * exp(-0.5 * sigma_f * sigma_f * dt + sigma_f * dw_f);
-        // exact driftless-GBM transition for alpha
-        out[1] = alpha * exp(-0.5 * p.nu * p.nu * dt + p.nu * dw_a);
     }
 }
 

@@ -54,15 +54,8 @@ pub struct SviParams {
     pub sigma: f64,
 }
 
-/// Result of an SVI smile calibration.
-#[derive(Debug, Clone)]
-pub struct SviFit {
-    pub params: SviParams,
-    /// Root-mean-square error in implied vol.
-    pub rmse: f64,
-    pub iterations: usize,
-    pub converged: bool,
-}
+/// Result of an SVI smile calibration (`rmse` in implied vol).
+pub type SviFit = crate::equity::models::calibration::Fit<SviParams>;
 
 impl SviParams {
     /// Total variance `w(k)` at log-moneyness `k = ln(K/F)`.

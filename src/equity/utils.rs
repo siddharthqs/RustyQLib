@@ -195,6 +195,7 @@ impl FromStr for PayoffType {
             "asian" => Ok(PayoffType::Asian),
             "forward_start" | "forwardstart" => Ok(PayoffType::ForwardStart),
             "autocallable" | "autocall" => Ok(PayoffType::Autocallable),
+            "accumulator" | "decumulator" => Ok(PayoffType::Accumulator),
             "lookback" => Ok(PayoffType::Lookback),
             "chooser" => Ok(PayoffType::Chooser),
             _ => Err("Invalid payoff type".into()),

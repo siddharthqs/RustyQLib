@@ -23,7 +23,7 @@ use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
 use crate::core::linalg::{cholesky, nearest_correlation};
-use crate::core::montecarlo::{path_normals, QmcSequence};
+use crate::core::montecarlo::path_normals;
 use crate::core::results::{Greeks, PricingResult};
 use crate::core::trade::PutOrCall;
 use crate::core::traits::Instrument;
@@ -118,7 +118,7 @@ impl Instrument for RainbowOption {
         let (pv, std_err) = match self.engine {
             PricingEngine::MonteCarlo(_) => {
                 let stats = self.mc_stats_with(&self.params());
-                (stats.pv, Some(stats.std_err))
+                (stats.pv, stats.std_err)
             }
             _ => (self.try_npv()?, None),
         };
@@ -213,6 +213,21 @@ impl RainbowOption {
                         "weights must match the number of assets",
                     ));
                 }
+                if w.iter().any(|x| !x.is_finite()) {
+                    return Err(RustyQLibError::invalid_input(
+                        "weights",
+                        "weights must be finite",
+                    ));
+                }
+                // the basket moment match takes ln of the weighted
+                // forward sum; a non-positive first moment would NaN
+                // silently
+                if rainbow_type == RainbowType::Basket && w.iter().sum::<f64>() <= 0.0 {
+                    return Err(RustyQLibError::invalid_input(
+                        "weights",
+                        "basket weights must sum to a positive number",
+                    ));
+                }
                 w.clone()
             }
             None => vec![1.0 / n as f64; n],
@@ -240,6 +255,12 @@ impl RainbowOption {
             }
             Err(e) => return Err(e),
         };
+        for (i, a) in data.assets.iter().enumerate() {
+            crate::equity::conventions::check_vol_band(&format!("assets[{i}].volatility"), a.volatility)?;
+        }
+        if let Some(r) = data.risk_free_rate {
+            crate::equity::conventions::check_rate_band("risk_free_rate", r)?;
+        }
         let discount_curve = match &data.discount_curve {
             Some(input) => YieldCurve::from_input(input, valuation_date)?,
             None => YieldCurve::flat(
@@ -312,7 +333,7 @@ impl RainbowOption {
     }
 
     pub fn time_to_maturity(&self) -> f64 {
-        (self.maturity_date - self.valuation_date).num_days() as f64 / 365.0
+        crate::equity::conventions::year_fraction(self.valuation_date, self.maturity_date)
     }
 
     fn params(&self) -> Params {
@@ -542,16 +563,16 @@ impl RainbowOption {
             .collect();
         let cfg = self.mc_cfg();
         let qmc = match cfg.sampler {
-            Sampler::Sobol => Some(QmcSequence::new(n, cfg.seed)),
+            Sampler::Sobol => Some(crate::core::montecarlo::LowDiscrepancy::best(n, cfg.seed)),
             Sampler::PseudoRandom => None,
         };
         let chunks = cfg.paths.div_ceil(PATH_CHUNK);
-        let partials: Vec<(f64, f64)> = (0..chunks)
+        let partials: Vec<crate::equity::montecarlo::PathAccum> = (0..chunks)
             .into_par_iter()
             .map(|chunk| {
                 let mut eps = vec![0.0; n];
                 let mut terminal = vec![0.0; n];
-                let (mut sum, mut sum_sq) = (0.0, 0.0);
+                let mut acc = crate::equity::montecarlo::PathAccum::default();
                 for path in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
                     match &qmc {
                         Some(seq) => seq.normals(path as u64 + 1, &mut eps),
@@ -570,25 +591,15 @@ impl RainbowOption {
                         let z: f64 = (0..=i).map(|j| self.chol[i][j] * eps[j]).sum();
                         terminal[i] = p.spots[i] * exp(drifts[i] + p.vols[i] * sqrt_t * z);
                     }
-                    let v = df * self.payoff(&terminal);
-                    sum += v;
-                    sum_sq += v * v;
+                    acc.push(path, df * self.payoff(&terminal));
                 }
-                (sum, sum_sq)
+                acc
             })
             .collect();
-        let (sum, sum_sq) = partials
+        let acc = partials
             .into_iter()
-            .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
-        let nf = cfg.paths as f64;
-        let mean = sum / nf;
-        let var = (sum_sq / nf - mean * mean).max(0.0);
-        McStats {
-            pv: mean,
-            std_err: (var / nf).sqrt(),
-            paths: cfg.paths,
-            steps: 1,
-        }
+            .fold(crate::equity::montecarlo::PathAccum::default(), crate::equity::montecarlo::PathAccum::merge);
+        crate::equity::montecarlo::summarize(acc, cfg.paths, 1, 0.0, qmc.is_some())
     }
 }
 
@@ -668,7 +679,11 @@ mod tests {
 
     #[test]
     fn price_reports_theta_rho_and_mc_std_err() {
-        let option = two_asset("exchange", "C", None, 0.6);
+        let mut option = two_asset("exchange", "C", None, 0.6);
+        // pseudo sampler so a standard error is reported at all
+        if let PricingEngine::MonteCarlo(cfg) = &mut option.engine {
+            cfg.sampler = Sampler::PseudoRandom;
+        }
         let result = option.price().unwrap();
         let se = result
             .std_err
@@ -813,10 +828,16 @@ mod tests {
 
     #[test]
     fn monte_carlo_is_reproducible_and_reports_stats() {
-        let option = two_asset("worst_of", "C", Some(100.0), 0.6);
+        let mut option = two_asset("worst_of", "C", Some(100.0), 0.6);
         assert_eq!(option.npv(), option.npv());
+        // the default low-discrepancy sampler reports no standard error
+        assert_eq!(option.npv_with_stats().unwrap().std_err, None);
+        if let PricingEngine::MonteCarlo(cfg) = &mut option.engine {
+            cfg.sampler = Sampler::PseudoRandom;
+        }
         let stats = option.npv_with_stats().unwrap();
-        assert!(stats.std_err > 0.0 && stats.std_err < 0.5);
+        let se = stats.std_err.expect("pseudo sampler reports a standard error");
+        assert!(se > 0.0 && se < 0.5);
     }
 
     #[test]

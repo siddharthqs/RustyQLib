@@ -93,8 +93,8 @@ fn print_rainbow(label: &str, option: &RainbowOption) {
     let stats = option.npv_with_stats();
     let deltas: Vec<String> = option.deltas().iter().map(|d| format!("{d:.4}")).collect();
     let vegas: Vec<String> = option.vegas().iter().map(|v| format!("{v:.2}")).collect();
-    let se = match stats {
-        Some(s) => format!("{:.5}", s.std_err),
+    let se = match stats.and_then(|s| s.std_err) {
+        Some(se) => format!("{se:.5}"),
         None => "-".to_string(),
     };
     println!(

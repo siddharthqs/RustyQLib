@@ -391,6 +391,24 @@ impl Market {
                         ));
                     }
                     bumped.valuation_date += chrono::Duration::days(shock.size.round() as i64);
+                    // roll every curve and surface onto the new anchor:
+                    // the market is unchanged in date space (discount
+                    // factors become forwards, smiles keep their expiry
+                    // dates), so year fractions measured from the new
+                    // valuation date read the right values — without
+                    // this, a 7-day theta scenario would discount off a
+                    // grid anchored 7 days in the past
+                    let new_ref = bumped.valuation_date;
+                    let curve_keys: Vec<Discount> = bumped.keys::<Discount>().cloned().collect();
+                    for key in curve_keys {
+                        let rolled = bumped.get(&key)?.rolled(new_ref)?;
+                        bumped.insert(key, Arc::new(rolled));
+                    }
+                    let vol_keys: Vec<Vol> = bumped.keys::<Vol>().cloned().collect();
+                    for key in vol_keys {
+                        let rolled = bumped.get(&key)?.rolled(new_ref)?;
+                        bumped.insert(key, Arc::new(rolled));
+                    }
                 }
             }
         }
@@ -619,6 +637,28 @@ mod tests {
         );
         let bad = [shock(RiskFactor::Time, BumpMode::Relative, 0.1)];
         assert!(market.bumped(&bad).is_err());
+    }
+
+    #[test]
+    fn time_shocks_roll_curves_and_surfaces_onto_the_new_anchor() {
+        let market = sample_market();
+        let week = [shock(RiskFactor::Time, BumpMode::Absolute, 7.0)];
+        let later = market.bumped(&week).unwrap();
+        // the discount factor to a fixed calendar date is invariant up
+        // to the forward re-anchoring: df_new(D) = df_old(D) / df_old(7d)
+        let key = Discount("USD".into());
+        let (old_curve, new_curve) = (market.get(&key).unwrap(), later.get(&key).unwrap());
+        let target = NaiveDate::from_ymd_opt(2026, 7, 6).unwrap();
+        let tau = 7.0 / 365.0;
+        assert!(
+            (new_curve.df_date(target) - old_curve.df_date(target) / old_curve.df(tau)).abs()
+                < 1e-12,
+            "rolled curve must discount to fixed dates via the forward"
+        );
+        // year fractions measured from the *new* valuation date now read
+        // consistent values (the pre-fix behavior measured them on the
+        // old anchor, off by the shock horizon)
+        assert_eq!(new_curve.df(0.0), 1.0);
     }
 
     #[test]

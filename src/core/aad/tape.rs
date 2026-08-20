@@ -110,11 +110,20 @@ impl Tape {
 #[derive(Debug, Clone)]
 pub struct Gradients {
     pub(crate) adjoints: Vec<f64>,
+    /// Address of the tape these adjoints were swept on, so a `Var`
+    /// from a different tape cannot silently read a wrong slot.
+    pub(crate) tape_id: usize,
 }
 
 impl Gradients {
-    /// `d output / d v`.
+    /// `d output / d v`. Panics if `v` was recorded on a different
+    /// tape than the one this sweep ran on — the indices would line up
+    /// with unrelated nodes and return a silently wrong number.
     pub fn wrt(&self, v: super::var::Var<'_>) -> f64 {
+        assert!(
+            std::ptr::eq(v.tape as *const Tape as *const (), self.tape_id as *const ()),
+            "Gradients::wrt called with a Var from a different tape"
+        );
         self.adjoints[v.idx]
     }
 }

@@ -24,6 +24,7 @@ use super::brownian_bridge::BrownianBridge;
 use super::halton::QmcSequence;
 use super::process::{DiscretizationScheme, StochasticProcess, StochasticProcess1D};
 use super::rng::path_normals;
+use super::sobol::SobolSequence;
 
 /// Draw sampler. `Sobol` selects the low-discrepancy family: true Sobol
 /// (van der Corput) in one dimension, a scrambled multi-dimensional
@@ -47,6 +48,35 @@ impl FromStr for Sampler {
     }
 }
 
+/// The low-discrepancy generator behind `Sampler::Sobol`: the genuine
+/// Joe-Kuo Sobol sequence up to its tabulated dimension count, Halton
+/// (with Cranley-Patterson rotation) beyond it. Halton's unrotated
+/// high-dimensional projections are notoriously correlated, so Sobol is
+/// strictly preferred whenever the step count fits its direction table.
+pub enum LowDiscrepancy {
+    Sobol(SobolSequence),
+    Halton(QmcSequence),
+}
+
+impl LowDiscrepancy {
+    /// Pick the best available sequence for `dims` dimensions.
+    pub fn best(dims: usize, seed: u64) -> Self {
+        if dims <= SobolSequence::MAX_DIMS {
+            LowDiscrepancy::Sobol(SobolSequence::scrambled(dims, seed))
+        } else {
+            LowDiscrepancy::Halton(QmcSequence::new(dims, seed))
+        }
+    }
+
+    /// Standard normals of point `index` (1-based; 0 is the origin).
+    pub fn normals(&self, index: u64, out: &mut [f64]) {
+        match self {
+            LowDiscrepancy::Sobol(seq) => seq.normals(index, out),
+            LowDiscrepancy::Halton(seq) => seq.normals(index, out),
+        }
+    }
+}
+
 /// Deterministic per-path Brownian increment source. Pseudo-random paths
 /// come in antithetic pairs (2k, 2k+1) from independent per-pair streams;
 /// low-discrepancy paths are sequence points routed through the Brownian
@@ -57,7 +87,7 @@ pub enum PathDraws {
         sqrt_dt: f64,
     },
     Qmc {
-        seq: QmcSequence,
+        seq: LowDiscrepancy,
         bridge: BrownianBridge,
     },
 }
@@ -66,7 +96,7 @@ impl PathDraws {
     pub fn new(sampler: Sampler, seed: u64, steps: usize, dt: f64) -> Self {
         match sampler {
             Sampler::Sobol => PathDraws::Qmc {
-                seq: QmcSequence::new(steps, seed),
+                seq: LowDiscrepancy::best(steps, seed),
                 bridge: BrownianBridge::new(steps, dt),
             },
             Sampler::PseudoRandom => PathDraws::Pseudo {
@@ -214,7 +244,7 @@ pub enum MultiDraws {
     /// coordinates; each factor's block runs through its own pass of the
     /// Brownian bridge.
     Qmc {
-        seq: QmcSequence,
+        seq: LowDiscrepancy,
         bridge: BrownianBridge,
     },
 }
@@ -223,7 +253,7 @@ impl MultiDraws {
     pub fn new(sampler: Sampler, seed: u64, factors: usize, steps: usize, dt: f64) -> Self {
         match sampler {
             Sampler::Sobol => MultiDraws::Qmc {
-                seq: QmcSequence::new(factors * steps, seed),
+                seq: LowDiscrepancy::best(factors * steps, seed),
                 bridge: BrownianBridge::new(steps, dt),
             },
             Sampler::PseudoRandom => MultiDraws::Pseudo {

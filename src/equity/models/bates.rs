@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::errors::RustyQLibError;
 use crate::core::trade::PutOrCall;
 use crate::equity::heston::{characteristic_fn, probabilities_with_cf, Cpx, HestonParams, I};
+use crate::equity::models::calibration::TransformSpace;
 
 // ── Jump specifications ─────────────────────────────────────────────────
 
@@ -300,29 +301,18 @@ pub fn bates_double_exp_price(
 
 pub use crate::equity::heston::HestonQuote;
 
-/// Calibration outcome for the lognormal-jump Bates model.
-#[derive(Debug, Clone)]
-pub struct BatesFit {
-    pub params: BatesParams,
-    /// Root-mean-square price error over the quotes.
-    pub rmse: f64,
-    pub iterations: usize,
-    pub converged: bool,
-}
+/// Calibration outcome for the lognormal-jump Bates model
+/// (`rmse` in price units).
+pub type BatesFit = crate::equity::models::calibration::Fit<BatesParams>;
 
-/// Calibration outcome for the double-exponential-jump Bates model.
-#[derive(Debug, Clone)]
-pub struct BatesDoubleExpFit {
-    pub params: BatesDoubleExpParams,
-    pub rmse: f64,
-    pub iterations: usize,
-    pub converged: bool,
-}
+/// Calibration outcome for the double-exponential-jump Bates model
+/// (`rmse` in price units).
+pub type BatesDoubleExpFit = crate::equity::models::calibration::Fit<BatesDoubleExpParams>;
 
-impl BatesParams {
-    /// Unconstrained space: Heston's five transforms plus
-    /// `[ln lambda, ln(1 + mean_jump), ln jump_vol]`.
-    fn to_unconstrained(self) -> Vec<f64> {
+/// Unconstrained space: Heston's five transforms plus
+/// `[ln lambda, ln(1 + mean_jump), ln jump_vol]`.
+impl TransformSpace for BatesParams {
+    fn to_unconstrained(&self) -> Vec<f64> {
         let mut u = self.heston.to_unconstrained();
         u.push(self.jumps.intensity.max(1e-8).ln());
         u.push((1.0 + self.jumps.mean_jump).ln());
@@ -342,10 +332,10 @@ impl BatesParams {
     }
 }
 
-impl BatesDoubleExpParams {
-    /// Unconstrained space: Heston's five transforms plus
-    /// `[ln lambda, logit p_up, ln(eta_up - 1), ln eta_down]`.
-    fn to_unconstrained(self) -> Vec<f64> {
+/// Unconstrained space: Heston's five transforms plus
+/// `[ln lambda, logit p_up, ln(eta_up - 1), ln eta_down]`.
+impl TransformSpace for BatesDoubleExpParams {
+    fn to_unconstrained(&self) -> Vec<f64> {
         let p = self.jumps.p_up.clamp(1e-6, 1.0 - 1e-6);
         let mut u = self.heston.to_unconstrained();
         u.push(self.jumps.intensity.max(1e-8).ln());
@@ -368,55 +358,15 @@ impl BatesDoubleExpParams {
     }
 }
 
-fn calibrate_generic<P>(
-    quotes: &[HestonQuote],
-    x0: Vec<f64>,
-    r: f64,
-    unpack: impl Fn(&[f64]) -> P,
-    cf: impl Fn(&P, Cpx, f64) -> Cpx,
-) -> (P, f64, usize, bool) {
-    use crate::core::optimization::{levenberg_marquardt, OptimConfig};
-    use crate::equity::cos::{group_by_maturity, CosPricer, CALIBRATION_TERMS};
-    assert!(!quotes.is_empty(), "calibration needs at least one quote");
-    // one COS pricer (one CF sweep) per expiry per residual evaluation:
-    // the whole smile prices for the cost of one option
-    let groups = group_by_maturity(quotes.iter().map(|q| q.maturity));
-    let residuals = |u: &[f64]| -> Vec<f64> {
-        let p = unpack(u);
-        let mut out = vec![0.0; quotes.len()];
-        for (t, idxs) in &groups {
-            let pricer = CosPricer::new(&|uu| cf(&p, uu, *t), r, *t, CALIBRATION_TERMS);
-            for &i in idxs {
-                out[i] = pricer.price(quotes[i].strike, quotes[i].put_or_call) - quotes[i].price;
-            }
-        }
-        out
-    };
-    let fit = levenberg_marquardt(&OptimConfig::new(1e-10, 100), &residuals, None, &x0);
-    let params = unpack(&fit.x);
-    let rmse = (fit.value / quotes.len() as f64).sqrt();
-    (params, rmse, fit.iterations, fit.converged)
-}
-
 /// Calibrate all eight Bates parameters to European vanilla quotes —
 /// the same Levenberg-Marquardt-in-transform-space pattern as
 /// [`heston::calibrate`](crate::equity::heston::calibrate). Short-dated
 /// quotes are what identify the jump parameters against the diffusion.
 pub fn calibrate(s: f64, r: f64, q: f64, quotes: &[HestonQuote], start: &BatesParams) -> BatesFit {
     start.validate().expect("invalid starting parameters");
-    let (params, rmse, iterations, converged) = calibrate_generic(
-        quotes,
-        start.to_unconstrained(),
-        r,
-        BatesParams::from_unconstrained,
-        |p, u, t| ln_price_cf(u, s, r, q, t, p),
-    );
-    BatesFit {
-        params,
-        rmse,
-        iterations,
-        converged,
-    }
+    crate::equity::models::calibration::calibrate_generic(quotes, start, r, 1e-10, |p, u, t| {
+        ln_price_cf(u, s, r, q, t, p)
+    })
 }
 
 /// Calibrate all nine double-exponential Bates parameters to European
@@ -429,19 +379,9 @@ pub fn calibrate_double_exp(
     start: &BatesDoubleExpParams,
 ) -> BatesDoubleExpFit {
     start.validate().expect("invalid starting parameters");
-    let (params, rmse, iterations, converged) = calibrate_generic(
-        quotes,
-        start.to_unconstrained(),
-        r,
-        BatesDoubleExpParams::from_unconstrained,
-        |p, u, t| ln_price_cf_double_exp(u, s, r, q, t, p),
-    );
-    BatesDoubleExpFit {
-        params,
-        rmse,
-        iterations,
-        converged,
-    }
+    crate::equity::models::calibration::calibrate_generic(quotes, start, r, 1e-10, |p, u, t| {
+        ln_price_cf_double_exp(u, s, r, q, t, p)
+    })
 }
 
 #[cfg(test)]

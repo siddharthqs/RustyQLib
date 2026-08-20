@@ -247,7 +247,7 @@ impl SpotKernel {
         let k = option.base.strike_price;
         let r = option.risk_free_rate() + d_rate;
         let q = option.carry_yield();
-        let sigma = option.volatility() + d_vol;
+        let sigma = (option.volatility() + d_vol).max(crate::equity::conventions::MIN_BUMPED_VOL);
         let t = (option.time_to_maturity() + d_maturity).max(1e-8);
         let pc = *option.payoff.put_or_call();
         let american = matches!(option.payoff.exercise_style(), ContractStyle::American);

@@ -157,7 +157,8 @@ pub fn zomma(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSett
     df * norm_pdf(d) * (d * d - 1.0) / (sigma * sigma * t.sqrt())
 }
 
-/// Delta elasticity, `F * gamma / delta`, `NaN` when delta is zero.
+/// Percentage gamma (Haug's GammaP), `F * gamma / 100`: the change in
+/// delta per 1% move in the futures price.
 pub fn gamma_p(
     f: f64,
     k: f64,
@@ -167,12 +168,9 @@ pub fn gamma_p(
     put_or_call: PutOrCall,
     settlement: FuturesSettlement,
 ) -> f64 {
-    let del = delta(f, k, r, sigma, t, put_or_call, settlement);
-    if del == 0.0 {
-        f64::NAN
-    } else {
-        f * gamma(f, k, r, sigma, t, settlement) / del
-    }
+    // side kept for signature stability; GammaP is side-free
+    let _ = put_or_call;
+    f * gamma(f, k, r, sigma, t, settlement) / 100.0
 }
 
 #[cfg(test)]
