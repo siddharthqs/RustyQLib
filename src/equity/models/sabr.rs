@@ -54,6 +54,9 @@ use crate::core::optimization::{levenberg_marquardt, OptimConfig};
 use crate::core::trade::PutOrCall;
 use crate::core::utils::{norm_cdf, norm_pdf};
 use crate::core::vols::{VolError, VolSurface};
+use crate::equity::smoothed_surface::{
+    interpolate_slices, numeric_k_derivatives, SmoothedSurface, VarianceDerivatives, MIN_TIME,
+};
 
 // ── Model parameters ────────────────────────────────────────────────────
 
@@ -620,8 +623,48 @@ impl SabrSurfaceFit {
 
     /// Implied vol for an absolute `strike` at `t`.
     pub fn vol(&self, strike: f64, t: f64) -> f64 {
-        let k = (strike / self.forward(t)).ln();
-        (self.total_variance(k, t).max(1e-12) / t.max(1e-8)).sqrt()
+        <Self as SmoothedSurface>::vol(self, strike, t)
+    }
+
+    /// Dupire local vol at underlying `level` and time `t`, from the
+    /// bracketing SABR slices. Clamped to the same `[1%, 300%]` band as
+    /// every other local-vol source in the library.
+    ///
+    /// Unlike SVI, the strike derivatives here are **numerical**: Hagan's
+    /// expansion has no usable closed-form second derivative in strike.
+    /// That is a property of SABR as a smoother rather than a shortcut,
+    /// and the stencil is the shared one
+    /// ([`K_DIFF_STEP`](crate::equity::smoothed_surface::K_DIFF_STEP)), so
+    /// a roughness comparison against SVI or SSVI measures the models and
+    /// not two differently-tuned difference schemes.
+    pub fn local_vol(&self, level: f64, t: f64) -> f64 {
+        <Self as SmoothedSurface>::local_vol(self, level, t)
+    }
+
+    /// [`local_vol`](Self::local_vol) plus whether a guard fired
+    /// (`true` = implied vol was returned instead of the Dupire value:
+    /// vanishing variance or a non-positive density denominator).
+    pub fn local_vol_checked(&self, level: f64, t: f64) -> (f64, bool) {
+        <Self as SmoothedSurface>::local_vol_checked(self, level, t)
+    }
+
+    /// Sample [`Self::local_vol`] on a `levels` x `times` grid
+    /// (`grid[i][j]` = level i, time j — the plotting layout).
+    pub fn local_vol_grid(&self, levels: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
+        <Self as SmoothedSurface>::local_vol_grid(self, levels, times)
+    }
+
+    /// Forward variance of the last inter-slice segment at `k`, used to
+    /// extrapolate beyond the final pillar (a single-slice fit accrues
+    /// its variance from zero instead).
+    fn last_segment_dwdt(&self, k: f64) -> f64 {
+        let n = self.slices.len();
+        if n == 1 {
+            let s = &self.slices[0];
+            return slice_variance(s, k) / s.t;
+        }
+        let (prev, last) = (&self.slices[n - 2], &self.slices[n - 1]);
+        (slice_variance(last, k) - slice_variance(prev, k)) / (last.t - prev.t)
     }
 
     /// Sample the fit into the canonical pricing [`VolSurface`]: per
@@ -681,6 +724,33 @@ impl SabrSurfaceFit {
             "slices": slices,
             "skipped_slices": self.skipped_slices,
             "max_calendar_crossing": self.max_calendar_crossing,
+        })
+    }
+}
+
+/// SABR reaches local volatility with **numerical** strike derivatives
+/// (Hagan's expansion has no usable closed form for `w_kk`) and the same
+/// **per-expiry** time structure as SVI: independent slices interpolated
+/// linearly in total variance, so `dw/dt` is piecewise constant and the
+/// local volatility steps in time at each pillar. Everything downstream —
+/// Dupire, the guards, the clamps, the differentiation stencil — is
+/// shared with the other parameterizations.
+impl SmoothedSurface for SabrSurfaceFit {
+    fn forward(&self, t: f64) -> f64 {
+        SabrSurfaceFit::forward(self, t)
+    }
+
+    fn total_variance(&self, k: f64, t: f64) -> f64 {
+        SabrSurfaceFit::total_variance(self, k, t)
+    }
+
+    fn variance_derivatives(&self, k: f64, t: f64) -> VarianceDerivatives {
+        let t = t.max(MIN_TIME);
+        let (a, b, weight) = self.bracket(t);
+        let da = numeric_k_derivatives(|k| slice_variance(a, k), k);
+        let db = numeric_k_derivatives(|k| slice_variance(b, k), k);
+        interpolate_slices((a.t, da), (b.t, db), t, weight, || {
+            self.last_segment_dwdt(k)
         })
     }
 }
@@ -1066,6 +1136,101 @@ mod tests {
         }
         // and the fit RMSE is on the order of the injected noise
         assert!(slice.rmse < 4e-3, "rmse {}", slice.rmse);
+    }
+
+    // ── Local volatility ────────────────────────────────────────────────
+
+    #[test]
+    fn flat_sabr_term_structure_gives_flat_local_vol() {
+        // nu -> 0 at beta = 1 collapses SABR to a constant vol, so the
+        // Dupire local vol must equal it everywhere: interior, between
+        // slices, below the first pillar and beyond the last
+        let vol = 0.3_f64;
+        let flat = SabrParams {
+            alpha: vol,
+            beta: 1.0,
+            rho: 0.0,
+            nu: 1e-8,
+        };
+        let surface = surface_from(&[(0.5, flat, 100.0), (1.0, flat, 100.0)]);
+        let fit = SabrSurfaceFit::fit(&surface, |_| 100.0, 1.0).unwrap();
+        for level in [80.0, 100.0, 120.0] {
+            for t in [0.1, 0.5, 0.75, 1.0, 1.4] {
+                let (lv, guarded) = fit.local_vol_checked(level, t);
+                assert!(!guarded, "level {level} t {t} should not need a guard");
+                assert!((lv - vol).abs() < 5e-3, "level {level} t {t}: {lv}");
+            }
+        }
+    }
+
+    #[test]
+    fn local_vol_reprices_a_skewed_surface_in_the_trusted_region() {
+        // a genuinely skewed fit: local vol must stay finite, positive,
+        // inside the clamp band and free of guard fallbacks across the
+        // quoted region
+        let front = SabrParams {
+            alpha: 0.24,
+            beta: 1.0,
+            rho: -0.5,
+            nu: 0.8,
+        };
+        let back = SabrParams {
+            alpha: 0.26,
+            beta: 1.0,
+            rho: -0.45,
+            nu: 0.6,
+        };
+        let surface = surface_from(&[(0.5, front, 100.0), (1.0, back, 100.0)]);
+        let fit = SabrSurfaceFit::fit(&surface, |_| 100.0, 1.0).unwrap();
+        let mut guarded_count = 0;
+        for i in 0..=10 {
+            let k = -0.25 + i as f64 * 0.05;
+            for t in [0.3, 0.5, 0.75, 1.0] {
+                let (lv, guarded) = fit.local_vol_checked(100.0 * k.exp(), t);
+                assert!(lv.is_finite() && lv > 0.0, "k={k} t={t}: {lv}");
+                assert!((0.05..1.5).contains(&lv), "k={k} t={t}: {lv} off scale");
+                guarded_count += guarded as usize;
+            }
+        }
+        assert_eq!(guarded_count, 0, "a clean SABR fit should need no guards");
+    }
+
+    #[test]
+    fn guard_flag_agrees_with_the_butterfly_diagnostic() {
+        // the invariant that makes "this smile carries butterfly
+        // arbitrage here" and "the local-vol guard fired there" the same
+        // statement: wherever g(k) is non-positive, the Dupire quotient
+        // must fall back *and say so*
+        use crate::equity::smoothed_surface::{SmoothedSurface, MIN_DENOMINATOR};
+        let wild = SabrParams {
+            alpha: 0.35,
+            beta: 1.0,
+            rho: -0.85,
+            nu: 1.6,
+        };
+        let surface = surface_from(&[(1.0, wild, 100.0), (2.0, wild, 100.0)]);
+        let fit = SabrSurfaceFit::fit(&surface, |_| 100.0, 1.0).unwrap();
+        let mut probed = 0;
+        // the violating region is deep in the left wing (k around -3, i.e.
+        // strikes near 5% of forward) and at long tenors, so the scan has
+        // to reach far outside any quoted range to find it
+        for i in 0..=60 {
+            let k = -3.0 + i as f64 * 0.05;
+            for t in [0.5, 1.0, 2.0, 3.0] {
+                let (lv, guarded) = fit.local_vol_checked(100.0 * k.exp(), t);
+                if fit.butterfly_g_at(k, t) <= MIN_DENOMINATOR {
+                    assert!(guarded, "g <= 0 at k={k} t={t} must flag the guard");
+                    probed += 1;
+                }
+                assert!(lv.is_finite() && lv > 0.0);
+            }
+        }
+        // the invariant is only tested if the scan actually reached the
+        // negative-density region, so failing to find it is a test bug
+        assert!(
+            probed > 0,
+            "scan found no g <= 0 point: the invariant went untested"
+        );
     }
 
     #[test]

@@ -19,6 +19,14 @@
 //!    quotes — the intersection of the per-expiry quoted strike ranges,
 //!    from the first to the last pillar. Outside it, wings and
 //!    extrapolation own the numbers.
+//! 4. **Forward recovery** (optional, off by default because it costs a
+//!    simulation): the martingale check of
+//!    [`validation::martingale`](crate::validation::martingale) —
+//!    simulate the local-vol dynamics and compare the mean underlying at
+//!    each expiry against the chain's parity forwards, in z-scores.
+//!    Round-trip repricing (1) grades the *strike* dimension; forward
+//!    recovery grades the *drift and the wings*, where clamped or badly
+//!    extrapolated local vol leaks probability mass.
 
 use chrono::Days;
 use serde::Serialize;
@@ -30,6 +38,7 @@ use crate::core::vols::{SmileCoordinate, VolInput, VolSurface};
 use crate::equity::builder::EquityOptionBuilder;
 use crate::equity::engines::blackscholes::implied_vol_from_price;
 use crate::equity::utils::{Engine, Model};
+use crate::validation::martingale::{martingale_report, MartingaleConfig, MartingaleReport};
 
 /// Sampling choices for [`usability_report`].
 #[derive(Debug, Clone)]
@@ -43,6 +52,27 @@ pub struct UsabilityConfig {
     pub max_expiries: usize,
     /// Strikes per repriced expiry, spread over the moneyness band.
     pub strikes_per_expiry: usize,
+    /// Forward-recovery check, or `None` to skip it. Off by default: it
+    /// runs a Monte Carlo simulation, which is orders of magnitude more
+    /// expensive than the rest of the report.
+    pub martingale: Option<MartingaleSpec>,
+}
+
+/// What the optional forward-recovery check needs: the target forwards
+/// to hit, and how hard to simulate.
+///
+/// The targets are supplied rather than derived, and that is the whole
+/// point — see
+/// [`martingale_report`](crate::validation::martingale::martingale_report).
+/// Fed the chain's **parity forwards**, the check measures the local-vol
+/// dynamics against where the market actually puts the forward, so it
+/// also prices in the pipeline's zero-dividend assumption; fed
+/// curve-grown forwards, it validates the scheme alone.
+#[derive(Debug, Clone)]
+pub struct MartingaleSpec {
+    /// `(expiry time, target forward)` pairs.
+    pub targets: Vec<(f64, f64)>,
+    pub config: MartingaleConfig,
 }
 
 impl Default for UsabilityConfig {
@@ -51,6 +81,7 @@ impl Default for UsabilityConfig {
             moneyness: (0.85, 1.15),
             max_expiries: 8,
             strikes_per_expiry: 3,
+            martingale: None,
         }
     }
 }
@@ -86,14 +117,29 @@ pub struct UsabilityReport {
     pub trusted_region: TrustedRegion,
     /// The desk rule of thumb applied: mean round-trip error <= 20 vol
     /// bps, max <= 50, and under 1% of the grid clamped or guarded.
+    ///
+    /// Deliberately **not** a function of [`Self::martingale`]. The two
+    /// answer different questions, and against parity forwards the
+    /// martingale check also carries the pipeline's zero-dividend
+    /// assumption: a dividend-paying name can miss its forwards by many
+    /// standard errors while its local vol reprices vanillas perfectly.
+    /// Folding that into one verdict would blame the calibration for a
+    /// modelling choice.
     pub within_desk_tolerance: bool,
+    /// Forward recovery, when
+    /// [`UsabilityConfig::martingale`] asked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub martingale: Option<MartingaleReport>,
 }
 
 /// Measure a local vol function against the implied `surface` it was
 /// calibrated from. `local_vol_checked` is the instrumented sampler
 /// (`(vol, guard_fired)`); `levels`/`times` are the published grid the
 /// clamp/fallback fractions describe; `curve` supplies the rate for the
-/// round-trip vanillas (zero dividends, matching the build pipeline).
+/// round-trip vanillas and, when
+/// [`UsabilityConfig::martingale`] is set, the drift for the
+/// forward-recovery simulation (zero dividends throughout, matching the
+/// build pipeline).
 pub fn usability_report(
     surface: &VolSurface,
     local_vol_checked: &dyn Fn(f64, f64) -> (f64, bool),
@@ -198,6 +244,18 @@ pub fn usability_report(
         && report.roundtrip.mean_vol_bps <= 20.0
         && report.roundtrip.max_vol_bps <= 50.0
         && report.clamped_fraction + report.fallback_fraction < 0.01;
+
+    // the expensive one, last and only on request: simulate the dynamics
+    // this local vol defines and see whether they land on the forwards
+    if let Some(spec) = &config.martingale {
+        report.martingale = Some(martingale_report(
+            &|level, t| local_vol_checked(level, t).0,
+            curve,
+            spot,
+            &spec.targets,
+            &spec.config,
+        ));
+    }
     report
 }
 
@@ -264,6 +322,7 @@ fn trusted_region(surface: &VolSurface, spot: f64) -> TrustedRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::martingale::MartingaleConfig;
     use crate::core::daycount::DayCountConvention;
     use crate::equity::local_vol::LocalVol;
     use chrono::NaiveDate;
@@ -280,6 +339,74 @@ mod tests {
             Compounding::Continuous,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn martingale_leg_is_opt_in_and_recovers_curve_forwards() {
+        // a flat surface under a flat curve: the local vol is constant,
+        // so the simulated underlying must land on the curve-grown
+        // forwards. Fed those as targets the check isolates the scheme
+        // (no modelling gap to measure), which is exactly the case where
+        // it should pass.
+        let surface = VolSurface::flat(0.25, asof(), DayCountConvention::Act365).unwrap();
+        let curve = flat_curve(0.03);
+        let spot = 100.0;
+        let local_vol = LocalVol::new(&surface, &curve, spot, 0.0, 0.0);
+        let levels: Vec<f64> = (0..15).map(|i| 80.0 + 3.0 * i as f64).collect();
+        let times: Vec<f64> = (0..8).map(|i| 0.15 + 0.1 * i as f64).collect();
+        let sampler = |level: f64, t: f64| local_vol.vol_checked(level, t);
+
+        // off by default: the simulation is expensive, so it must be asked for
+        let plain = usability_report(
+            &surface,
+            &sampler,
+            &levels,
+            &times,
+            &curve,
+            spot,
+            &UsabilityConfig::default(),
+        );
+        assert!(plain.martingale.is_none(), "must be opt-in");
+
+        // curve-grown targets under zero dividends
+        let targets: Vec<(f64, f64)> = [0.25, 0.5, 1.0]
+            .iter()
+            .map(|&t| (t, spot * (0.03_f64 * t).exp()))
+            .collect();
+        let checked = usability_report(
+            &surface,
+            &sampler,
+            &levels,
+            &times,
+            &curve,
+            spot,
+            &UsabilityConfig {
+                martingale: Some(MartingaleSpec {
+                    targets: targets.clone(),
+                    config: MartingaleConfig {
+                        paths: 4096,
+                        ..Default::default()
+                    },
+                }),
+                ..UsabilityConfig::default()
+            },
+        );
+        let m = checked.martingale.expect("requested, so present");
+        assert_eq!(m.checks.len(), targets.len());
+        // the z-score is the assertion, not a hand-picked bp tolerance:
+        // the recovery error is a Monte Carlo estimate, so any absolute
+        // bound is either vacuous or flaky as the path count changes
+        assert!(
+            m.within_threshold,
+            "max |z| = {:.1} (worst error {:.1} bp)",
+            m.max_abs_z,
+            m.worst_relative_error * 1e4
+        );
+        for c in &m.checks {
+            assert!(c.standard_error > 0.0, "t={} has no dispersion", c.t);
+        }
+        // the round-trip verdict is deliberately independent of it
+        assert_eq!(plain.within_desk_tolerance, checked.within_desk_tolerance);
     }
 
     #[test]

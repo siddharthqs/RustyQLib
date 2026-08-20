@@ -12,8 +12,8 @@ use crate::equity::local_vol::{LocalVol, LocalVolGrid};
 use crate::equity::option_chain::{implied_vol_surface_from_chain, FilterConfig, OptionChain};
 use crate::equity::portfolio::EquityPortfolio;
 use crate::equity::sabr::SabrSurfaceFit;
-use crate::equity::svi::SviSurfaceFit;
-use crate::equity::usability::{usability_report, UsabilityConfig};
+use crate::equity::svi::{SsviSurfaceFit, SviSurfaceFit};
+use crate::equity::usability::{usability_report, MartingaleSpec, UsabilityConfig};
 use crate::equity::vanilla_option::EquityOption;
 use crate::utils::plot3d::{self, linspace, GreekSurface, Labels};
 use anyhow::{bail, Context, Result};
@@ -238,6 +238,15 @@ fn build_chain_surface(
     };
     let numeric_note = "clamped to [1%, 300%]; wings and short times lean on numerical \
                         derivatives of the interpolated implied surface — trust the interior";
+    // parity forwards as year fractions: the arbitrage repair and the
+    // fits measure log-moneyness against them, and the martingale check
+    // uses them as its recovery targets
+    let day_count = DayCountConvention::Act365;
+    let forward_points: Vec<(f64, f64)> = report
+        .forwards
+        .iter()
+        .map(|(expiry, forward)| (day_count.year_fraction(chain.as_of, *expiry), *forward))
+        .collect();
     let raw_local_vol = LocalVol::new(&surface, &curve, spot, 0.0, 0.0);
     write_local_vol_artifacts(
         &surface,
@@ -246,6 +255,7 @@ fn build_chain_surface(
         &curve,
         &discount_meta,
         chain,
+        &forward_points,
         output_folder,
         &LocalVolSpec {
             stem: "local_vol",
@@ -273,6 +283,7 @@ fn build_chain_surface(
         &curve,
         &discount_meta,
         chain,
+        &forward_points,
         output_folder,
         &LocalVolSpec {
             stem: "local_vol_grid",
@@ -289,12 +300,6 @@ fn build_chain_surface(
     // cleaned versions: minimal-change static-arbitrage repair (convex
     // hull of call prices per expiry + forward total-variance sweep),
     // then the same artifacts again from the repaired surface
-    let day_count = DayCountConvention::Act365;
-    let forward_points: Vec<(f64, f64)> = report
-        .forwards
-        .iter()
-        .map(|(expiry, forward)| (day_count.year_fraction(chain.as_of, *expiry), *forward))
-        .collect();
     let forward_of = |t: f64| match forward_points.len() {
         1 => forward_points[0].1,
         _ => crate::core::interpolation::interp_pairs(&forward_points, t),
@@ -344,6 +349,7 @@ fn build_chain_surface(
         &curve,
         &discount_meta,
         chain,
+        &forward_points,
         output_folder,
         &LocalVolSpec {
             stem: "local_vol_cleaned",
@@ -371,6 +377,7 @@ fn build_chain_surface(
         &curve,
         &discount_meta,
         chain,
+        &forward_points,
         output_folder,
         &LocalVolSpec {
             stem: "local_vol_grid_cleaned",
@@ -420,6 +427,7 @@ fn build_chain_surface(
                 &curve,
                 &discount_meta,
                 chain,
+                &forward_points,
                 output_folder,
                 &LocalVolSpec {
                     stem: "local_vol_svi",
@@ -468,8 +476,86 @@ fn build_chain_surface(
                 ),
                 "SABR volatility surface",
             )?;
+            write_local_vol_artifacts(
+                &sampled,
+                &|level, t| fit.local_vol_checked(level, t),
+                spot,
+                &curve,
+                &discount_meta,
+                chain,
+                &forward_points,
+                output_folder,
+                &LocalVolSpec {
+                    stem: "local_vol_sabr",
+                    title: &format!(
+                        "{} Dupire local vol (SABR fit) \u{2014} {}",
+                        chain.symbol, chain.as_of
+                    ),
+                    model: "Dupire local volatility (per-expiry SABR fit, beta = 1)",
+                    derived_from: "the SABR fit of the arbitrage-repaired surface",
+                    note: "clamped to [1%, 300%]; Gatheral's formula with numerical strike \
+                           derivatives on the shared stencil — Hagan's expansion has no \
+                           usable closed form for w_kk",
+                },
+            )?;
         }
         Err(e) => log::warn!("SABR fit skipped: {e}"),
+    }
+
+    // fifth flavor: one global SSVI surface fitted to the cleaned smiles
+    // — three shape parameters for the whole surface, the only contender
+    // whose Dupire derivatives are closed-form in strike *and* time
+    match SsviSurfaceFit::fit(&cleaned, forward_of) {
+        Ok(fit) => {
+            let sampled = fit.to_vol_surface(61).map_err(RustyQLibError::from)?;
+            if fit.rmse > 0.005 || fit.ssvi.validate().is_err() {
+                log::warn!(
+                    "SSVI fit: vol RMSE {:.1} bps{} — see the fit metadata",
+                    fit.rmse * 1e4,
+                    match fit.ssvi.validate() {
+                        Ok(()) => String::new(),
+                        Err(e) => format!(", static-arbitrage conditions violated ({e})"),
+                    }
+                );
+            }
+            let mut ssvi_meta = report.to_metadata(chain);
+            ssvi_meta["discount"] = discount_meta.clone();
+            ssvi_meta["ssvi_fit"] = fit.metadata();
+            ssvi_meta["diagnostics"] = sampled.diagnostics(forward_of).to_metadata();
+            write_surface_artifacts(
+                &sampled,
+                ssvi_meta,
+                output_folder,
+                "vol_surface_ssvi",
+                &format!(
+                    "{} implied vol (SSVI fit) \u{2014} {}",
+                    chain.symbol, chain.as_of
+                ),
+                "SSVI volatility surface",
+            )?;
+            write_local_vol_artifacts(
+                &sampled,
+                &|level, t| fit.local_vol_checked(level, t),
+                spot,
+                &curve,
+                &discount_meta,
+                chain,
+                &forward_points,
+                output_folder,
+                &LocalVolSpec {
+                    stem: "local_vol_ssvi",
+                    title: &format!(
+                        "{} Dupire local vol (SSVI fit) \u{2014} {}",
+                        chain.symbol, chain.as_of
+                    ),
+                    model: "Dupire local volatility (analytic on the global SSVI fit)",
+                    derived_from: "the SSVI fit of the arbitrage-repaired surface",
+                    note: "clamped to [1%, 300%]; Gatheral's formula with closed-form SSVI \
+                           derivatives in both strike and time",
+                },
+            )?;
+        }
+        Err(e) => log::warn!("SSVI fit skipped: {e}"),
     }
     Ok(())
 }
@@ -522,6 +608,7 @@ fn write_local_vol_artifacts(
     curve: &YieldCurve,
     discount_meta: &serde_json::Value,
     chain: &OptionChain,
+    forwards: &[(f64, f64)],
     output_folder: &Path,
     spec: &LocalVolSpec,
 ) -> Result<()> {
@@ -530,6 +617,10 @@ fn write_local_vol_artifacts(
         .iter()
         .map(|&level| times.iter().map(|&t| local_vol(level, t).0).collect())
         .collect();
+    // the martingale check runs against the chain's own parity forwards,
+    // so it measures the simulated dynamics against where the market puts
+    // the forward — including the cost of this pipeline's zero-dividend
+    // assumption, which is the number worth having for a dividend payer
     let usability = usability_report(
         axes_surface,
         local_vol,
@@ -537,7 +628,13 @@ fn write_local_vol_artifacts(
         &times,
         curve,
         spot,
-        &UsabilityConfig::default(),
+        &UsabilityConfig {
+            martingale: Some(MartingaleSpec {
+                targets: forwards.to_vec(),
+                config: Default::default(),
+            }),
+            ..UsabilityConfig::default()
+        },
     );
     if !usability.within_desk_tolerance {
         log::warn!(
@@ -549,6 +646,19 @@ fn write_local_vol_artifacts(
             usability.clamped_fraction * 100.0,
             usability.fallback_fraction * 100.0
         );
+    }
+    if let Some(m) = &usability.martingale {
+        if !m.within_threshold {
+            log::warn!(
+                "{}: forward recovery off by up to {:.1} bp of forward \
+                 (max |z| {:.1} over {} paths) — wing extrapolation, clamping, \
+                 or the zero-dividend assumption",
+                spec.stem,
+                m.worst_relative_error * 1e4,
+                m.max_abs_z,
+                m.paths
+            );
+        }
     }
     let document = serde_json::json!({
         "metadata": {

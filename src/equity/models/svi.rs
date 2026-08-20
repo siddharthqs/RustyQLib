@@ -38,6 +38,9 @@ use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
 use crate::core::optimization::{levenberg_marquardt, OptimConfig};
 use crate::core::vols::{VolError, VolSurface};
+use crate::equity::smoothed_surface::{
+    interpolate_slices, SmoothedSurface, VarianceDerivatives, MIN_TIME,
+};
 
 // ── SVI: one expiry ─────────────────────────────────────────────────────
 
@@ -246,13 +249,6 @@ pub struct SviSurfaceFit {
     pub max_calendar_crossing: f64,
 }
 
-/// Forward-variance floor: `dw/dt` never drops below this, so local
-/// variance stays positive even where fitted slices graze.
-const MIN_FORWARD_VARIANCE: f64 = 1e-8;
-/// Local vol clamps, matching
-/// [`LocalVol`](crate::equity::local_vol::LocalVol).
-const MIN_LOCAL_VOL: f64 = 0.01;
-const MAX_LOCAL_VOL: f64 = 3.0;
 
 impl SviSurfaceFit {
     /// Fit one SVI smile per pillar expiry of `surface` (its per-expiry
@@ -411,54 +407,13 @@ impl SviSurfaceFit {
     /// [`local_vol`](Self::local_vol) plus whether a guard fired
     /// (`true` = implied vol was returned instead of the Dupire value:
     /// vanishing variance or a non-positive density denominator).
+    ///
+    /// Delegates to the shared
+    /// [`SmoothedSurface`](crate::equity::smoothed_surface::SmoothedSurface)
+    /// path, so SVI, SABR and SSVI reach Dupire's formula, the guards and
+    /// the clamps through identical code.
     pub fn local_vol_checked(&self, level: f64, t: f64) -> (f64, bool) {
-        let t = t.max(1e-4);
-        let k = (level / self.forward(t)).ln();
-        let (a, b, weight) = self.bracket(t);
-        let (wa, wa1, wa2) = a.params.variance_derivatives(k);
-        let (mut wb, mut wb1, mut wb2) = b.params.variance_derivatives(k);
-        if wb < wa {
-            // grazing slices: floor the later variance (flat forward)
-            (wb, wb1, wb2) = (wa, wa1, wa2);
-        }
-        let (w, w1, w2, dwdt) = if t <= a.t {
-            // below the first pillar variance accrues proportionally
-            let scale = (t / a.t).min(1.0);
-            (wa * scale, wa1 * scale, wa2 * scale, wa / a.t)
-        } else if a.t == b.t {
-            // at or beyond the last pillar: flat-extrapolated smile,
-            // forward variance from the last inter-slice segment
-            let dwdt = self.last_segment_dwdt(k);
-            (wa, wa1, wa2, dwdt)
-        } else {
-            let dwdt = (wb - wa) / (b.t - a.t);
-            (
-                wa + (wb - wa) * weight,
-                wa1 + (wb1 - wa1) * weight,
-                wa2 + (wb2 - wa2) * weight,
-                dwdt,
-            )
-        };
-        let dwdt = dwdt.max(MIN_FORWARD_VARIANCE);
-        if w < 1e-8 {
-            return (
-                (w.max(1e-12) / t)
-                    .sqrt()
-                    .clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL),
-                true,
-            );
-        }
-        let denominator =
-            (1.0 - k * w1 / (2.0 * w)).powi(2) - (w1 * w1 / 4.0) * (1.0 / w + 0.25) + w2 / 2.0;
-        if denominator <= 1e-4 {
-            return ((w / t).sqrt().clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL), true);
-        }
-        (
-            (dwdt / denominator)
-                .sqrt()
-                .clamp(MIN_LOCAL_VOL, MAX_LOCAL_VOL),
-            false,
-        )
+        <Self as SmoothedSurface>::local_vol_checked(self, level, t)
     }
 
     fn last_segment_dwdt(&self, k: f64) -> f64 {
@@ -510,10 +465,7 @@ impl SviSurfaceFit {
     /// Sample [`Self::local_vol`] on a `levels` x `times` grid
     /// (`grid[i][j]` = level i, time j — the plotting layout).
     pub fn local_vol_grid(&self, levels: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
-        levels
-            .iter()
-            .map(|&level| times.iter().map(|&t| self.local_vol(level, t)).collect())
-            .collect()
+        <Self as SmoothedSurface>::local_vol_grid(self, levels, times)
     }
 
     /// Fit-quality metadata for the surface document: per-slice params,
@@ -544,6 +496,36 @@ impl SviSurfaceFit {
             "skipped_slices": self.skipped_slices,
             "max_calendar_crossing": self.max_calendar_crossing,
         })
+    }
+}
+
+/// SVI reaches local volatility with **closed-form** strike derivatives
+/// (from [`SviParams::variance_derivatives`]) and a **per-expiry** time
+/// structure: independent slices interpolated linearly in total variance,
+/// so `dw/dt` is piecewise constant and the local volatility steps in
+/// time at each pillar. Both properties are the model's, not the
+/// implementation's — everything downstream is shared.
+impl SmoothedSurface for SviSurfaceFit {
+    fn forward(&self, t: f64) -> f64 {
+        SviSurfaceFit::forward(self, t)
+    }
+
+    fn total_variance(&self, k: f64, t: f64) -> f64 {
+        SviSurfaceFit::total_variance(self, k, t)
+    }
+
+    fn variance_derivatives(&self, k: f64, t: f64) -> VarianceDerivatives {
+        let t = t.max(MIN_TIME);
+        let (a, b, weight) = self.bracket(t);
+        let (wa, wa1, wa2) = a.params.variance_derivatives(k);
+        let (wb, wb1, wb2) = b.params.variance_derivatives(k);
+        interpolate_slices(
+            (a.t, [wa, wa1, wa2]),
+            (b.t, [wb, wb1, wb2]),
+            t,
+            weight,
+            || self.last_segment_dwdt(k),
+        )
     }
 }
 
@@ -595,6 +577,77 @@ impl Ssvi {
         let (t0, w0) = p[idx - 1];
         let (t1, w1) = p[idx];
         w0 + (w1 - w0) * (t - t0) / (t1 - t0)
+    }
+
+    /// `d theta / dt`, the slope of the ATM total-variance term
+    /// structure — the time derivative [`SmoothedSurface`] needs.
+    /// Mirrors [`Self::theta`] branch for branch, so it is **piecewise
+    /// constant**: linear interpolation between pillars means the slope
+    /// steps at each one. SSVI's `dw/dt` therefore also steps at pillars,
+    /// but only by a factor uniform in `k` (the shape factor
+    /// `dw/dtheta` stays continuous), where a per-expiry smoother's
+    /// forward variance changes shape across the seam.
+    pub fn theta_slope(&self, t: f64) -> f64 {
+        let p = &self.theta_pillars;
+        let n = p.len();
+        if t <= 0.0 {
+            return 0.0;
+        }
+        if t <= p[0].0 {
+            return p[0].1 / p[0].0;
+        }
+        if t >= p[n - 1].0 {
+            if n == 1 {
+                return p[0].1 / p[0].0;
+            }
+            return (p[n - 1].1 - p[n - 2].1) / (p[n - 1].0 - p[n - 2].0);
+        }
+        let idx = p.partition_point(|&(ti, _)| ti < t);
+        let (t0, w0) = p[idx - 1];
+        let (t1, w1) = p[idx];
+        (w1 - w0) / (t1 - t0)
+    }
+
+    /// Total variance and its derivatives at `(k, t)`, **all in closed
+    /// form**. Writing `u = phi k + rho` and `R = sqrt(u^2 + 1 - rho^2)`:
+    ///
+    /// ```text
+    /// w    = theta/2 (1 + rho phi k + R)
+    /// w_k  = theta phi / 2 (rho + u/R)
+    /// w_kk = theta phi^2 (1 - rho^2) / (2 R^3)
+    /// w_t  = (dtheta/dt) [ w/theta + k (phi'/phi) w_k ]
+    /// ```
+    ///
+    /// the last line following from the chain rule through `phi(theta)`,
+    /// whose logarithmic derivative for the power law
+    /// \eqref-free form `phi = eta / (theta^gamma (1+theta)^(1-gamma))`
+    /// is `phi'/phi = -[gamma/theta + (1-gamma)/(1+theta)]`.
+    pub fn variance_derivatives(&self, k: f64, t: f64) -> VarianceDerivatives {
+        let theta = self.theta(t);
+        if theta <= 0.0 {
+            return VarianceDerivatives {
+                w: 0.0,
+                dk: 0.0,
+                dkk: 0.0,
+                dt: 0.0,
+            };
+        }
+        let phi = self.phi(theta);
+        let rho = self.rho;
+        let u = phi * k + rho;
+        let r = (u * u + 1.0 - rho * rho).sqrt();
+        let w = 0.5 * theta * (1.0 + rho * phi * k + r);
+        let dk = 0.5 * theta * phi * (rho + u / r);
+        let dkk = 0.5 * theta * phi * phi * (1.0 - rho * rho) / (r * r * r);
+        // phi'/phi for the power-law curvature
+        let dlog_phi = -(self.gamma / theta + (1.0 - self.gamma) / (1.0 + theta));
+        let dw_dtheta = w / theta + k * dlog_phi * dk;
+        VarianceDerivatives {
+            w,
+            dk,
+            dkk,
+            dt: self.theta_slope(t) * dw_dtheta,
+        }
     }
 
     /// Power-law curvature `phi(theta)`.
@@ -761,6 +814,216 @@ impl Ssvi {
             })
             .collect();
         VolSurface::from_strike_smiles(&expiries, &smiles, reference_date, day_count)
+    }
+}
+
+// ── SSVI as a fitted surface ────────────────────────────────────────────
+
+/// A calibrated SSVI surface bound to a forward curve — the SSVI sibling
+/// of [`SviSurfaceFit`] and
+/// [`SabrSurfaceFit`](crate::equity::sabr::SabrSurfaceFit), and the form
+/// in which SSVI enters a like-for-like comparison.
+///
+/// [`Ssvi`] alone cannot be a [`SmoothedSurface`]: it parameterizes total
+/// variance in log-moneyness but carries no forwards, so it cannot map a
+/// strike to a `k`. This wrapper adds the forward term structure, the
+/// quoted spans, and the fit diagnostics.
+///
+/// Structurally it differs from the per-expiry fits in exactly one way
+/// that matters downstream: its term structure is a single continuous
+/// `theta_t` threaded through every expiry, so the smile *shape* factor
+/// of `dw/dt` never breaks across a pillar. The per-expiry smoothers
+/// re-derive that shape on each segment.
+#[derive(Debug, Clone)]
+pub struct SsviSurfaceFit {
+    reference_date: NaiveDate,
+    day_count: DayCountConvention,
+    /// The calibrated global surface.
+    pub ssvi: Ssvi,
+    /// `(t, forward)` pillars in increasing time order.
+    pub forwards: Vec<(f64, f64)>,
+    /// Quoted log-moneyness span per pillar, in the same order.
+    pub k_ranges: Vec<(f64, f64)>,
+    /// Root-mean-square fit error in implied vol over all quotes.
+    pub rmse: f64,
+    pub converged: bool,
+    /// Input expiries dropped for having no usable quotes.
+    pub skipped_slices: usize,
+}
+
+impl SsviSurfaceFit {
+    /// Calibrate one global SSVI surface to every quote on `surface`.
+    ///
+    /// ATM total variance pillars `theta_t` are read off the surface at
+    /// each expiry's forward (not fitted), leaving the three shape
+    /// parameters `(rho, eta, gamma)` to the optimizer — the standard
+    /// split, and the one that keeps the ATM term structure exact by
+    /// construction. Pillars are floored to be non-decreasing so the
+    /// calendar condition holds even if the input surface grazes.
+    pub fn fit(
+        surface: &VolSurface,
+        forward: impl Fn(f64) -> f64,
+    ) -> Result<SsviSurfaceFit, RustyQLibError> {
+        use crate::core::vols::{SmileCoordinate, VolInput};
+        let VolInput::StrikeSmiles {
+            expiries,
+            smiles,
+            coordinate,
+            ..
+        } = surface.to_input()
+        else {
+            return Err(RustyQLibError::invalid_input(
+                "ssvi fit",
+                "the surface has no per-expiry smiles to fit (flat surface?)",
+            ));
+        };
+        let mut pillars: Vec<(f64, f64)> = Vec::new();
+        let mut forwards: Vec<(f64, f64)> = Vec::new();
+        let mut k_ranges: Vec<(f64, f64)> = Vec::new();
+        let mut quotes: Vec<(f64, f64, f64)> = Vec::new();
+        let mut skipped = 0usize;
+        for (tenor, smile) in expiries.iter().zip(&smiles) {
+            let t = match tenor {
+                Tenor::YearFraction(t) => *t,
+                Tenor::Date(_) => continue, // to_input never emits dates
+            };
+            if smile.is_empty() || t <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            let f = forward(t);
+            let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+            for &(x, vol) in smile {
+                let k = match coordinate {
+                    SmileCoordinate::Strike => (x / f).ln(),
+                    SmileCoordinate::Moneyness => x.ln(),
+                    SmileCoordinate::LogMoneyness => x,
+                };
+                lo = lo.min(k);
+                hi = hi.max(k);
+                quotes.push((t, k, vol));
+            }
+            // ATM total variance read at the forward
+            let atm = surface.vol(f, f, t);
+            pillars.push((t, atm * atm * t));
+            forwards.push((t, f));
+            k_ranges.push((lo, hi));
+        }
+        if quotes.len() < 3 {
+            return Err(RustyQLibError::invalid_input(
+                "ssvi fit",
+                format!(
+                    "SSVI needs at least three quotes for three parameters \
+                     ({} found, {skipped} expiries skipped)",
+                    quotes.len()
+                ),
+            ));
+        }
+        // calendar floor on the ATM pillars: theta must not decrease
+        for i in 1..pillars.len() {
+            if pillars[i].1 < pillars[i - 1].1 {
+                pillars[i].1 = pillars[i - 1].1;
+            }
+        }
+        let fit = Ssvi::calibrate(&quotes, &pillars, (-0.5, 0.5, 0.5));
+        Ok(SsviSurfaceFit {
+            reference_date: surface.reference_date(),
+            day_count: surface.day_count(),
+            ssvi: fit.surface,
+            forwards,
+            k_ranges,
+            rmse: fit.rmse,
+            converged: fit.converged,
+            skipped_slices: skipped,
+        })
+    }
+
+    /// Dupire local vol at underlying `level` and time `t`, from the
+    /// closed-form SSVI derivatives.
+    pub fn local_vol(&self, level: f64, t: f64) -> f64 {
+        <Self as SmoothedSurface>::local_vol(self, level, t)
+    }
+
+    /// [`local_vol`](Self::local_vol) plus whether a guard fired.
+    pub fn local_vol_checked(&self, level: f64, t: f64) -> (f64, bool) {
+        <Self as SmoothedSurface>::local_vol_checked(self, level, t)
+    }
+
+    /// Sample [`Self::local_vol`] on a `levels` x `times` grid
+    /// (`grid[i][j]` = level i, time j — the plotting layout).
+    pub fn local_vol_grid(&self, levels: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
+        <Self as SmoothedSurface>::local_vol_grid(self, levels, times)
+    }
+
+    /// Sample the fit into the canonical pricing [`VolSurface`]: per
+    /// pillar, `samples` strikes across that pillar's quoted span.
+    pub fn to_vol_surface(&self, samples: usize) -> Result<VolSurface, VolError> {
+        let n = samples.max(5);
+        let tenors: Vec<Tenor> = self
+            .forwards
+            .iter()
+            .map(|&(t, _)| Tenor::YearFraction(t))
+            .collect();
+        let smiles: Vec<Vec<(f64, f64)>> = self
+            .forwards
+            .iter()
+            .zip(&self.k_ranges)
+            .map(|(&(t, f), &(lo, hi))| {
+                (0..n)
+                    .map(|i| {
+                        let k = lo + (hi - lo) * i as f64 / (n - 1) as f64;
+                        let strike = f * k.exp();
+                        (strike, self.ssvi.vol(strike, f, t))
+                    })
+                    .collect()
+            })
+            .collect();
+        VolSurface::from_strike_smiles(&tenors, &smiles, self.reference_date, self.day_count)
+    }
+
+    /// Fit-quality metadata for the surface document.
+    pub fn metadata(&self) -> serde_json::Value {
+        serde_json::json!({
+            "model": "global SSVI (Gatheral-Jacquier) with power-law curvature",
+            "params": {
+                "rho": self.ssvi.rho,
+                "eta": self.ssvi.eta,
+                "gamma": self.ssvi.gamma,
+            },
+            "theta_pillars": self.ssvi.theta_pillars,
+            "rmse_vol_bps": self.rmse * 1e4,
+            "converged": self.converged,
+            "skipped_slices": self.skipped_slices,
+            "static_arbitrage_free": self.ssvi.validate().is_ok(),
+        })
+    }
+}
+
+/// SSVI reaches local volatility with **closed-form** derivatives in both
+/// strike and time — the only contender that does. Everything downstream
+/// is the shared path.
+impl SmoothedSurface for SsviSurfaceFit {
+    fn forward(&self, t: f64) -> f64 {
+        let p = &self.forwards;
+        let n = p.len();
+        if n == 1 || t <= p[0].0 {
+            return p[0].1;
+        }
+        if t >= p[n - 1].0 {
+            return p[n - 1].1;
+        }
+        let idx = p.partition_point(|&(ti, _)| ti < t);
+        let (t0, f0) = p[idx - 1];
+        let (t1, f1) = p[idx];
+        f0 + (f1 - f0) * (t - t0) / (t1 - t0)
+    }
+
+    fn total_variance(&self, k: f64, t: f64) -> f64 {
+        self.ssvi.total_variance(k, t)
+    }
+
+    fn variance_derivatives(&self, k: f64, t: f64) -> VarianceDerivatives {
+        self.ssvi.variance_derivatives(k, t.max(MIN_TIME))
     }
 }
 
@@ -1029,6 +1292,149 @@ mod tests {
             fit.surface.eta
         );
         assert!(fit.surface.validate().is_ok());
+    }
+
+    // ── SSVI derivatives and local volatility ───────────────────────────
+
+    #[test]
+    fn ssvi_analytic_derivatives_match_finite_differences() {
+        // the closed forms in `Ssvi::variance_derivatives` are the whole
+        // reason SSVI can be differentiated exactly; check every one of
+        // them against a difference quotient
+        use crate::equity::smoothed_surface::numeric_k_derivatives;
+        let s = ssvi();
+        // strictly between pillars, so d theta / dt is unambiguous
+        for t in [0.35, 0.7, 1.4] {
+            for k in [-0.4, -0.1, 0.0, 0.2, 0.5] {
+                let d = s.variance_derivatives(k, t);
+                let [w_num, dk_num, dkk_num] =
+                    numeric_k_derivatives(|kk| s.total_variance(kk, t), k);
+                assert!((d.w - w_num).abs() < 1e-14, "w at k={k} t={t}");
+                assert!(
+                    (d.dk - dk_num).abs() < 1e-7,
+                    "w_k at k={k} t={t}: {} vs {dk_num}",
+                    d.dk
+                );
+                assert!(
+                    (d.dkk - dkk_num).abs() < 1e-4,
+                    "w_kk at k={k} t={t}: {} vs {dkk_num}",
+                    d.dkk
+                );
+                // time derivative by central difference inside the segment
+                let h = 1e-6;
+                let dt_num =
+                    (s.total_variance(k, t + h) - s.total_variance(k, t - h)) / (2.0 * h);
+                assert!(
+                    (d.dt - dt_num).abs() < 1e-5,
+                    "w_t at k={k} t={t}: {} vs {dt_num}",
+                    d.dt
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ssvi_second_derivative_is_positive_so_the_density_is_admissible() {
+        // w_kk = theta phi^2 (1 - rho^2) / (2 R^3) > 0 identically
+        let s = ssvi();
+        for t in [0.25, 1.0, 2.0] {
+            for i in 0..=20 {
+                let k = -1.0 + i as f64 * 0.1;
+                assert!(
+                    s.variance_derivatives(k, t).dkk > 0.0,
+                    "w_kk at k={k} t={t}"
+                );
+            }
+        }
+    }
+
+    fn ssvi_surface_from(s: &Ssvi, forward: f64) -> VolSurface {
+        let expiries: Vec<Tenor> = s
+            .theta_pillars
+            .iter()
+            .map(|&(t, _)| Tenor::YearFraction(t))
+            .collect();
+        let smiles: Vec<Vec<(f64, f64)>> = s
+            .theta_pillars
+            .iter()
+            .map(|&(t, _)| {
+                (0..11)
+                    .map(|i| {
+                        let k = -0.3 + i as f64 * 0.06;
+                        let strike = forward * k.exp();
+                        (strike, s.vol(strike, forward, t))
+                    })
+                    .collect()
+            })
+            .collect();
+        VolSurface::from_strike_smiles(
+            &expiries,
+            &smiles,
+            NaiveDate::from_ymd_opt(2026, 8, 19).unwrap(),
+            DayCountConvention::Act365,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn flat_ssvi_gives_flat_local_vol() {
+        // eta -> 0 collapses the smile: w(k, t) = theta_t for every k, so
+        // with theta_t = sigma^2 t the local vol must be sigma everywhere
+        let vol = 0.28_f64;
+        let flat = Ssvi {
+            rho: -0.3,
+            eta: 1e-10,
+            gamma: 0.5,
+            theta_pillars: vec![
+                (0.5, vol * vol * 0.5),
+                (1.0, vol * vol),
+                (2.0, vol * vol * 2.0),
+            ],
+        };
+        let surface = ssvi_surface_from(&flat, 100.0);
+        let fit = SsviSurfaceFit::fit(&surface, |_| 100.0).unwrap();
+        for level in [80.0, 100.0, 125.0] {
+            for t in [0.1, 0.5, 0.75, 1.0, 2.0, 2.5] {
+                let (lv, guarded) = fit.local_vol_checked(level, t);
+                assert!(!guarded, "level {level} t {t} should not need a guard");
+                assert!((lv - vol).abs() < 5e-3, "level {level} t {t}: {lv}");
+            }
+        }
+    }
+
+    #[test]
+    fn ssvi_surface_fit_recovers_the_generating_surface() {
+        let truth = ssvi();
+        let surface = ssvi_surface_from(&truth, 100.0);
+        let fit = SsviSurfaceFit::fit(&surface, |_| 100.0).unwrap();
+        assert_eq!(fit.skipped_slices, 0);
+        assert!(fit.rmse < 1e-4, "vol rmse {}", fit.rmse);
+        assert!(
+            (fit.ssvi.rho - truth.rho).abs() < 1e-2,
+            "rho {}",
+            fit.ssvi.rho
+        );
+        // the ATM pillars are read off the surface, not fitted, so they
+        // must reproduce the generator's ATM variance
+        for (&(t, theta), &(_, want)) in fit.ssvi.theta_pillars.iter().zip(&truth.theta_pillars) {
+            assert!((theta - want).abs() < 1e-6, "theta at t={t}: {theta} vs {want}");
+        }
+        // local vol is finite, positive and guard-free across the quoted box
+        let mut guarded = 0;
+        for i in 0..=10 {
+            let k: f64 = -0.28 + i as f64 * 0.056;
+            for t in [0.3, 0.5, 1.0, 2.0] {
+                let (lv, g) = fit.local_vol_checked(100.0 * k.exp(), t);
+                assert!(lv.is_finite() && lv > 0.0, "k={k} t={t}");
+                guarded += g as usize;
+            }
+        }
+        assert_eq!(guarded, 0, "a clean SSVI fit needs no guards");
+        // and it samples back into a pricing surface
+        let sampled = fit.to_vol_surface(31).unwrap();
+        assert_eq!(sampled.expiry_times().len(), truth.theta_pillars.len());
+        let meta = fit.metadata();
+        assert!(meta["static_arbitrage_free"].as_bool().unwrap());
     }
 
     #[test]

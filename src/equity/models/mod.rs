@@ -8,6 +8,7 @@ pub mod processes;
 pub mod rbergomi;
 pub mod sabr;
 pub mod slv;
+pub mod smoothed_surface;
 pub mod surface_repair;
 pub mod svi;
 pub mod usability;
