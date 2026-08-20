@@ -41,6 +41,7 @@ use crate::core::montecarlo::{path_normals, pseudo_normals, sobol_normals, PathD
 use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::equity::accumulator::AccumulatorPayoff;
+use crate::equity::cliquet::CliquetPayoff;
 use crate::equity::asian::{self, AsianStrikeType, AveragingType};
 use crate::equity::autocallable::AutocallablePayoff;
 use crate::equity::barrier::{BarrierDirection, KnockType};
@@ -750,6 +751,8 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
             autocall_npv(option, auto, p)
         } else if let Some(accu) = option.payoff.as_any().downcast_ref::<AccumulatorPayoff>() {
             accumulator_npv(option, accu, p)
+        } else if let Some(cliq) = option.payoff.as_any().downcast_ref::<CliquetPayoff>() {
+            cliquet_npv(option, cliq, p)
         } else {
             generic_path_npv(option, p)
         };
@@ -1047,6 +1050,36 @@ fn accumulator_npv(option: &EquityOption, accu: &AccumulatorPayoff, p: &MarketPa
     summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
+/// Cliquet valuation on the GBM / local-vol route: reset-aligned step
+/// grid, [`CliquetPayoff::path_value`] per path. The stochastic-vol
+/// models route through [`route_sv_paths`]'s cliquet arm instead.
+fn cliquet_npv(option: &EquityOption, cliq: &CliquetPayoff, p: &MarketParams) -> McStats {
+    let cfg = option.mc_cfg();
+    let n_obs = cliq.resets.max(1);
+    let steps = effective_steps(cfg, &option.model)
+        .max(PATH_DEPENDENT_MIN_STEPS)
+        .div_ceil(n_obs)
+        * n_obs;
+    let dt = p.t / steps as f64;
+    let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
+    let divs = dividends_per_step(option, p.t, steps);
+    let process = bs_process(option, p);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
+    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
+        path.clear();
+        let mut s = p.s0;
+        for (i, d) in dw.iter().enumerate() {
+            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
+            if let Some(divs) = &divs {
+                s = (s - divs[i]).max(1e-8);
+            }
+            path.push(s);
+        }
+        cliq.path_value(path, &obs_idx, &dfs)
+    });
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+}
+
 // ── Heston stochastic volatility paths ──────────────────────────────────
 
 /// Heston simulation on seeded per-path pseudo-random streams. The
@@ -1117,6 +1150,16 @@ fn route_sv_paths(
         let dt = p.t / steps as f64;
         let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
         let eval = |spots: &[f64], _: &[f64]| accu.path_value(spots, &obs_idx, &dfs, p.strike);
+        let acc = run(steps, dt, &eval);
+        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+    }
+
+    if let Some(cliq) = option.payoff.as_any().downcast_ref::<CliquetPayoff>() {
+        let n_obs = cliq.resets.max(1);
+        let steps = steps.div_ceil(n_obs) * n_obs;
+        let dt = p.t / steps as f64;
+        let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
+        let eval = |spots: &[f64], _: &[f64]| cliq.path_value(spots, &obs_idx, &dfs);
         let acc = run(steps, dt, &eval);
         return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
     }

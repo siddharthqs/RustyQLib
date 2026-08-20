@@ -183,6 +183,7 @@ pub enum PayoffType {
     Autocallable,
     Lookback,
     Accumulator,
+    Cliquet,
     Chooser,
 }
 impl FromStr for PayoffType {
@@ -196,6 +197,7 @@ impl FromStr for PayoffType {
             "forward_start" | "forwardstart" => Ok(PayoffType::ForwardStart),
             "autocallable" | "autocall" => Ok(PayoffType::Autocallable),
             "accumulator" | "decumulator" => Ok(PayoffType::Accumulator),
+            "cliquet" | "ratchet" => Ok(PayoffType::Cliquet),
             "lookback" => Ok(PayoffType::Lookback),
             "chooser" => Ok(PayoffType::Chooser),
             _ => Err("Invalid payoff type".into()),

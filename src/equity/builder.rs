@@ -32,6 +32,7 @@ use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::core::vols::VolSurface;
 use crate::equity::accumulator::{AccumulatorPayoff, AccumulatorSide};
+use crate::equity::cliquet::{CliquetPayoff, CliquetStyle};
 use crate::equity::asian::{AsianStrikeType, AveragingType};
 use crate::equity::autocallable::AutocallablePayoff;
 use crate::equity::barrier::{BarrierDirection, KnockType};
@@ -103,6 +104,15 @@ enum PayoffSpec {
         observations: usize,
         shares_per_day: f64,
         gearing: f64,
+    },
+    Cliquet {
+        resets: usize,
+        local_floor: f64,
+        local_cap: Option<f64>,
+        global_floor: Option<f64>,
+        global_cap: Option<f64>,
+        notional: f64,
+        style: CliquetStyle,
     },
     /// Escape hatch: a caller-supplied payoff is used as given (its own
     /// exercise style included).
@@ -349,6 +359,60 @@ impl PayoffSpec {
                 }
                 Ok(())
             }
+            PayoffSpec::Cliquet {
+                resets,
+                local_floor,
+                local_cap,
+                global_floor,
+                global_cap,
+                notional,
+                style,
+            } => {
+                if *resets < 1 {
+                    return invalid("resets", "need at least one reset period".to_string());
+                }
+                if !(notional.is_finite() && *notional > 0.0) {
+                    return invalid(
+                        "notional",
+                        format!("notional must be positive and finite, got {notional}"),
+                    );
+                }
+                if !local_floor.is_finite() {
+                    return invalid(
+                        "local_floor",
+                        format!("local_floor must be finite, got {local_floor}"),
+                    );
+                }
+                if let Some(cap) = local_cap {
+                    if !(cap.is_finite() && cap > local_floor) {
+                        return invalid(
+                            "local_cap",
+                            format!(
+                                "local_cap must be finite and exceed the local floor \
+                                 {local_floor}, got {cap}"
+                            ),
+                        );
+                    }
+                }
+                if let (Some(floor), Some(cap)) = (global_floor, global_cap) {
+                    if cap < floor {
+                        return invalid(
+                            "global_cap",
+                            format!("global_cap {cap} is below global_floor {floor}"),
+                        );
+                    }
+                }
+                if let CliquetStyle::Reverse { coupon } | CliquetStyle::Napoleon { coupon } = style
+                {
+                    if !coupon.is_finite() {
+                        return invalid(
+                            "coupon",
+                            format!("coupon must be finite, got {coupon}"),
+                        );
+                    }
+                }
+                Ok(())
+            }
             PayoffSpec::Accumulator {
                 side,
                 barrier,
@@ -514,6 +578,25 @@ impl PayoffSpec {
                 observations,
                 shares_per_day,
                 gearing,
+            }),
+            PayoffSpec::Cliquet {
+                resets,
+                local_floor,
+                local_cap,
+                global_floor,
+                global_cap,
+                notional,
+                style: cliquet_style,
+            } => Box::new(CliquetPayoff {
+                exercise_style: style,
+                resets,
+                local_floor,
+                local_cap,
+                global_floor,
+                global_cap,
+                notional,
+                style: cliquet_style,
+                initial_fixing: ctx.spot,
             }),
             PayoffSpec::Custom(p) => p,
         }
@@ -949,6 +1032,89 @@ impl EquityOptionBuilder {
             shares_per_day,
             gearing,
         });
+        self
+    }
+
+    /// Cliquet (ratchet) on `resets` equally spaced reset periods,
+    /// paying `notional * clamp(sum_i clamp(R_i, local_floor,
+    /// local_cap), global_floor, global_cap)` at maturity, where `R_i`
+    /// is the period return `S_i / S_{i-1} - 1` (the first period
+    /// against the build-time spot). `local_floor = 0` is the classic
+    /// ratchet. Caps/floors and the reverse/Napoleon coupon styles
+    /// attach via the `cliquet_*` modifiers. Prices on the MonteCarlo
+    /// engine under every model the engine carries (GBM, local vol,
+    /// Heston, SABR, rough Bergomi); the standalone
+    /// [`Cliquet`](crate::equity::cliquet::Cliquet) product remains the
+    /// flat-market closed-form reference.
+    pub fn cliquet(mut self, resets: usize, local_floor: f64, notional: f64) -> Self {
+        self.payoff = Some(PayoffSpec::Cliquet {
+            resets,
+            local_floor,
+            local_cap: None,
+            global_floor: None,
+            global_cap: None,
+            notional,
+            style: CliquetStyle::Standard,
+        });
+        self
+    }
+
+    /// Per-period return cap; must follow [`cliquet`](Self::cliquet).
+    pub fn cliquet_local_cap(mut self, cap: f64) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::Cliquet { local_cap, .. }) => *local_cap = Some(cap),
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "cliquet_local_cap",
+                    "cliquet_local_cap must follow .cliquet(...)",
+                ));
+            }
+        }
+        self
+    }
+
+    /// Floor on the terminal sum of clamped returns; must follow
+    /// [`cliquet`](Self::cliquet).
+    pub fn cliquet_global_floor(mut self, floor: f64) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::Cliquet { global_floor, .. }) => *global_floor = Some(floor),
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "cliquet_global_floor",
+                    "cliquet_global_floor must follow .cliquet(...)",
+                ));
+            }
+        }
+        self
+    }
+
+    /// Cap on the terminal sum of clamped returns; must follow
+    /// [`cliquet`](Self::cliquet).
+    pub fn cliquet_global_cap(mut self, cap: f64) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::Cliquet { global_cap, .. }) => *global_cap = Some(cap),
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "cliquet_global_cap",
+                    "cliquet_global_cap must follow .cliquet(...)",
+                ));
+            }
+        }
+        self
+    }
+
+    /// Switch the reset strip to a reverse or Napoleon coupon style
+    /// (or back to standard); must follow [`cliquet`](Self::cliquet).
+    pub fn cliquet_style(mut self, new_style: CliquetStyle) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::Cliquet { style, .. }) => *style = new_style,
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "cliquet_style",
+                    "cliquet_style must follow .cliquet(...)",
+                ));
+            }
+        }
         self
     }
 

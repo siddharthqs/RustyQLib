@@ -2161,7 +2161,9 @@ fn autocall_prices_under_local_vol() {
 }
 
 #[test]
-#[should_panic(expected = "Autocallables and accumulators price on the MonteCarlo engine only")]
+#[should_panic(
+    expected = "Autocallables, accumulators and cliquets price on the MonteCarlo engine only"
+)]
 fn analytic_engine_rejects_autocallables() {
     let mut note = autocall_note(105.0, 70.0, 5.0);
     note.engine = crate::equity::utils::PricingEngine::from_kind(Engine::BlackScholes);

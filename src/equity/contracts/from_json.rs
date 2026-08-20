@@ -154,6 +154,13 @@ impl EquityOption {
                      not JSON contract data",
                 ));
             }
+            PayoffType::Cliquet => {
+                return Err(RustyQLibError::invalid_input(
+                    "payoff_type",
+                    "cliquets are built through EquityOptionBuilder::cliquet, or as the \
+                     standalone 'cliquet_option' product contract",
+                ));
+            }
             PayoffType::Vanilla => builder.vanilla(side),
             PayoffType::Binary => {
                 let binary_type = match data

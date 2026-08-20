@@ -117,32 +117,70 @@ pub struct Cliquet {
 /// Euler substeps per reset period for the Heston path engine.
 const HESTON_SUBSTEPS: usize = 32;
 
+/// Per-period clamp, shared by the standalone product and
+/// [`CliquetPayoff`].
+fn clamp_local(ret: f64, floor: f64, cap: Option<f64>) -> f64 {
+    let mut x = ret.max(floor);
+    if let Some(cap) = cap {
+        x = x.min(cap);
+    }
+    x
+}
+
+/// Terminal clamp of the accumulated units.
+fn clamp_global(sum: f64, floor: Option<f64>, cap: Option<f64>) -> f64 {
+    let mut x = sum;
+    if let Some(floor) = floor {
+        x = x.max(floor);
+    }
+    if let Some(cap) = cap {
+        x = x.min(cap);
+    }
+    x
+}
+
+/// Fold one period return into the running style state
+/// (`total` for standard/reverse, `worst` for the Napoleon).
+fn accumulate_return(
+    style: &CliquetStyle,
+    local_floor: f64,
+    local_cap: Option<f64>,
+    ret: f64,
+    total: &mut f64,
+    worst: &mut f64,
+) {
+    match style {
+        CliquetStyle::Standard => *total += clamp_local(ret, local_floor, local_cap),
+        CliquetStyle::Reverse { .. } => *total += ret.min(0.0),
+        CliquetStyle::Napoleon { .. } => *worst = worst.min(ret),
+    }
+}
+
+/// Combine the accumulated state into payoff units per the style.
+fn style_units(
+    style: &CliquetStyle,
+    total: f64,
+    worst: f64,
+    global_floor: Option<f64>,
+    global_cap: Option<f64>,
+) -> f64 {
+    match style {
+        CliquetStyle::Standard => clamp_global(total, global_floor, global_cap),
+        CliquetStyle::Reverse { coupon } => clamp_global(coupon + total, global_floor, global_cap),
+        CliquetStyle::Napoleon { coupon } => clamp_global(coupon + worst, global_floor, global_cap),
+    }
+}
+
 impl Cliquet {
-    fn clamp_local(&self, ret: f64) -> f64 {
-        let mut x = ret.max(self.local_floor);
-        if let Some(cap) = self.local_cap {
-            x = x.min(cap);
-        }
-        x
-    }
-
     fn accumulate(&self, ret: f64, total: &mut f64, worst: &mut f64) {
-        match self.style {
-            CliquetStyle::Standard => *total += self.clamp_local(ret),
-            CliquetStyle::Reverse { .. } => *total += ret.min(0.0),
-            CliquetStyle::Napoleon { .. } => *worst = worst.min(ret),
-        }
-    }
-
-    fn clamp_global(&self, sum: f64) -> f64 {
-        let mut x = sum;
-        if let Some(floor) = self.global_floor {
-            x = x.max(floor);
-        }
-        if let Some(cap) = self.global_cap {
-            x = x.min(cap);
-        }
-        x
+        accumulate_return(
+            &self.style,
+            self.local_floor,
+            self.local_cap,
+            ret,
+            total,
+            worst,
+        );
     }
 
     /// Black-Scholes closed form: each period's clamped return is a
@@ -231,11 +269,7 @@ impl Cliquet {
                     }
                 }
             }
-            let units = match self.style {
-                CliquetStyle::Standard => self.clamp_global(total),
-                CliquetStyle::Reverse { coupon } => self.clamp_global(coupon + total),
-                CliquetStyle::Napoleon { coupon } => self.clamp_global(coupon + worst),
-            };
+            let units = style_units(&self.style, total, worst, self.global_floor, self.global_cap);
             let payoff = self.notional * (-self.r * self.t).exp() * units;
             sum += payoff;
             sum_sq += payoff * payoff;
@@ -346,6 +380,100 @@ impl Cliquet {
             paths: data.simulation.unwrap_or(100_000) as usize,
             seed: data.mc_seed.unwrap_or(42),
         }))
+    }
+}
+
+/// The cliquet as a mainline [`Payoff`], pricing inside
+/// [`EquityOption`](crate::equity::vanilla_option::EquityOption) on the
+/// shared Monte Carlo engine (GBM, local vol, Heston via QE-M, SABR,
+/// rough Bergomi) — which gives it the market context for free: curve
+/// discounting, dividend handling, `with_market`/`npv_in` rebinding,
+/// portfolio membership and the stress runner. Spot, curve and surface
+/// come from the bound market; the strike is unused (the payoff is
+/// built from period returns and is spot-homogeneous). The standalone
+/// [`Cliquet`] remains the flat-market closed-form / per-period-MC
+/// validation reference.
+///
+/// Period returns observe the path on an equally spaced reset grid,
+/// with the first return measured against `initial_fixing` (the spot
+/// the option was built at). The payoff pays once, at maturity, so
+/// like the other schedule products it is valued per path through
+/// [`path_value`](Self::path_value) with per-date discount factors,
+/// not through `path_payoff`.
+#[derive(Debug, Clone)]
+pub struct CliquetPayoff {
+    pub exercise_style: crate::core::utils::ContractStyle,
+    /// Number of equally spaced reset periods (last reset = maturity).
+    pub resets: usize,
+    pub local_floor: f64,
+    pub local_cap: Option<f64>,
+    pub global_floor: Option<f64>,
+    pub global_cap: Option<f64>,
+    pub notional: f64,
+    pub style: CliquetStyle,
+    /// Spot at inception — the denominator of the first period return.
+    pub initial_fixing: f64,
+}
+
+impl CliquetPayoff {
+    /// Value of one simulated path: period returns between consecutive
+    /// observation spots (the first against `initial_fixing`), folded
+    /// per the style, globally clamped, paid at maturity. `obs_idx`
+    /// maps reset m to its path step; `dfs[m]` discounts its date
+    /// (only the final, maturity discount factor is used — the grid
+    /// contract is shared with the other schedule payoffs).
+    pub fn path_value(&self, path: &[f64], obs_idx: &[usize], dfs: &[f64]) -> f64 {
+        let mut total = 0.0;
+        let mut worst = f64::INFINITY;
+        let mut s_prev = self.initial_fixing;
+        for &idx in obs_idx {
+            let s = path[idx];
+            accumulate_return(
+                &self.style,
+                self.local_floor,
+                self.local_cap,
+                s / s_prev - 1.0,
+                &mut total,
+                &mut worst,
+            );
+            s_prev = s;
+        }
+        let units = style_units(&self.style, total, worst, self.global_floor, self.global_cap);
+        self.notional * units * dfs.last().copied().unwrap_or(1.0)
+    }
+}
+
+impl crate::equity::utils::Payoff for CliquetPayoff {
+    /// Degenerate single-point value: zero (all value lives in the
+    /// period returns of the path).
+    fn payoff(&self, _spot: f64, _strike: f64) -> f64 {
+        0.0
+    }
+    fn path_payoff(&self, _path: &[f64], _strike: f64) -> f64 {
+        panic!(
+            "Cliquets observe scheduled resets and cannot be valued through \
+             path_payoff; the Monte Carlo engine prices them via path_value"
+        );
+    }
+    fn is_path_dependent(&self) -> bool {
+        true
+    }
+    fn payoff_kind(&self) -> crate::equity::utils::PayoffType {
+        crate::equity::utils::PayoffType::Cliquet
+    }
+    fn put_or_call(&self) -> &crate::core::trade::PutOrCall {
+        // by convention: the standard cliquet is a strip of forward-start
+        // call spreads; not used by pricing
+        &crate::core::trade::PutOrCall::Call
+    }
+    fn exercise_style(&self) -> &crate::core::utils::ContractStyle {
+        &self.exercise_style
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn crate::equity::utils::Payoff> {
+        Box::new(self.clone())
     }
 }
 
@@ -632,4 +760,159 @@ mod tests {
         // bounded by the discounted global-capped maximum
         assert!(pv > 0.0 && pv < 1_000_000.0 * 4.0 * 0.05, "{pv}");
     }
+
+    // ── the mainline CliquetPayoff (Market-bound spine) ────────────────
+
+    fn builder_cliquet() -> crate::equity::builder::EquityOptionBuilder {
+        use crate::equity::builder::EquityOptionBuilder;
+        use crate::equity::utils::Engine;
+        EquityOptionBuilder::new()
+            .symbol("CLIQ")
+            .spot(100.0)
+            .flat_vol(0.2)
+            .flat_rate(0.03)
+            .valuation_date(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .maturity_date(chrono::NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+            .cliquet(4, 0.0, 100.0)
+            .cliquet_local_cap(0.08)
+            .engine(Engine::MonteCarlo)
+            .paths(100_000)
+            .seed(42)
+    }
+
+    fn standalone_like_builder() -> Cliquet {
+        Cliquet {
+            resets: 4,
+            t: 1.0,
+            r: 0.03,
+            q: 0.0,
+            sigma: 0.2,
+            local_floor: 0.0,
+            local_cap: Some(0.08),
+            global_floor: None,
+            global_cap: None,
+            notional: 100.0,
+            heston: None,
+            style: CliquetStyle::Standard,
+            pricer: CliquetPricer::Analytical,
+            paths: 60_000,
+            seed: 42,
+        }
+    }
+
+    #[test]
+    fn mainline_cliquet_matches_the_standalone_closed_form() {
+        // the builder route simulates full paths on the shared MC engine
+        // (exact GBM steps => period returns exactly lognormal), so it
+        // must converge to the standalone strip-of-forward-starts closed
+        // form on the identical flat market
+        let analytic = standalone_like_builder().analytic_npv().unwrap();
+        let mc = builder_cliquet().build().expect("cliquet must build").npv();
+        assert!(
+            (mc - analytic).abs() < 0.05,
+            "mainline MC {mc} vs closed form {analytic}"
+        );
+    }
+
+    #[test]
+    fn mainline_cliquet_is_spot_homogeneous() {
+        // period returns are scale-invariant path by path, so the price
+        // is exactly independent of the spot level (same seed and paths)
+        let at_100 = builder_cliquet().build().unwrap().npv();
+        let at_250 = builder_cliquet().spot(250.0).build().unwrap().npv();
+        assert!(
+            (at_100 - at_250).abs() < 1e-9,
+            "spot 100: {at_100}, spot 250: {at_250}"
+        );
+    }
+
+    #[test]
+    fn mainline_reverse_cliquet_matches_the_closed_form() {
+        let mut standalone = standalone_like_builder();
+        standalone.style = CliquetStyle::Reverse { coupon: 0.15 };
+        standalone.local_cap = None;
+        let analytic = standalone.analytic_npv().unwrap();
+        let mc = builder_cliquet()
+            .cliquet(4, 0.0, 100.0)
+            .cliquet_style(CliquetStyle::Reverse { coupon: 0.15 })
+            .build()
+            .expect("reverse cliquet must build")
+            .npv();
+        assert!(
+            (mc - analytic).abs() < 0.05,
+            "mainline MC {mc} vs closed form {analytic}"
+        );
+    }
+
+    #[test]
+    fn mainline_global_cap_binds() {
+        let uncapped = builder_cliquet().build().unwrap().npv();
+        let capped = builder_cliquet()
+            .cliquet_global_cap(0.05)
+            .build()
+            .unwrap()
+            .npv();
+        assert!(
+            capped < uncapped,
+            "global cap must reduce value: capped {capped} vs {uncapped}"
+        );
+        // capped by the discounted global maximum
+        assert!(capped <= 100.0 * 0.05 * (-0.03_f64).exp() + 1e-9);
+    }
+
+    #[test]
+    fn mainline_heston_route_degenerates_to_gbm() {
+        // v0 = theta = 0.2^2 with vanishing vol-of-vol: the Heston route
+        // (through the shared SV payoff router) must land on the GBM
+        // route's value up to sampler differences
+        let gbm = builder_cliquet().build().unwrap().npv();
+        let heston = builder_cliquet()
+            .heston(crate::equity::heston::HestonParams {
+                v0: 0.04,
+                kappa: 2.0,
+                theta: 0.04,
+                vol_of_vol: 1e-4,
+                rho: 0.0,
+            })
+            .build()
+            .expect("heston cliquet must build")
+            .npv();
+        assert!(
+            (heston - gbm).abs() < 0.05 * gbm.abs().max(1.0),
+            "heston {heston} vs gbm {gbm}"
+        );
+    }
+
+    #[test]
+    fn mainline_cliquet_engine_and_input_validation() {
+        use crate::core::errors::RustyQLibError;
+        use crate::equity::utils::Engine;
+        // the analytic engine refuses the payoff at build()
+        let result = builder_cliquet().engine(Engine::BlackScholes).build();
+        assert!(
+            matches!(result, Err(RustyQLibError::UnsupportedEngine(_))),
+            "cliquet on the analytic engine must be refused at build()"
+        );
+        // a local cap at or below the floor is rejected with the field
+        match builder_cliquet().cliquet_local_cap(-0.01).build() {
+            Err(RustyQLibError::InvalidInput { field, .. }) => assert_eq!(field, "local_cap"),
+            other => panic!("expected local_cap error, got {:?}", other.map(|_| "an option")),
+        }
+        // modifiers without .cliquet(...) report the misuse
+        match crate::equity::builder::EquityOptionBuilder::new()
+            .spot(100.0)
+            .flat_vol(0.2)
+            .flat_rate(0.03)
+            .years_to_maturity(1.0)
+            .vanilla(PutOrCall::Call)
+            .cliquet_global_cap(0.1)
+            .build()
+        {
+            Err(RustyQLibError::InvalidInput { field, .. }) => {
+                assert_eq!(field, "cliquet_global_cap")
+            }
+            other => panic!("expected setter error, got {:?}", other.map(|_| "an option")),
+        }
+    }
 }
+

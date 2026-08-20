@@ -397,11 +397,13 @@ impl EquityOption {
             if matches!(self.engine, PricingEngine::BlackScholes)
                 && matches!(
                     self.payoff.payoff_kind(),
-                    PayoffType::Autocallable | PayoffType::Accumulator
+                    PayoffType::Autocallable | PayoffType::Accumulator | PayoffType::Cliquet
                 )
             {
                 return unsupported(
-                    "Autocallables and accumulators price on the MonteCarlo engine only",
+                    "Autocallables, accumulators and cliquets price on the MonteCarlo \
+                     engine only (the standalone Cliquet product carries the flat-market \
+                     closed form)",
                 );
             }
             if matches!(self.engine, PricingEngine::MonteCarlo(_)) {
