@@ -4,8 +4,10 @@
 //! - Every input form is canonicalized at construction into per-expiry
 //!   smiles on a strike-like coordinate, so pricing has one query path:
 //!   [`VolSurface::vol`]`(strike, forward, t)`.
-//! - **Time interpolation is linear in total variance** (`w = sigma^2 * t`)
-//!   at a fixed smile coordinate — the industry-standard baseline.
+//! - **Time interpolation is in total variance** (`w = sigma^2 * t`) at a
+//!   fixed smile coordinate: linear by default (the industry-standard
+//!   baseline), or monotone cubic (PCHIP) via
+//!   [`VolSurface::with_time_interpolation`] for a C^1 forward variance.
 //! - Strike interpolation is linear in vol on the smile coordinate, with
 //!   flat wing extrapolation; flat vol extrapolation before the first and
 //!   after the last expiry.
@@ -202,6 +204,26 @@ impl From<SmileCoord> for SmileCoordinate {
     }
 }
 
+/// Time-dimension interpolation of total variance between expiry pillars
+/// at a fixed smile coordinate. A runtime pricing choice
+/// ([`VolSurface::with_time_interpolation`]), not part of the saved
+/// document — a rebuilt surface starts at the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeInterpolation {
+    /// Piecewise-linear `w(t)`: exact at pillars, but the forward
+    /// variance `dw/dt` is piecewise constant — Dupire local vol gets a
+    /// staircase in time, one step per pillar.
+    #[default]
+    Linear,
+    /// Monotone cubic Hermite (Fritsch-Carlson / PCHIP) on `w(t)`
+    /// through a virtual `w(0) = 0` anchor: C^1, so `dw/dt` is
+    /// continuous through the pillars, and the slope limiter cannot
+    /// create a calendar violation between monotone pillars (an
+    /// unconstrained cubic spline can — that is why it is not offered).
+    Pchip,
+}
+
 /// A shift applied to a whole surface by [`VolSurface::bumped`]. The
 /// surface owns the semantics: shifts move every quoted vol, preserving
 /// the smile shape and the surface's coordinate system.
@@ -294,6 +316,7 @@ pub struct VolSurface {
     reference_date: NaiveDate,
     day_count: DayCountConvention,
     data: SurfaceData,
+    time_interp: TimeInterpolation,
 }
 
 /// A saved volatility surface: a [`VolInput`] payload plus the anchor
@@ -332,6 +355,7 @@ impl VolSurface {
             reference_date,
             day_count,
             data: SurfaceData::Flat(vol),
+            time_interp: TimeInterpolation::default(),
         })
     }
 
@@ -412,6 +436,7 @@ impl VolSurface {
                 smiles,
                 coord: SmileCoord::LogMoneyness,
             },
+            time_interp: TimeInterpolation::default(),
         })
     }
 
@@ -477,6 +502,7 @@ impl VolSurface {
                 smiles,
                 coord: coordinate.into(),
             },
+            time_interp: TimeInterpolation::default(),
         })
     }
 
@@ -653,9 +679,10 @@ impl VolSurface {
     /// Black volatility for an option with the given absolute `strike`,
     /// `forward` price of the underlying at expiry, and year fraction `t`.
     ///
-    /// Strike dimension: linear in vol, flat wings. Time dimension: linear
-    /// in total variance at the fixed smile coordinate, flat vol before the
-    /// first and after the last expiry pillar.
+    /// Strike dimension: linear in vol, flat wings. Time dimension: total
+    /// variance at the fixed smile coordinate per
+    /// [`Self::time_interpolation`], flat vol before the first and after
+    /// the last expiry pillar.
     pub fn vol(&self, strike: f64, forward: f64, t: f64) -> f64 {
         match &self.data {
             SurfaceData::Flat(v) => *v,
@@ -679,12 +706,54 @@ impl VolSurface {
                 let idx = times.partition_point(|&ti| ti < t);
                 let (t0, t1) = (times[idx - 1], times[idx]);
                 let (v0, v1) = (smiles[idx - 1].vol(x), smiles[idx].vol(x));
-                // linear total variance in time at fixed coordinate
+                // total variance in time at fixed coordinate
                 let (w0, w1) = (v0 * v0 * t0, v1 * v1 * t1);
-                let w = w0 + (w1 - w0) * (t - t0) / (t1 - t0);
+                let h = t1 - t0;
+                let w = match self.time_interp {
+                    TimeInterpolation::Linear => w0 + (w1 - w0) * (t - t0) / h,
+                    TimeInterpolation::Pchip => {
+                        use crate::core::interpolation::pchip;
+                        // secants of the segments around [t0, t1]. Flat vol
+                        // below the first pillar is exactly the chord from a
+                        // virtual (0, 0) anchor, which supplies the left
+                        // secant for the first interval.
+                        let s_mid = (w1 - w0) / h;
+                        let (h_prev, s_prev) = if idx >= 2 {
+                            let tp = times[idx - 2];
+                            let vp = smiles[idx - 2].vol(x);
+                            (t0 - tp, (w0 - vp * vp * tp) / (t0 - tp))
+                        } else {
+                            (t0, w0 / t0)
+                        };
+                        let d0 = pchip::interior_slope(h_prev, s_prev, h, s_mid);
+                        let d1 = if idx + 1 < n {
+                            let tn = times[idx + 1];
+                            let vn = smiles[idx + 1].vol(x);
+                            let s_next = (vn * vn * tn - w1) / (tn - t1);
+                            pchip::interior_slope(h, s_mid, tn - t1, s_next)
+                        } else {
+                            pchip::end_slope(h, h_prev, s_mid, s_prev)
+                        };
+                        pchip::hermite(t, t0, t1, w0, w1, d0, d1)
+                    }
+                };
                 (w / t).sqrt()
             }
         }
+    }
+
+    /// This surface with the given time-dimension interpolation (see
+    /// [`TimeInterpolation`]). A runtime pricing choice: it is not part
+    /// of the saved document, so a surface rebuilt from one starts at
+    /// the default (linear).
+    pub fn with_time_interpolation(mut self, interp: TimeInterpolation) -> Self {
+        self.time_interp = interp;
+        self
+    }
+
+    /// The time-dimension interpolation queries use.
+    pub fn time_interpolation(&self) -> TimeInterpolation {
+        self.time_interp
     }
 
     /// This surface with `shift` applied to every quoted vol — the smile
@@ -761,6 +830,7 @@ impl VolSurface {
                 smiles,
                 coord,
             },
+            time_interp: TimeInterpolation::default(),
         })
     }
 
@@ -940,6 +1010,85 @@ mod tests {
         let s = strike_grid();
         assert!((s.vol(100.0, 100.0, 0.25) - 0.20).abs() < 1e-14); // before first
         assert!((s.vol(100.0, 100.0, 5.0) - 0.25).abs() < 1e-14); // after last
+    }
+
+    /// Flat vols make `w(t)` collinear with the virtual `(0, 0)` anchor,
+    /// and PCHIP reproduces collinear data exactly — so the two modes
+    /// must agree to machine precision.
+    #[test]
+    fn pchip_equals_linear_on_flat_vols() {
+        let flat = VolSurface::from_strike_grid(
+            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0), Tenor::YearFraction(2.0)],
+            &[90.0, 100.0, 110.0],
+            &[vec![0.2; 3], vec![0.2; 3], vec![0.2; 3]],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap()
+        .with_time_interpolation(TimeInterpolation::Pchip);
+        for t in [0.6, 0.75, 1.0, 1.3, 1.9] {
+            assert!((flat.vol(100.0, 100.0, t) - 0.2).abs() < 1e-14, "t={t}");
+        }
+    }
+
+    #[test]
+    fn pchip_is_exact_at_pillars() {
+        let s = strike_grid().with_time_interpolation(TimeInterpolation::Pchip);
+        assert!((s.vol(100.0, 100.0, 1.0) - 0.20).abs() < 1e-14);
+        assert!((s.vol(100.0, 100.0, 2.0) - 0.25).abs() < 1e-14);
+    }
+
+    /// The reason PCHIP exists here: `dw/dt` must be continuous through
+    /// an interior pillar, where linear total variance jumps.
+    #[test]
+    fn pchip_forward_variance_is_continuous_at_pillars() {
+        let surface = |interp: TimeInterpolation| {
+            VolSurface::from_strike_grid(
+                &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0), Tenor::YearFraction(1.5)],
+                &[100.0],
+                &[vec![0.20], vec![0.25], vec![0.26]],
+                asof(),
+                DayCountConvention::Act365,
+            )
+            .unwrap()
+            .with_time_interpolation(interp)
+        };
+        let w = |s: &VolSurface, t: f64| s.vol(100.0, 100.0, t).powi(2) * t;
+        let jump = |s: &VolSurface| {
+            let eps = 1e-5;
+            let left = (w(s, 1.0) - w(s, 1.0 - eps)) / eps;
+            let right = (w(s, 1.0 + eps) - w(s, 1.0)) / eps;
+            (right - left).abs()
+        };
+        let linear = surface(TimeInterpolation::Linear);
+        let pchip = surface(TimeInterpolation::Pchip);
+        // linear: forward variance steps from 0.085 to ~0.0778 at t=1
+        assert!(jump(&linear) > 5e-3, "linear jump {}", jump(&linear));
+        assert!(jump(&pchip) < 1e-3, "pchip jump {}", jump(&pchip));
+    }
+
+    /// Steep-then-flat total variance: an unconstrained cubic spline
+    /// would overshoot and manufacture a calendar violation; PCHIP's
+    /// limiter must keep `w(t)` non-decreasing between monotone pillars.
+    #[test]
+    fn pchip_preserves_monotone_total_variance() {
+        let s = VolSurface::from_strike_grid(
+            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0), Tenor::YearFraction(1.1)],
+            &[100.0],
+            // w = 0.02, 0.0625, 0.0630 — slope 0.085 then 0.005
+            &[vec![0.2], vec![0.25], vec![(0.0630_f64 / 1.1).sqrt()]],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap()
+        .with_time_interpolation(TimeInterpolation::Pchip);
+        let mut prev = 0.0;
+        for i in 0..=200 {
+            let t = 0.5 + 0.6 * i as f64 / 200.0;
+            let w = s.vol(100.0, 100.0, t).powi(2) * t;
+            assert!(w >= prev - 1e-12, "w decreasing at t={t}: {w} < {prev}");
+            prev = w;
+        }
     }
 
     #[test]

@@ -37,14 +37,8 @@ impl Pchip {
             d[0] = delta[0];
             d[1] = delta[0];
         } else {
-            // interior: weighted harmonic mean when the secants agree in
-            // sign, zero otherwise (this is what preserves monotonicity)
             for i in 1..n - 1 {
-                if delta[i - 1] * delta[i] > 0.0 {
-                    let w1 = 2.0 * h[i] + h[i - 1];
-                    let w2 = h[i] + 2.0 * h[i - 1];
-                    d[i] = (w1 + w2) / (w1 / delta[i - 1] + w2 / delta[i]);
-                }
+                d[i] = interior_slope(h[i - 1], delta[i - 1], h[i], delta[i]);
             }
             d[0] = end_slope(h[0], h[1], delta[0], delta[1]);
             d[n - 1] = end_slope(h[n - 2], h[n - 3], delta[n - 2], delta[n - 3]);
@@ -78,8 +72,22 @@ impl Pchip {
     }
 }
 
-/// Three-point end slope with the Fritsch-Carlson clips.
-fn end_slope(h0: f64, h1: f64, delta0: f64, delta1: f64) -> f64 {
+/// Interior knot slope between segments `(h0, delta0)` and `(h1, delta1)`:
+/// the Brodlie weighted harmonic mean when the secants agree in sign,
+/// zero otherwise (this is what preserves monotonicity).
+pub(crate) fn interior_slope(h0: f64, delta0: f64, h1: f64, delta1: f64) -> f64 {
+    if delta0 * delta1 <= 0.0 {
+        return 0.0;
+    }
+    let w1 = 2.0 * h1 + h0;
+    let w2 = h1 + 2.0 * h0;
+    (w1 + w2) / (w1 / delta0 + w2 / delta1)
+}
+
+/// Three-point end slope with the Fritsch-Carlson clips. `h0`/`delta0`
+/// describe the segment adjacent to the endpoint, `h1`/`delta1` the next
+/// one in.
+pub(crate) fn end_slope(h0: f64, h1: f64, delta0: f64, delta1: f64) -> f64 {
     let d = ((2.0 * h0 + h1) * delta0 - h0 * delta1) / (h0 + h1);
     if d * delta0 <= 0.0 {
         0.0

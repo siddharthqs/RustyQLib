@@ -375,6 +375,43 @@ mod tests {
     }
 
     #[test]
+    fn pchip_surface_removes_the_local_vol_staircase() {
+        // linear-in-w time interpolation makes dw/dt piecewise constant,
+        // so local vol jumps at the middle pillar; PCHIP is C^1 there
+        let surface = |interp: crate::core::vols::TimeInterpolation| {
+            VolSurface::from_strike_smiles(
+                &[
+                    Tenor::YearFraction(0.5),
+                    Tenor::YearFraction(1.0),
+                    Tenor::YearFraction(1.5),
+                ],
+                &[
+                    vec![(100.0, 0.20)],
+                    vec![(100.0, 0.25)],
+                    vec![(100.0, 0.26)],
+                ],
+                asof(),
+                DayCountConvention::Act365,
+            )
+            .unwrap()
+            .with_time_interpolation(interp)
+        };
+        let curve = flat_curve();
+        // window just wide enough to clear the TIME_BUMP central
+        // difference on each side of the pillar: linear's discontinuity
+        // survives any window, a continuous transition shrinks with it
+        let jump = |s: &VolSurface| {
+            let lv = LocalVol::new(s, &curve, 100.0, 0.0, 0.0);
+            (lv.vol(100.0, 1.005) - lv.vol(100.0, 0.995)).abs()
+        };
+        let linear = surface(crate::core::vols::TimeInterpolation::Linear);
+        let pchip = surface(crate::core::vols::TimeInterpolation::Pchip);
+        // linear: sqrt(0.085) -> sqrt(~0.0778), a ~1.3 vol point step
+        assert!(jump(&linear) > 5e-3, "linear jump {}", jump(&linear));
+        assert!(jump(&pchip) < jump(&linear) / 3.0, "pchip jump {}", jump(&pchip));
+    }
+
+    #[test]
     fn default_grid_matches_lazy_on_flat_surface() {
         let surface = VolSurface::flat(0.25, asof(), DayCountConvention::Act365).unwrap();
         let curve = flat_curve();
