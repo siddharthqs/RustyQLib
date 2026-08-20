@@ -11,6 +11,7 @@ use crate::equity::handle_equity_contracts::handle_equity_contract;
 use crate::equity::local_vol::{LocalVol, LocalVolGrid};
 use crate::equity::option_chain::{implied_vol_surface_from_chain, FilterConfig, OptionChain};
 use crate::equity::portfolio::EquityPortfolio;
+use crate::equity::essvi::EssviSurfaceFit;
 use crate::equity::sabr::SabrSurfaceFit;
 use crate::equity::svi::{SsviSurfaceFit, SviSurfaceFit};
 use crate::equity::usability::{usability_report, MartingaleSpec, UsabilityConfig};
@@ -556,6 +557,62 @@ fn build_chain_surface(
             )?;
         }
         Err(e) => log::warn!("SSVI fit skipped: {e}"),
+    }
+
+    // sixth flavor: eSSVI — SSVI's slice shape with (psi, rho) freed per
+    // expiry, so the skew term structure can twist; calendar structure is
+    // built in during the sequential fit rather than repaired afterwards
+    match EssviSurfaceFit::fit(&cleaned, forward_of) {
+        Ok(fit) => {
+            let sampled = fit.to_vol_surface(61).map_err(RustyQLibError::from)?;
+            let poorly_fit = fit.slices.iter().filter(|s| s.rmse > 0.005).count();
+            let arbitrage_slices = fit.slices.iter().filter(|s| s.min_g < 0.0).count();
+            if poorly_fit + arbitrage_slices > 0 || fit.validate().is_err() {
+                log::warn!(
+                    "eSSVI fit: {poorly_fit} slices with vol RMSE above 50 bps, \
+                     {arbitrage_slices} with negative butterfly g, max calendar \
+                     crossing {:.2e} — see the fit metadata",
+                    fit.max_calendar_crossing
+                );
+            }
+            let mut essvi_meta = report.to_metadata(chain);
+            essvi_meta["discount"] = discount_meta.clone();
+            essvi_meta["essvi_fit"] = fit.metadata();
+            essvi_meta["diagnostics"] = sampled.diagnostics(forward_of).to_metadata();
+            write_surface_artifacts(
+                &sampled,
+                essvi_meta,
+                output_folder,
+                "vol_surface_essvi",
+                &format!(
+                    "{} implied vol (eSSVI fit) \u{2014} {}",
+                    chain.symbol, chain.as_of
+                ),
+                "eSSVI volatility surface",
+            )?;
+            write_local_vol_artifacts(
+                &sampled,
+                &|level, t| fit.local_vol_checked(level, t),
+                spot,
+                &curve,
+                &discount_meta,
+                chain,
+                &forward_points,
+                output_folder,
+                &LocalVolSpec {
+                    stem: "local_vol_essvi",
+                    title: &format!(
+                        "{} Dupire local vol (eSSVI fit) \u{2014} {}",
+                        chain.symbol, chain.as_of
+                    ),
+                    model: "Dupire local volatility (analytic on the per-expiry eSSVI fit)",
+                    derived_from: "the eSSVI fit of the arbitrage-repaired surface",
+                    note: "clamped to [1%, 300%]; closed-form derivatives in strike, and in \
+                           time through the parameter paths (theta, psi, rho)",
+                },
+            )?;
+        }
+        Err(e) => log::warn!("eSSVI fit skipped: {e}"),
     }
     Ok(())
 }

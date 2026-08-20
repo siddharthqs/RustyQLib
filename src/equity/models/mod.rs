@@ -2,6 +2,7 @@
 //! path-simulation processes, and implied-vol parameterizations.
 
 pub mod bates;
+pub mod essvi;
 pub mod heston;
 pub mod local_vol;
 pub mod processes;
