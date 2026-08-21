@@ -29,7 +29,7 @@ use crate::core::interpolation::interp_pairs;
 use crate::core::montecarlo::path_rng;
 use crate::core::trade::PutOrCall;
 use crate::equity::heston::HestonParams;
-use crate::equity::local_vol::LocalVol;
+use crate::equity::local_vol::{LocalVol, LocalVolGrid};
 use crate::equity::processes::qe_variance_step;
 use rand::Rng;
 use rand_distr::StandardNormal;
@@ -116,13 +116,13 @@ pub struct ConditionalVariance {
 impl ConditionalVariance {
     /// `E[v_t | S_t = s]`: linear in spot with flat wings, from the
     /// slice nearest below `t` (piecewise-constant in time, matching
-    /// how the calibration used it).
+    /// how the calibration used it). Binary search on the sorted times
+    /// — this runs once per path per step in the pricing loop.
     pub fn value(&self, s: f64, t: f64) -> f64 {
         let idx = self
             .times
-            .iter()
-            .rposition(|&ti| ti <= t + 1e-12)
-            .unwrap_or(0);
+            .partition_point(|&ti| ti <= t + 1e-12)
+            .saturating_sub(1);
         let slice = &self.slices[idx];
         if slice.len() == 1 {
             return slice[0].1;
@@ -131,21 +131,26 @@ impl ConditionalVariance {
     }
 }
 
-/// A calibrated SLV model (borrows the Dupire local vol it was built on).
-pub struct Slv<'a> {
+/// A calibrated SLV model. Owns the Dupire surface **sampled onto a
+/// grid** at calibration ([`LocalVol::to_grid`]): the pricing and
+/// calibration loops query millions of `(spot, t)` points, and each
+/// lazy [`LocalVol`] evaluation costs five surface interpolations plus
+/// three curve reads where the grid costs one bilinear lookup.
+pub struct Slv {
     pub heston: HestonParams,
     pub cond_var: ConditionalVariance,
-    local_vol: &'a LocalVol<'a>,
+    grid: LocalVolGrid,
     s0: f64,
     r: f64,
     q: f64,
     dt: f64,
 }
 
-impl<'a> Slv<'a> {
-    /// Leverage `L(s, t) = sigma_LV(s, t) / sqrt(E[v_t | S_t = s])`.
+impl Slv {
+    /// Leverage `L(s, t) = sigma_LV(s, t) / sqrt(E[v_t | S_t = s])`,
+    /// with `sigma_LV` read from the calibration-time grid.
     pub fn leverage(&self, s: f64, t: f64) -> f64 {
-        self.local_vol.vol(s, t) / self.cond_var.value(s, t).max(1e-8).sqrt()
+        self.grid.vol(s, t) / self.cond_var.value(s, t).max(1e-8).sqrt()
     }
 
     /// Price a European vanilla by simulating the calibrated dynamics
@@ -185,17 +190,20 @@ impl<'a> Slv<'a> {
 /// Calibrate the leverage function to `local_vol` out to `horizon`
 /// years: forward simulation with per-step binning of `E[v | S]`.
 /// Deterministic for a given config.
-pub fn calibrate<'a>(
-    local_vol: &'a LocalVol<'a>,
+pub fn calibrate(
+    local_vol: &LocalVol<'_>,
     heston: &HestonParams,
     s0: f64,
     r: f64,
     q: f64,
     horizon: f64,
     cfg: &SlvConfig,
-) -> Slv<'a> {
+) -> Slv {
     heston.validate().expect("invalid Heston parameters");
     assert!(horizon > 0.0 && cfg.steps > 0 && cfg.bins >= 2 && cfg.paths >= cfg.bins * 10);
+    // one grid sampling up front replaces paths x steps lazy Dupire
+    // evaluations in the loop below (and every pricing call after)
+    let grid = local_vol.to_grid(horizon);
     let dt = horizon / cfg.steps as f64;
     let n = cfg.paths;
     let stepper = SlvStepper::new(heston, r, q, dt);
@@ -240,7 +248,7 @@ pub fn calibrate<'a>(
             let mut rng = path_rng(cfg.seed.wrapping_add(0x51_1e * k as u64 + 1), i as u64);
             let z1: f64 = rng.sample(StandardNormal);
             let z2: f64 = rng.sample(StandardNormal);
-            let lev = local_vol.vol(spots[i], t) / cond(spots[i]).max(1e-8).sqrt();
+            let lev = grid.vol(spots[i], t) / cond(spots[i]).max(1e-8).sqrt();
             (spots[i], vars[i]) = stepper.step(lev, spots[i], vars[i], z1, z2);
         }
     }
@@ -248,7 +256,7 @@ pub fn calibrate<'a>(
     Slv {
         heston: *heston,
         cond_var: ConditionalVariance { times, slices },
-        local_vol,
+        grid,
         s0,
         r,
         q,

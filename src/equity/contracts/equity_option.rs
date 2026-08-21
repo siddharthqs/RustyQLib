@@ -92,6 +92,42 @@ pub struct EquityOption {
     /// The dynamics of the underlying (GBM, local vol, or Heston with
     /// its parameters); consulted by the MC, FD and analytic engines.
     pub model: Model,
+    /// Memoized Dupire grids for the local-vol model (see
+    /// [`LocalVolGridCache`]); harmless empty state for every other
+    /// model. Construct with `Default::default()`.
+    pub lv_grids: LocalVolGridCache,
+}
+
+/// Memoized Dupire grids for the local-vol Monte Carlo route, keyed by
+/// the full set of inputs the grid depends on (surface and curve
+/// identity, calibration spot, carry, vol shift, horizon): a batch of
+/// Greek reprices re-samples the ~1,900-point grid only for the legs
+/// that actually moved the surface or the horizon, instead of once per
+/// reprice.
+#[derive(Debug, Default)]
+pub struct LocalVolGridCache(
+    std::sync::Mutex<
+        std::collections::HashMap<[u64; 6], Arc<crate::equity::local_vol::LocalVolGrid>>,
+    >,
+);
+
+impl Clone for LocalVolGridCache {
+    /// A cloned (typically rebound) option starts empty and re-samples
+    /// lazily — cached grids never cross market snapshots.
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl LocalVolGridCache {
+    pub(crate) fn get_or_insert_with(
+        &self,
+        key: [u64; 6],
+        build: impl FnOnce() -> crate::equity::local_vol::LocalVolGrid,
+    ) -> Arc<crate::equity::local_vol::LocalVolGrid> {
+        let mut grids = self.0.lock().expect("local-vol grid cache poisoned");
+        grids.entry(key).or_insert_with(|| Arc::new(build())).clone()
+    }
 }
 
 // manual impl: `payoff` clones through the trait object, engine and model
@@ -104,6 +140,7 @@ impl Clone for EquityOption {
             payoff: self.payoff.clone_box(),
             engine: self.engine,
             model: self.model,
+            lv_grids: Default::default(),
         }
     }
 }

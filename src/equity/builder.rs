@@ -1587,6 +1587,7 @@ impl EquityOptionBuilder {
             payoff,
             engine,
             model: self.model,
+            lv_grids: Default::default(),
         };
         // "builds => prices": refuse engine/model/payoff combinations here
         // rather than at pricing time

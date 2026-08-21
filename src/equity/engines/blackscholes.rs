@@ -10,6 +10,24 @@ use crate::equity::vanilla_option::{
 use libm::exp;
 
 pub struct BlackScholesPricer;
+
+/// One evaluation's cached market reads for the vanilla closed forms;
+/// see [`BlackScholesPricer::vanilla_inputs`].
+struct VanillaInputs {
+    s: f64,
+    k: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    t: f64,
+    sqrt_t: f64,
+    d1: f64,
+    d2: f64,
+    /// Curve discount factor to maturity.
+    df_r: f64,
+    /// Carry discount `e^{-qT}`.
+    df_q: f64,
+}
 impl Default for BlackScholesPricer {
     fn default() -> Self {
         Self::new()
@@ -305,78 +323,84 @@ impl BlackScholesPricer {
         let (f, k, r, sig, t, _pc, s) = Self::black76_inputs(o);
         crate::equity::black76::volga(f, k, r, sig, t, s)
     }
+    /// The market reads one vanilla evaluation needs, gathered **once**:
+    /// each accessor cascade — the surface lookup (with its
+    /// dividend-escrowed forward), the curve solve, the dividend PV
+    /// loop, the day count — previously re-ran for every `d1()`/`d2()`
+    /// and discount-factor reference, ~10 cascades per price where one
+    /// suffices. Formulas match the `EquityOption` accessors expression
+    /// for expression, so values are bit-identical.
+    fn vanilla_inputs(o: &EquityOption) -> VanillaInputs {
+        let t = o.time_to_maturity();
+        let sqrt_t = t.sqrt();
+        let s = o.effective_spot();
+        let k = o.base.strike_price;
+        let r = o.risk_free_rate();
+        let q = o.carry_yield();
+        let sigma = o.volatility();
+        let d1 = ((s / k).ln() + (r - q + 0.5 * sigma.powi(2)) * t) / (sigma * sqrt_t);
+        let d2 = d1 - sigma * sqrt_t;
+        VanillaInputs {
+            s,
+            k,
+            r,
+            q,
+            sigma,
+            t,
+            sqrt_t,
+            d1,
+            d2,
+            df_r: o.maturity_discount_factor(),
+            df_q: exp(-q * t),
+        }
+    }
     fn npv_vanilla(&self, bsd_option: &EquityOption) -> f64 {
-        let n_d1 = norm_cdf(bsd_option.d1());
-        let n_d2 = norm_cdf(bsd_option.d2());
-        let df_d = exp(-bsd_option.carry_yield() * bsd_option.time_to_maturity());
-        let df_r = bsd_option.maturity_discount_factor();
+        let i = Self::vanilla_inputs(bsd_option);
         match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => {
-                bsd_option.effective_spot() * n_d1 * df_d
-                    - bsd_option.base.strike_price * n_d2 * df_r
-            }
-            PutOrCall::Put => {
-                bsd_option.base.strike_price * norm_cdf(-bsd_option.d2()) * df_r
-                    - bsd_option.effective_spot() * norm_cdf(-bsd_option.d1()) * df_d
-            }
+            PutOrCall::Call => i.s * norm_cdf(i.d1) * i.df_q - i.k * norm_cdf(i.d2) * i.df_r,
+            PutOrCall::Put => i.k * norm_cdf(-i.d2) * i.df_r - i.s * norm_cdf(-i.d1) * i.df_q,
         }
     }
     fn delta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // spot delta: e^{-qT} N(d1) for a call, e^{-qT}(N(d1)-1) for a put
-        let n_d1 = norm_cdf(bsd_option.d1());
-        let df_d = exp(-bsd_option.carry_yield() * bsd_option.time_to_maturity());
-
+        let i = Self::vanilla_inputs(bsd_option);
         match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => n_d1 * df_d,
-            PutOrCall::Put => (n_d1 - 1.0) * df_d,
+            PutOrCall::Call => norm_cdf(i.d1) * i.df_q,
+            PutOrCall::Put => (norm_cdf(i.d1) - 1.0) * i.df_q,
         }
     }
     fn gamma_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // e^{-qT} dN(d1) / (S sigma sqrt(T))
-        let dn_d1 = norm_pdf(bsd_option.d1());
-        let df_d = exp(-bsd_option.carry_yield() * bsd_option.time_to_maturity());
-        let var_sqrt = bsd_option.volatility() * (bsd_option.time_to_maturity().sqrt());
-        dn_d1 * df_d / (bsd_option.effective_spot() * var_sqrt)
+        let i = Self::vanilla_inputs(bsd_option);
+        norm_pdf(i.d1) * i.df_q / (i.s * (i.sigma * i.sqrt_t))
     }
     fn vega_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // S e^{-qT} dN(d1) sqrt(T)
-        let dn_d1 = norm_pdf(bsd_option.d1());
-        let df_d = exp(-bsd_option.carry_yield() * bsd_option.time_to_maturity());
-        let df_s = bsd_option.effective_spot() * df_d;
-
-        df_s * dn_d1 * bsd_option.time_to_maturity().sqrt()
+        let i = Self::vanilla_inputs(bsd_option);
+        (i.s * i.df_q) * norm_pdf(i.d1) * i.sqrt_t
     }
     fn theta_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // call: -S e^{-qT} dN(d1) sigma/(2 sqrt(T)) + q S e^{-qT} N(d1) - r K e^{-rT} N(d2)
         // put:  -S e^{-qT} dN(d1) sigma/(2 sqrt(T)) - q S e^{-qT} N(-d1) + r K e^{-rT} N(-d2)
-        let q = bsd_option.carry_yield();
-        let r = bsd_option.risk_free_rate();
-        let k = bsd_option.base.strike_price;
-        let dn_d1 = norm_pdf(bsd_option.d1());
-        let n_d1 = norm_cdf(bsd_option.d1());
-        let n_d2 = norm_cdf(bsd_option.d2());
-        let df_d = exp(-q * bsd_option.time_to_maturity());
-        let df_r = bsd_option.maturity_discount_factor();
-        let df_s = bsd_option.effective_spot() * df_d;
-        let t1 =
-            -df_s * dn_d1 * bsd_option.volatility() / (2.0 * bsd_option.time_to_maturity().sqrt());
-
+        let i = Self::vanilla_inputs(bsd_option);
+        let df_s = i.s * i.df_q;
+        let t1 = -df_s * norm_pdf(i.d1) * i.sigma / (2.0 * i.sqrt_t);
         match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => t1 + q * df_s * n_d1 - r * k * df_r * n_d2,
+            PutOrCall::Call => {
+                t1 + i.q * df_s * norm_cdf(i.d1) - i.r * i.k * i.df_r * norm_cdf(i.d2)
+            }
             PutOrCall::Put => {
-                t1 - q * df_s * norm_cdf(-bsd_option.d1())
-                    + r * k * df_r * norm_cdf(-bsd_option.d2())
+                t1 - i.q * df_s * norm_cdf(-i.d1) + i.r * i.k * i.df_r * norm_cdf(-i.d2)
             }
         }
     }
     fn rho_vanilla(&self, bsd_option: &EquityOption) -> f64 {
         // call: K T e^{-rT} N(d2); put: -K T e^{-rT} N(-d2)
-        let n_d2 = norm_cdf(bsd_option.d2());
-        let df_r = bsd_option.maturity_discount_factor();
-        let r1 = bsd_option.time_to_maturity() * bsd_option.base.strike_price;
+        let i = Self::vanilla_inputs(bsd_option);
+        let r1 = i.t * i.k;
         match bsd_option.payoff.put_or_call() {
-            PutOrCall::Call => r1 * n_d2 * df_r,
-            PutOrCall::Put => -r1 * norm_cdf(-bsd_option.d2()) * df_r,
+            PutOrCall::Call => r1 * norm_cdf(i.d2) * i.df_r,
+            PutOrCall::Put => -r1 * norm_cdf(-i.d2) * i.df_r,
         }
     }
 

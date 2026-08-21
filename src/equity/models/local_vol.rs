@@ -174,8 +174,9 @@ impl<'a> LocalVol<'a> {
 /// discontinuous against its neighbours (a repair only a grid can do:
 /// the lazy function evaluates each point in isolation). Queries beyond
 /// an axis clamp to its edge, matching the implied surface's flat
-/// wings. The lazy [`LocalVol`] remains the right form for diagnostics,
-/// artifacts and SLV leverage calibration.
+/// wings. The lazy [`LocalVol`] remains the right form for diagnostics
+/// and artifacts.
+#[derive(Debug, Clone)]
 pub struct LocalVolGrid {
     levels: Vec<f64>,
     times: Vec<f64>,

@@ -280,17 +280,42 @@ pub fn volga(option: &EquityOption) -> f64 {
 /// and zomma together, two rate bumps yield rho, and two spot-bumped
 /// passes yield charm — seven passes in total.
 pub fn pricing_result(option: &EquityOption) -> PricingResult {
-    let base = solution(option);
     let hv = VOL_BUMP;
-    let vol_up = solution_bumped(option, Bump::vol(hv));
-    let vol_down = solution_bumped(option, Bump::vol(-hv));
     let hr = RATE_BUMP;
-    let rho =
-        (npv_bumped(option, Bump::rate(hr)) - npv_bumped(option, Bump::rate(-hr))) / (2.0 * hr);
     let hs = option.market.spot.value() * 1e-3;
-    let charm = (solution_bumped(option, Bump::spot(hs)).theta
-        - solution_bumped(option, Bump::spot(-hs)).theta)
-        / (2.0 * hs);
+    // the seven tree passes are independent: run them on the rayon pool
+    // (values are the same passes as the sequential code, bit for bit)
+    let ((base, (vol_up, vol_down)), ((rate_up, rate_down), (spot_up, spot_down))) = rayon::join(
+        || {
+            rayon::join(
+                || solution(option),
+                || {
+                    rayon::join(
+                        || solution_bumped(option, Bump::vol(hv)),
+                        || solution_bumped(option, Bump::vol(-hv)),
+                    )
+                },
+            )
+        },
+        || {
+            rayon::join(
+                || {
+                    rayon::join(
+                        || npv_bumped(option, Bump::rate(hr)),
+                        || npv_bumped(option, Bump::rate(-hr)),
+                    )
+                },
+                || {
+                    rayon::join(
+                        || solution_bumped(option, Bump::spot(hs)),
+                        || solution_bumped(option, Bump::spot(-hs)),
+                    )
+                },
+            )
+        },
+    );
+    let rho = (rate_up - rate_down) / (2.0 * hr);
+    let charm = (spot_up.theta - spot_down.theta) / (2.0 * hs);
     let gamma_p = option.market.spot.value() * base.gamma / 100.0;
     PricingResult {
         pv: base.price,

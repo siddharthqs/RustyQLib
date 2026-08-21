@@ -53,6 +53,7 @@ fn test_option_with(payoff: Box<dyn Payoff>, curve: YieldCurve) -> EquityOption 
         payoff,
         engine: crate::equity::utils::PricingEngine::BlackScholes,
         model: crate::equity::utils::Model::Gbm,
+        lv_grids: Default::default(),
     }
 }
 

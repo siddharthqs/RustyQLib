@@ -186,18 +186,42 @@ pub fn solution(option: &EquityOption) -> FdSolution {
 /// exactly the same solves and arithmetic as its accessor above.
 pub fn pricing_result(option: &EquityOption) -> crate::core::results::PricingResult {
     use crate::core::results::{Greeks, PricingResult};
-    let base = solution(option);
     let hv = VOL_BUMP;
-    let vol_up = solve_dispatch(option, hv, 0.0, 0.0);
-    let vol_down = solve_dispatch(option, -hv, 0.0, 0.0);
     let hr = RATE_BUMP;
-    let rho = (solve_dispatch(option, 0.0, hr, 0.0).npv
-        - solve_dispatch(option, 0.0, -hr, 0.0).npv)
-        / (2.0 * hr);
     let hs = option.market.spot.value() * SPOT_REL_BUMP;
-    let charm = (solve_dispatch(option, 0.0, 0.0, hs).theta
-        - solve_dispatch(option, 0.0, 0.0, -hs).theta)
-        / (2.0 * hs);
+    // the nine grid solves are independent: run them on the rayon pool
+    // (values are the same solves as the sequential code, bit for bit)
+    let ((base, (vol_up, vol_down)), ((rate_up, rate_down), (spot_up, spot_down))) = rayon::join(
+        || {
+            rayon::join(
+                || solution(option),
+                || {
+                    rayon::join(
+                        || solve_dispatch(option, hv, 0.0, 0.0),
+                        || solve_dispatch(option, -hv, 0.0, 0.0),
+                    )
+                },
+            )
+        },
+        || {
+            rayon::join(
+                || {
+                    rayon::join(
+                        || solve_dispatch(option, 0.0, hr, 0.0),
+                        || solve_dispatch(option, 0.0, -hr, 0.0),
+                    )
+                },
+                || {
+                    rayon::join(
+                        || solve_dispatch(option, 0.0, 0.0, hs),
+                        || solve_dispatch(option, 0.0, 0.0, -hs),
+                    )
+                },
+            )
+        },
+    );
+    let rho = (rate_up.npv - rate_down.npv) / (2.0 * hr);
+    let charm = (spot_up.theta - spot_down.theta) / (2.0 * hs);
     let gamma_p = option.market.spot.value() * base.gamma / 100.0;
     PricingResult {
         pv: base.npv,
