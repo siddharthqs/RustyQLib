@@ -65,11 +65,19 @@ fn price_equity_contract(data: &Contract) -> Result<ContractOutput, RustyQLibErr
             Ok(contract_output)
         }
         ProductData::RainbowOption(rb) => {
-            let option = crate::equity::rainbow::RainbowOption::try_from_json(rb)?;
-            // scalar spot Greeks are per-asset for rainbows: see deltas/vegas
-            let mut contract_output = ContractOutput::from(option.price()?);
-            contract_output.deltas = Some(option.deltas());
-            contract_output.vegas = Some(option.vegas());
+            // the Market-bound multi-asset instrument: one batched
+            // pricing_result (a single path-generation pass under Monte
+            // Carlo) replaces the former price + deltas + vegas pattern
+            // that re-simulated every Greek leg from scratch
+            let option =
+                crate::equity::multi_asset::MultiAssetEquityOption::try_from_rainbow_json(rb)?;
+            let result = option.pricing_result()?;
+            let asset_greeks = result.asset_greeks.clone();
+            let mut contract_output = ContractOutput::from(result);
+            if let Some(g) = asset_greeks {
+                contract_output.deltas = Some(g.deltas);
+                contract_output.vegas = Some(g.vegas);
+            }
             log::debug!("rainbow option pv {}", contract_output.pv);
             Ok(contract_output)
         }

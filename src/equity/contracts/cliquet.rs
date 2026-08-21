@@ -504,6 +504,7 @@ impl Instrument for Cliquet {
             pv,
             greeks: Default::default(),
             std_err,
+            asset_greeks: None,
         })
     }
 }

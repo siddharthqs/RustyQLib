@@ -30,17 +30,37 @@ pub struct Greeks {
     pub zomma: f64,
 }
 
+/// Per-underlying first-order sensitivities of a multi-asset
+/// instrument, in leg order (`symbols[i]` names slot `i`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PerAssetGreeks {
+    pub symbols: Vec<String>,
+    /// `dV/dS_i` per leg.
+    pub deltas: Vec<f64>,
+    /// `d²V/dS_i²` per leg (same-leg second differences; cross-gammas
+    /// are not reported).
+    pub gammas: Vec<f64>,
+    /// `dV/dσ_i` per leg.
+    pub vegas: Vec<f64>,
+}
+
 /// The result of a single [`price()`](crate::core::traits::Instrument::price)
 /// call: present value, sensitivities, and the Monte Carlo standard error
 /// when a simulation engine produced the value.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PricingResult {
     /// Present value.
     pub pv: f64,
-    /// Sensitivities of `pv`.
+    /// Scalar sensitivities of `pv`. For multi-asset instruments the
+    /// spot/vol slots stay zero — the per-leg values live in
+    /// [`asset_greeks`](Self::asset_greeks).
     pub greeks: Greeks,
     /// Monte Carlo standard error of `pv`; `None` for deterministic engines.
     pub std_err: Option<f64>,
+    /// Per-underlying sensitivities of multi-asset instruments; `None`
+    /// for single-asset ones (and absent from serialized output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_greeks: Option<PerAssetGreeks>,
 }
 
 impl PricingResult {
@@ -52,6 +72,7 @@ impl PricingResult {
             pv,
             greeks: Greeks::default(),
             std_err: None,
+            asset_greeks: None,
         }
     }
 }

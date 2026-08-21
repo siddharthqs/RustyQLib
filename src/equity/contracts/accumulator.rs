@@ -418,6 +418,7 @@ impl Instrument for Accumulator {
             pv,
             greeks: Default::default(),
             std_err,
+            asset_greeks: None,
         })
     }
 }

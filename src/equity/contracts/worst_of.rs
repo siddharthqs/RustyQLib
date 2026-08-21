@@ -312,6 +312,7 @@ impl Instrument for WorstOfAutocallable {
                 ..Default::default()
             },
             std_err: stats.std_err,
+            asset_greeks: None,
         })
     }
 }

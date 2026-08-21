@@ -11,14 +11,19 @@
 //! nothing prices off frozen co-asset levels — the defect of the
 //! scalar-market standalones this type replaces.
 //!
-//! Stage 1 scope: correlated-GBM Monte Carlo (the engine machinery of
-//! the standalone worst-of, ported verbatim so values are
-//! draw-identical), with the worst-of autocallable as the proving
-//! payoff. Each leg's GBM vol is its surface's ATM-forward vol at the
-//! contract maturity; per-asset smiles in the *dynamics* remain future
-//! work, as they were for the standalones. The standalone
-//! [`WorstOfAutocallable`](super::worst_of::WorstOfAutocallable) stays
-//! as the flat-market validation reference.
+//! Payoffs: the worst-of autocallable (path-simulated on the
+//! correlated-GBM machinery ported draw-for-draw from the standalone)
+//! and the five rainbow types (best-of / worst-of / spread / basket /
+//! exchange), terminal-priced on a **one-pass** Monte Carlo — every
+//! Greek bump scenario evaluated against the same correlated draws in
+//! a single path-generation pass — or on the analytic engine
+//! (Margrabe / Kirk / lognormal moment matching). Each leg's GBM vol
+//! is its surface's ATM-forward vol at the contract maturity;
+//! per-asset smiles in the *dynamics* and multi-asset stochastic-vol
+//! models remain future work. The standalone
+//! [`WorstOfAutocallable`](super::worst_of::WorstOfAutocallable) and
+//! [`RainbowOption`](super::rainbow::RainbowOption) stay as the
+//! flat-market validation references.
 
 use std::sync::Arc;
 
@@ -35,7 +40,11 @@ use crate::core::quotes::Quote;
 use crate::core::results::PricingResult;
 use crate::core::traits::Instrument;
 use crate::core::vols::VolSurface;
+use crate::core::trade::PutOrCall;
 use crate::equity::autocallable::AutocallablePayoff;
+use crate::equity::rainbow::{
+    basket_moment_match_price, kirk_price, margrabe_price, RainbowPayoff, RainbowType,
+};
 use crate::equity::montecarlo::{
     summarize, McStats, MonteCarloConfig, PathAccum, Sampler, PATH_DEPENDENT_MIN_STEPS,
 };
@@ -89,9 +98,10 @@ pub struct MultiAssetBase {
 pub struct MultiAssetEquityOption {
     pub base: MultiAssetBase,
     pub market: MultiAssetMarketData,
-    /// Stage 1: an [`AutocallablePayoff`] evaluated on the worst-of
-    /// performance path (in `initial_fixing` units); further multi-asset
-    /// payoffs plug in through the same trait object.
+    /// An [`AutocallablePayoff`] evaluated on the worst-of performance
+    /// path (in `initial_fixing` units), or a [`RainbowPayoff`]
+    /// (best-of / worst-of / spread / basket / exchange) on the
+    /// terminal levels.
     pub payoff: Box<dyn Payoff>,
     pub engine: PricingEngine,
     /// Underlying dynamics; stage 1 supports correlated GBM only.
@@ -158,18 +168,154 @@ impl MultiAssetEquityOption {
         self.with_market(market)?.try_npv()
     }
 
-    /// Stage-1 support gate: correlated GBM on the Monte Carlo engine.
+    /// Build from the `rainbow_option` JSON contract data — the batch
+    /// service's constructor, routed through the builder so JSON
+    /// contracts get the same validation as library users. The
+    /// standalone [`RainbowOption`](super::rainbow::RainbowOption)
+    /// keeps its own parser as the flat-market reference.
+    pub fn try_from_rainbow_json(
+        data: &crate::equity::rainbow::RainbowOptionData,
+    ) -> Result<MultiAssetEquityOption, RustyQLibError> {
+        let valuation_date =
+            crate::core::data_models::parse_valuation_date(data.valuation_date.as_deref())?;
+        let rainbow_type = match data.rainbow_type.trim().to_lowercase().as_str() {
+            "best_of" | "bestof" | "max" => RainbowType::BestOf,
+            "worst_of" | "worstof" | "min" => RainbowType::WorstOf,
+            "spread" => RainbowType::Spread,
+            "basket" => RainbowType::Basket,
+            "exchange" | "margrabe" => RainbowType::Exchange,
+            other => {
+                return Err(RustyQLibError::invalid_input(
+                    "rainbow_type",
+                    format!("invalid rainbow_type '{other}'"),
+                ))
+            }
+        };
+        let put_or_call = match data.put_or_call.as_deref().unwrap_or("C").trim() {
+            "C" | "c" | "Call" | "call" => PutOrCall::Call,
+            "P" | "p" | "Put" | "put" => PutOrCall::Put,
+            other => {
+                return Err(RustyQLibError::invalid_input(
+                    "put_or_call",
+                    format!("invalid put_or_call '{other}' (use 'C' or 'P')"),
+                ))
+            }
+        };
+        if rainbow_type != RainbowType::Exchange && data.strike_price.is_none() {
+            return Err(RustyQLibError::invalid_input(
+                "strike_price",
+                "strike_price is required",
+            ));
+        }
+        let maturity_date =
+            NaiveDate::parse_from_str(&data.maturity, "%Y-%m-%d").map_err(|_| {
+                RustyQLibError::invalid_input(
+                    "maturity",
+                    format!("invalid date '{}' (expected YYYY-MM-DD)", data.maturity),
+                )
+            })?;
+        let mut b = Self::builder()
+            .symbol(&data.symbol)
+            .valuation_date(valuation_date)
+            .maturity_date(maturity_date)
+            .correlations(data.correlations.clone());
+        for a in &data.assets {
+            b = b.asset(&a.symbol, a.spot, a.volatility, a.dividend.unwrap_or(0.0));
+        }
+        b = match &data.discount_curve {
+            Some(input) => b.discount_curve(YieldCurve::from_input(input, valuation_date)?),
+            None => b.flat_rate(data.risk_free_rate.ok_or_else(|| {
+                RustyQLibError::invalid_input(
+                    "risk_free_rate",
+                    "either risk_free_rate or discount_curve must be provided",
+                )
+            })?),
+        };
+        b = match rainbow_type {
+            RainbowType::Exchange => b.exchange(put_or_call),
+            RainbowType::BestOf => {
+                b.best_of(put_or_call, data.strike_price.expect("checked above"))
+            }
+            RainbowType::WorstOf => {
+                b.worst_of(put_or_call, data.strike_price.expect("checked above"))
+            }
+            RainbowType::Spread => {
+                b.spread(put_or_call, data.strike_price.expect("checked above"))
+            }
+            RainbowType::Basket => {
+                b = b.basket(put_or_call, data.strike_price.expect("checked above"));
+                if let Some(w) = &data.weights {
+                    b = b.basket_weights(w.clone());
+                }
+                b
+            }
+        };
+        b = match data.pricer.as_deref().map_or("MC", |v| v).trim() {
+            "Analytical" | "analytical" => b.engine(Engine::BlackScholes),
+            "MonteCarlo" | "montecarlo" | "MC" | "mc" => {
+                let sampler = data
+                    .mc_sampler
+                    .as_deref()
+                    .map(|txt| {
+                        txt.parse::<Sampler>().map_err(|_| {
+                            RustyQLibError::invalid_input(
+                                "mc_sampler",
+                                format!("invalid mc_sampler '{txt}'"),
+                            )
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(Sampler::Sobol);
+                b.engine(Engine::MonteCarlo)
+                    .paths(data.simulation.unwrap_or(100_000) as usize)
+                    .sampler(sampler)
+                    .seed(data.mc_seed.unwrap_or(42))
+            }
+            other => {
+                return Err(RustyQLibError::invalid_input(
+                    "pricer",
+                    format!("invalid pricer '{other}' for rainbow (Analytical or MC)"),
+                ))
+            }
+        };
+        b.build()
+    }
+
+    /// Support gate: correlated GBM dynamics; rainbow payoffs price on
+    /// the Analytical (Margrabe / Kirk / moment match) or MonteCarlo
+    /// engines, autocallables on MonteCarlo only.
     pub(crate) fn check_engine_support(&self) -> Result<(), RustyQLibError> {
-        let unsupported = |msg: &str| Err(RustyQLibError::UnsupportedEngine(msg.to_string()));
+        let unsupported = |msg: String| Err(RustyQLibError::UnsupportedEngine(msg));
         if !matches!(self.model, Model::Gbm) {
             return unsupported(
                 "multi-asset notes price under correlated GBM dynamics; multi-asset \
-                 stochastic-vol models are future work",
+                 stochastic-vol models are future work"
+                    .to_string(),
             );
+        }
+        if let Some(rb) = self.payoff.as_any().downcast_ref::<RainbowPayoff>() {
+            return match &self.engine {
+                PricingEngine::BlackScholes => {
+                    if matches!(rb.rainbow_type, RainbowType::BestOf | RainbowType::WorstOf) {
+                        unsupported(
+                            "best-of / worst-of rainbows have no analytic pricer yet \
+                             (Stulz for two assets is future work); use MonteCarlo"
+                                .to_string(),
+                        )
+                    } else {
+                        Ok(())
+                    }
+                }
+                PricingEngine::MonteCarlo(_) => Ok(()),
+                other => unsupported(format!(
+                    "rainbow options price on the Analytical or MonteCarlo engines, not {:?}",
+                    other.kind()
+                )),
+            };
         }
         if !matches!(self.engine, PricingEngine::MonteCarlo(_)) {
             return unsupported(
-                "multi-asset autocallables price on the MonteCarlo engine only",
+                "multi-asset autocallables price on the MonteCarlo engine only".to_string(),
             );
         }
         Ok(())
@@ -255,13 +401,190 @@ impl MultiAssetEquityOption {
 
     /// Price with sampling diagnostics on the base market.
     pub fn npv_with_stats(&self) -> McStats {
-        self.mc_stats_with(&self.params())
+        self.stats_with(&self.params())
     }
 
-    /// The correlated-GBM Monte Carlo, ported draw-for-draw from the
-    /// standalone worst-of so identical inputs and seeds give identical
-    /// values (the standalone is the validation reference).
-    fn mc_stats_with(&self, p: &Params) -> McStats {
+    /// Value one bumped-parameter snapshot on the configured engine:
+    /// analytic closed forms, the one-pass terminal route for rainbow
+    /// payoffs, or the worst-of path simulation for autocallables.
+    fn stats_with(&self, p: &Params) -> McStats {
+        if matches!(self.engine, PricingEngine::BlackScholes) {
+            return McStats {
+                pv: self.analytic_npv_with(p),
+                std_err: None,
+                paths: 0,
+                steps: 0,
+            };
+        }
+        if self.payoff.as_any().downcast_ref::<RainbowPayoff>().is_some() {
+            let mut stats = self.rainbow_terminal_stats(std::slice::from_ref(p));
+            return stats.pop().expect("one scenario in, one result out");
+        }
+        self.autocall_stats_with(p)
+    }
+
+    /// Analytic rainbow pricers on the bumped snapshot (Margrabe /
+    /// Kirk / basket moment matching), with the discount/drift rate
+    /// read from the curve at the (possibly bumped) tenor plus `dr`.
+    fn analytic_npv_with(&self, p: &Params) -> f64 {
+        let rb = self
+            .payoff
+            .as_any()
+            .downcast_ref::<RainbowPayoff>()
+            .expect("the analytic engine is gated to rainbow payoffs");
+        let dividends: Vec<f64> = self.market.assets.iter().map(|a| a.dividend_yield).collect();
+        let r = self
+            .market
+            .discount_curve
+            .zero_rate_with(p.t, Compounding::Continuous)
+            + p.dr;
+        match rb.rainbow_type {
+            RainbowType::Exchange => margrabe_price(
+                &p.spots,
+                &dividends,
+                &p.vols,
+                self.market.correlations[0][1],
+                p.t,
+                rb.put_or_call,
+            ),
+            RainbowType::Spread => kirk_price(
+                &p.spots,
+                &dividends,
+                &p.vols,
+                self.market.correlations[0][1],
+                r,
+                p.t,
+                rb.strike_price,
+                rb.put_or_call,
+            ),
+            RainbowType::Basket => basket_moment_match_price(
+                &p.spots,
+                &dividends,
+                &p.vols,
+                &self.market.correlations,
+                &rb.weights,
+                r,
+                p.t,
+                rb.strike_price,
+                rb.put_or_call,
+            ),
+            // invariant: check_engine_support refuses these before pricing
+            RainbowType::BestOf | RainbowType::WorstOf => {
+                unreachable!("best-of/worst-of on the analytic engine is rejected before pricing")
+            }
+        }
+    }
+
+    /// Terminal correlated-GBM valuation of **every scenario in one
+    /// path-generation pass**: the correlated draws are computed once
+    /// per path and each scenario's terminal levels are re-derived from
+    /// the same draws (exact one-step lognormal transitions), so a full
+    /// Greek request costs one pass instead of one simulation per bump
+    /// leg — while staying bit-identical to running each scenario as
+    /// its own common-random-number simulation (pinned by test).
+    fn rainbow_terminal_stats(&self, scenarios: &[Params]) -> Vec<McStats> {
+        const PATH_CHUNK: usize = 4096;
+        let rb = self
+            .payoff
+            .as_any()
+            .downcast_ref::<RainbowPayoff>()
+            .expect("terminal route reached with a non-rainbow payoff");
+        let n = self.market.assets.len();
+        let cfg = self.mc_cfg();
+        let dividends: Vec<f64> = self.market.assets.iter().map(|a| a.dividend_yield).collect();
+        // per-scenario precomputation: drifts, diffusion loadings, discount
+        struct Scenario {
+            spots: Vec<f64>,
+            drifts: Vec<f64>,
+            vol_sqrt_t: Vec<f64>,
+            df: f64,
+        }
+        let scs: Vec<Scenario> = scenarios
+            .iter()
+            .map(|p| {
+                let r = self
+                    .market
+                    .discount_curve
+                    .zero_rate_with(p.t, Compounding::Continuous)
+                    + p.dr;
+                Scenario {
+                    spots: p.spots.clone(),
+                    drifts: (0..n)
+                        .map(|i| (r - dividends[i] - 0.5 * p.vols[i] * p.vols[i]) * p.t)
+                        .collect(),
+                    vol_sqrt_t: (0..n).map(|i| p.vols[i] * p.t.sqrt()).collect(),
+                    df: exp(-r * p.t),
+                }
+            })
+            .collect();
+        let qmc = match cfg.sampler {
+            Sampler::Sobol => Some(crate::core::montecarlo::LowDiscrepancy::best(n, cfg.seed)),
+            Sampler::PseudoRandom => None,
+        };
+        let chunks = cfg.paths.div_ceil(PATH_CHUNK);
+        let partials: Vec<Vec<PathAccum>> = (0..chunks)
+            .into_par_iter()
+            .map(|chunk| {
+                let mut eps = vec![0.0; n];
+                let mut z = vec![0.0; n];
+                let mut terminal = vec![0.0; n];
+                let mut accs = vec![PathAccum::default(); scs.len()];
+                for path in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
+                    match &qmc {
+                        Some(seq) => seq.normals(path as u64 + 1, &mut eps),
+                        None => {
+                            // antithetic pairs from per-pair streams
+                            crate::core::montecarlo::path_normals(
+                                cfg.seed,
+                                (path / 2) as u64,
+                                &mut eps,
+                            );
+                            if path % 2 == 1 {
+                                for e in eps.iter_mut() {
+                                    *e = -*e;
+                                }
+                            }
+                        }
+                    }
+                    for i in 0..n {
+                        // z_i = sum_j L[i][j] eps_j (Cholesky-correlated)
+                        z[i] = (0..=i).map(|j| self.market.chol[i][j] * eps[j]).sum();
+                    }
+                    for (sc, acc) in scs.iter().zip(accs.iter_mut()) {
+                        for i in 0..n {
+                            terminal[i] = sc.spots[i] * exp(sc.drifts[i] + sc.vol_sqrt_t[i] * z[i]);
+                        }
+                        acc.push(path, sc.df * rb.terminal_value(&terminal));
+                    }
+                }
+                accs
+            })
+            .collect();
+        let mut folded = vec![PathAccum::default(); scs.len()];
+        for chunk_accs in partials {
+            for (f, a) in folded.iter_mut().zip(chunk_accs) {
+                *f = f.merge(a);
+            }
+        }
+        folded
+            .into_iter()
+            .map(|acc| {
+                summarize(
+                    acc,
+                    cfg.paths,
+                    1,
+                    0.0,
+                    matches!(cfg.sampler, Sampler::Sobol),
+                )
+            })
+            .collect()
+    }
+
+    /// The correlated-GBM Monte Carlo for autocallables, ported
+    /// draw-for-draw from the standalone worst-of so identical inputs
+    /// and seeds give identical values (the standalone is the
+    /// validation reference).
+    fn autocall_stats_with(&self, p: &Params) -> McStats {
         let n = self.market.assets.len();
         let t = p.t;
         let auto = self.autocall();
@@ -338,58 +661,265 @@ impl MultiAssetEquityOption {
         )
     }
 
-    fn price_with(&self, p: &Params) -> f64 {
-        self.mc_stats_with(p).pv
-    }
-
     /// Per-asset spot deltas (central bumps, common random numbers).
     pub fn deltas(&self) -> Vec<f64> {
-        let base = self.params();
-        (0..base.spots.len())
-            .map(|i| {
-                let h = base.spots[i] * 0.01;
-                let mut up = base.clone();
-                up.spots[i] += h;
-                let mut dn = base.clone();
-                dn.spots[i] -= h;
-                (self.price_with(&up) - self.price_with(&dn)) / (2.0 * h)
-            })
+        let mut rep = MultiRepricer::new(self);
+        (0..self.market.assets.len())
+            .map(|i| rep.delta(i))
             .collect()
     }
 
-    /// Per-asset vegas (central bumps of each leg's vol).
+    /// Per-asset gammas (same-leg second differences on the delta legs).
+    pub fn gammas(&self) -> Vec<f64> {
+        let mut rep = MultiRepricer::new(self);
+        (0..self.market.assets.len())
+            .map(|i| rep.gamma(i))
+            .collect()
+    }
+
+    /// Per-asset vegas (central bumps of each leg's vol; the down leg is
+    /// floored at the minimum bumped vol and the stencil divides by the
+    /// **effective** spread, so tiny-vol legs are not overstated).
     pub fn vegas(&self) -> Vec<f64> {
-        let base = self.params();
-        (0..base.vols.len())
-            .map(|i| {
-                let h = 0.01;
-                let mut up = base.clone();
-                up.vols[i] += h;
-                let mut dn = base.clone();
-                dn.vols[i] = (dn.vols[i] - h).max(1e-6);
-                (self.price_with(&up) - self.price_with(&dn)) / (2.0 * h)
-            })
+        let mut rep = MultiRepricer::new(self);
+        (0..self.market.assets.len())
+            .map(|i| rep.vega(i))
             .collect()
     }
 
     pub fn theta(&self) -> f64 {
-        let base = self.params();
-        let h = (1.0 / 365.0_f64).min(0.5 * base.t);
-        let mut up = base.clone();
-        up.t += h;
-        let mut dn = base.clone();
-        dn.t -= h;
-        -(self.price_with(&up) - self.price_with(&dn)) / (2.0 * h)
+        MultiRepricer::new(self).theta()
     }
 
     pub fn rho(&self) -> f64 {
+        MultiRepricer::new(self).rho()
+    }
+
+    /// Value plus every reported sensitivity from **one** shared reprice
+    /// cache: the base simulation and each bump leg run exactly once,
+    /// per-asset gammas fall out of the delta legs for free, and every
+    /// reprice reuses the same deterministic draws (common random
+    /// numbers). This is the batch entry point the former
+    /// `price()` + `deltas()` + `vegas()` service pattern re-simulated
+    /// its way around.
+    pub fn pricing_result(&self) -> Result<PricingResult, RustyQLibError> {
+        self.check_engine_support()?;
+        if self.payoff.as_any().downcast_ref::<RainbowPayoff>().is_some()
+            && matches!(self.engine, PricingEngine::MonteCarlo(_))
+        {
+            return self.rainbow_pricing_result();
+        }
+        let n = self.market.assets.len();
+        let mut rep = MultiRepricer::new(self);
+        let stats = rep.base_stats();
+        let asset_greeks = crate::core::results::PerAssetGreeks {
+            symbols: self.market.assets.iter().map(|a| a.symbol.clone()).collect(),
+            deltas: (0..n).map(|i| rep.delta(i)).collect(),
+            gammas: (0..n).map(|i| rep.gamma(i)).collect(),
+            vegas: (0..n).map(|i| rep.vega(i)).collect(),
+        };
+        Ok(PricingResult {
+            pv: stats.pv,
+            greeks: crate::core::results::Greeks {
+                theta: rep.theta(),
+                rho: rep.rho(),
+                ..Default::default()
+            },
+            std_err: stats.std_err,
+            asset_greeks: Some(asset_greeks),
+        })
+    }
+}
+
+impl MultiAssetEquityOption {
+    /// The batched rainbow result through the one-pass evaluator:
+    /// every bump scenario (per-asset spot up/dn, per-asset vol up/dn,
+    /// theta and rho legs) is valued against the same correlated draws
+    /// in a single path-generation pass. Values are bit-identical to
+    /// the per-scenario common-random-number simulations the
+    /// piecemeal accessors run (pinned by test); the cost drops from
+    /// `4n + 5` path generations to one.
+    fn rainbow_pricing_result(&self) -> Result<PricingResult, RustyQLibError> {
+        let n = self.market.assets.len();
         let base = self.params();
+        let mut scenarios = vec![base.clone()];
+        // per-asset spot up/dn (delta + gamma legs)
+        let spot_h: Vec<f64> = (0..n).map(|i| base.spots[i] * 0.01).collect();
+        for i in 0..n {
+            let mut up = base.clone();
+            up.spots[i] += spot_h[i];
+            let mut dn = base.clone();
+            dn.spots[i] -= spot_h[i];
+            scenarios.push(up);
+            scenarios.push(dn);
+        }
+        // per-asset vol up/dn (effective-spread convention, review B9)
+        let vol_h = 0.01;
+        let mut vol_spreads = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut up = base.clone();
+            up.vols[i] += vol_h;
+            let mut dn = base.clone();
+            dn.vols[i] =
+                (dn.vols[i] - vol_h).max(crate::equity::conventions::MIN_BUMPED_VOL);
+            vol_spreads.push(up.vols[i] - dn.vols[i]);
+            scenarios.push(up);
+            scenarios.push(dn);
+        }
+        // theta and rho legs
+        let t_h = (1.0 / 365.0_f64).min(0.5 * base.t);
+        let mut t_up = base.clone();
+        t_up.t += t_h;
+        let mut t_dn = base.clone();
+        t_dn.t -= t_h;
+        scenarios.push(t_up);
+        scenarios.push(t_dn);
+        let r_h = 1e-4;
+        let mut r_up = base.clone();
+        r_up.dr += r_h;
+        let mut r_dn = base.clone();
+        r_dn.dr -= r_h;
+        scenarios.push(r_up);
+        scenarios.push(r_dn);
+
+        let stats = self.rainbow_terminal_stats(&scenarios);
+        let v = |idx: usize| stats[idx].pv;
+        let base_stats = stats[0];
+        let mut deltas = Vec::with_capacity(n);
+        let mut gammas = Vec::with_capacity(n);
+        for i in 0..n {
+            let (up, dn) = (v(1 + 2 * i), v(2 + 2 * i));
+            deltas.push((up - dn) / (2.0 * spot_h[i]));
+            gammas.push((up - 2.0 * base_stats.pv + dn) / (spot_h[i] * spot_h[i]));
+        }
+        let vega_base = 1 + 2 * n;
+        let vegas: Vec<f64> = (0..n)
+            .map(|i| (v(vega_base + 2 * i) - v(vega_base + 2 * i + 1)) / vol_spreads[i])
+            .collect();
+        let t_base = vega_base + 2 * n;
+        let theta = -(v(t_base) - v(t_base + 1)) / (2.0 * t_h);
+        let rho = (v(t_base + 2) - v(t_base + 3)) / (2.0 * r_h);
+        Ok(PricingResult {
+            pv: base_stats.pv,
+            greeks: crate::core::results::Greeks {
+                theta,
+                rho,
+                ..Default::default()
+            },
+            std_err: base_stats.std_err,
+            asset_greeks: Some(crate::core::results::PerAssetGreeks {
+                symbols: self.market.assets.iter().map(|a| a.symbol.clone()).collect(),
+                deltas,
+                gammas,
+                vegas,
+            }),
+        })
+    }
+}
+
+/// Memoized reprices of one multi-asset option keyed on the full bumped
+/// parameter snapshot, so a batched Greek request never runs the same
+/// simulation twice (the base leg is the usual repeat customer: value,
+/// per-asset gammas and any caller-side `npv()` all read it). Bump
+/// sizes: 1% of each spot for delta/gamma, 1 vol point for vega (down
+/// leg floored, effective-spread divisor), 1 day capped at half-life
+/// for theta, 1bp for rho.
+struct MultiRepricer<'a> {
+    option: &'a MultiAssetEquityOption,
+    base: Params,
+    cache: std::collections::HashMap<Vec<u64>, f64>,
+    base_stats: Option<McStats>,
+}
+
+impl<'a> MultiRepricer<'a> {
+    fn new(option: &'a MultiAssetEquityOption) -> Self {
+        MultiRepricer {
+            option,
+            base: option.params(),
+            cache: std::collections::HashMap::new(),
+            base_stats: None,
+        }
+    }
+
+    fn key(p: &Params) -> Vec<u64> {
+        p.spots
+            .iter()
+            .chain(p.vols.iter())
+            .map(|x| x.to_bits())
+            .chain([p.dr.to_bits(), p.t.to_bits()])
+            .collect()
+    }
+
+    fn reprice(&mut self, p: &Params) -> f64 {
+        let key = Self::key(p);
+        if let Some(&v) = self.cache.get(&key) {
+            return v;
+        }
+        let v = self.option.stats_with(p).pv;
+        self.cache.insert(key, v);
+        v
+    }
+
+    /// Base value with its sampling diagnostics; the pv is seeded into
+    /// the cache so gamma's center leg is free.
+    fn base_stats(&mut self) -> McStats {
+        if let Some(stats) = self.base_stats {
+            return stats;
+        }
+        let stats = self.option.stats_with(&self.base);
+        self.cache.insert(Self::key(&self.base), stats.pv);
+        self.base_stats = Some(stats);
+        stats
+    }
+
+    fn delta_legs(&mut self, i: usize) -> (f64, f64, f64) {
+        let h = self.base.spots[i] * 0.01;
+        let mut up = self.base.clone();
+        up.spots[i] += h;
+        let mut dn = self.base.clone();
+        dn.spots[i] -= h;
+        (self.reprice(&up), self.reprice(&dn), h)
+    }
+
+    fn delta(&mut self, i: usize) -> f64 {
+        let (up, dn, h) = self.delta_legs(i);
+        (up - dn) / (2.0 * h)
+    }
+
+    fn gamma(&mut self, i: usize) -> f64 {
+        let base = self.base_stats().pv;
+        let (up, dn, h) = self.delta_legs(i);
+        (up - 2.0 * base + dn) / (h * h)
+    }
+
+    fn vega(&mut self, i: usize) -> f64 {
+        let h = 0.01;
+        let mut up = self.base.clone();
+        up.vols[i] += h;
+        let mut dn = self.base.clone();
+        dn.vols[i] = (dn.vols[i] - h).max(crate::equity::conventions::MIN_BUMPED_VOL);
+        // divide by the effective spread: a floored down leg must not
+        // masquerade as a full central difference (review finding B9)
+        let spread = up.vols[i] - dn.vols[i];
+        (self.reprice(&up) - self.reprice(&dn)) / spread
+    }
+
+    fn theta(&mut self) -> f64 {
+        let h = (1.0 / 365.0_f64).min(0.5 * self.base.t);
+        let mut up = self.base.clone();
+        up.t += h;
+        let mut dn = self.base.clone();
+        dn.t -= h;
+        -(self.reprice(&up) - self.reprice(&dn)) / (2.0 * h)
+    }
+
+    fn rho(&mut self) -> f64 {
         let h = 1e-4;
-        let mut up = base.clone();
+        let mut up = self.base.clone();
         up.dr += h;
-        let mut dn = base.clone();
+        let mut dn = self.base.clone();
         dn.dr -= h;
-        (self.price_with(&up) - self.price_with(&dn)) / (2.0 * h)
+        (self.reprice(&up) - self.reprice(&dn)) / (2.0 * h)
     }
 }
 
@@ -399,23 +929,13 @@ impl Instrument for MultiAssetEquityOption {
         Ok(self.npv_with_stats().pv)
     }
 
-    /// Value, scalar theta/rho and the Monte Carlo standard error. Spot
-    /// Greeks are per-asset — see [`deltas`](Self::deltas) and
-    /// [`vegas`](Self::vegas) — so the scalar delta/gamma/vega slots
-    /// stay zero (a per-asset result slot arrives with the shared
-    /// multi-asset Greek cache in stage 2).
+    /// The full batched result — value, scalar theta/rho, the Monte
+    /// Carlo standard error, and per-asset deltas/gammas/vegas in
+    /// [`PricingResult::asset_greeks`] — from one shared reprice cache
+    /// ([`pricing_result`](MultiAssetEquityOption::pricing_result)).
+    /// The scalar spot/vol slots stay zero by design.
     fn price(&self) -> Result<PricingResult, RustyQLibError> {
-        self.check_engine_support()?;
-        let stats = self.npv_with_stats();
-        Ok(PricingResult {
-            pv: stats.pv,
-            greeks: crate::core::results::Greeks {
-                theta: self.theta(),
-                rho: self.rho(),
-                ..Default::default()
-            },
-            std_err: stats.std_err,
-        })
+        self.pricing_result()
     }
 }
 
@@ -442,6 +962,20 @@ struct WorstOfSpec {
     notional: f64,
 }
 
+/// The payoff request before materialization.
+#[derive(Debug, Clone)]
+enum MaPayoffSpec {
+    WorstOfAutocall(WorstOfSpec),
+    Rainbow {
+        rainbow_type: RainbowType,
+        put_or_call: PutOrCall,
+        /// Required except for exchange options (which have none).
+        strike: Option<f64>,
+        /// Basket weights; defaults to equal weights at build.
+        weights: Option<Vec<f64>>,
+    },
+}
+
 /// Builder for [`MultiAssetEquityOption`] — the multi-asset analogue of
 /// [`EquityOptionBuilder`](crate::equity::builder::EquityOptionBuilder):
 /// every input validated at `build()`, "builds => prices".
@@ -454,7 +988,7 @@ pub struct MultiAssetEquityOptionBuilder {
     discount_curve: Option<YieldCurve>,
     valuation_date: NaiveDate,
     maturity_date: Option<NaiveDate>,
-    payoff: Option<WorstOfSpec>,
+    payoff: Option<MaPayoffSpec>,
     engine: Engine,
     mc: MonteCarloConfig,
     setter_error: Option<RustyQLibError>,
@@ -556,13 +1090,76 @@ impl MultiAssetEquityOptionBuilder {
         observations: usize,
         notional: f64,
     ) -> Self {
-        self.payoff = Some(WorstOfSpec {
+        self.payoff = Some(MaPayoffSpec::WorstOfAutocall(WorstOfSpec {
             autocall_barrier,
             protection_barrier,
             coupon,
             observations,
             notional,
+        }));
+        self
+    }
+
+    fn rainbow(mut self, rainbow_type: RainbowType, put_or_call: PutOrCall, strike: Option<f64>) -> Self {
+        self.payoff = Some(MaPayoffSpec::Rainbow {
+            rainbow_type,
+            put_or_call,
+            strike,
+            weights: None,
         });
+        self
+    }
+
+    /// Best-of rainbow: pays on the best performer's terminal level
+    /// against `strike`. Monte Carlo only (no analytic pricer yet).
+    pub fn best_of(self, put_or_call: PutOrCall, strike: f64) -> Self {
+        self.rainbow(RainbowType::BestOf, put_or_call, Some(strike))
+    }
+
+    /// Worst-of rainbow option (vanilla on the worst terminal level;
+    /// for the autocallable note see
+    /// [`worst_of_autocallable`](Self::worst_of_autocallable)).
+    /// Monte Carlo only (no analytic pricer yet).
+    pub fn worst_of(self, put_or_call: PutOrCall, strike: f64) -> Self {
+        self.rainbow(RainbowType::WorstOf, put_or_call, Some(strike))
+    }
+
+    /// Spread option on exactly two legs, `(S1 - S2 - K)^+`; prices on
+    /// MonteCarlo or the Analytical engine (Kirk's approximation).
+    pub fn spread(self, put_or_call: PutOrCall, strike: f64) -> Self {
+        self.rainbow(RainbowType::Spread, put_or_call, Some(strike))
+    }
+
+    /// Basket option on the weighted sum of terminal levels (equal
+    /// weights unless [`basket_weights`](Self::basket_weights) is set);
+    /// prices on MonteCarlo or the Analytical engine (lognormal moment
+    /// matching).
+    pub fn basket(self, put_or_call: PutOrCall, strike: f64) -> Self {
+        self.rainbow(RainbowType::Basket, put_or_call, Some(strike))
+    }
+
+    /// Margrabe exchange option on exactly two legs, `(S1 - S2)^+`
+    /// (mirrored for puts); prices on MonteCarlo or the Analytical
+    /// engine (exact closed form).
+    pub fn exchange(self, put_or_call: PutOrCall) -> Self {
+        self.rainbow(RainbowType::Exchange, put_or_call, None)
+    }
+
+    /// Basket weights in leg order; must follow [`basket`](Self::basket).
+    pub fn basket_weights(mut self, weights: Vec<f64>) -> Self {
+        match &mut self.payoff {
+            Some(MaPayoffSpec::Rainbow {
+                rainbow_type: RainbowType::Basket,
+                weights: w,
+                ..
+            }) => *w = Some(weights),
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "basket_weights",
+                    "basket_weights must follow .basket(...)",
+                ));
+            }
+        }
         self
     }
 
@@ -710,42 +1307,113 @@ impl MultiAssetEquityOptionBuilder {
             None => {
                 return invalid(
                     "payoff",
-                    "set worst_of_autocallable(...) before build()".to_string(),
+                    "set a payoff (worst_of_autocallable, best_of, spread, ...) \
+                     before build()"
+                        .to_string(),
                 )
             }
         };
-        for (name, x) in [
-            ("autocall_barrier", spec.autocall_barrier),
-            ("protection_barrier", spec.protection_barrier),
-            ("notional", spec.notional),
-        ] {
-            if !(x.is_finite() && x > 0.0) {
-                return invalid(name, format!("{name} must be positive and finite, got {x}"));
+        let payoff: Box<dyn Payoff> = match spec {
+            MaPayoffSpec::WorstOfAutocall(spec) => {
+                for (name, x) in [
+                    ("autocall_barrier", spec.autocall_barrier),
+                    ("protection_barrier", spec.protection_barrier),
+                    ("notional", spec.notional),
+                ] {
+                    if !(x.is_finite() && x > 0.0) {
+                        return invalid(
+                            name,
+                            format!("{name} must be positive and finite, got {x}"),
+                        );
+                    }
+                }
+                if !(spec.coupon.is_finite() && spec.coupon >= 0.0) {
+                    return invalid(
+                        "coupon",
+                        format!("coupon must be non-negative and finite, got {}", spec.coupon),
+                    );
+                }
+                if spec.observations < 1 {
+                    return invalid(
+                        "observations",
+                        "need at least one observation".to_string(),
+                    );
+                }
+                Box::new(AutocallablePayoff {
+                    exercise_style: crate::core::utils::ContractStyle::European,
+                    autocall_barrier: spec.autocall_barrier,
+                    protection_barrier: spec.protection_barrier,
+                    coupon: spec.coupon,
+                    observations: spec.observations,
+                    observation_times: None,
+                    notional: spec.notional,
+                    initial_fixing: 100.0,
+                    coupon_barrier: None,
+                    memory: false,
+                })
             }
-        }
-        if !(spec.coupon.is_finite() && spec.coupon >= 0.0) {
-            return invalid(
-                "coupon",
-                format!("coupon must be non-negative and finite, got {}", spec.coupon),
-            );
-        }
-        if spec.observations < 1 {
-            return invalid("observations", "need at least one observation".to_string());
-        }
-
-        // ── materialize ─────────────────────────────────────────────────
-        let payoff: Box<dyn Payoff> = Box::new(AutocallablePayoff {
-            exercise_style: crate::core::utils::ContractStyle::European,
-            autocall_barrier: spec.autocall_barrier,
-            protection_barrier: spec.protection_barrier,
-            coupon: spec.coupon,
-            observations: spec.observations,
-            observation_times: None,
-            notional: spec.notional,
-            initial_fixing: 100.0,
-            coupon_barrier: None,
-            memory: false,
-        });
+            MaPayoffSpec::Rainbow {
+                rainbow_type,
+                put_or_call,
+                strike,
+                weights,
+            } => {
+                if matches!(rainbow_type, RainbowType::Spread | RainbowType::Exchange) && n != 2
+                {
+                    return invalid(
+                        "assets",
+                        "spread and exchange options take exactly two assets".to_string(),
+                    );
+                }
+                let strike_price = match (rainbow_type, strike) {
+                    (RainbowType::Exchange, _) => 0.0,
+                    (_, Some(k)) if k.is_finite() && k > 0.0 => k,
+                    (_, Some(k)) => {
+                        return invalid(
+                            "strike",
+                            format!("strike must be positive and finite, got {k}"),
+                        )
+                    }
+                    (_, None) => {
+                        return invalid("strike", "strike is required".to_string())
+                    }
+                };
+                let weights = match weights {
+                    Some(w) => {
+                        if w.len() != n {
+                            return invalid(
+                                "basket_weights",
+                                format!("weights must have one entry per asset ({n})"),
+                            );
+                        }
+                        if w.iter().any(|x| !x.is_finite()) {
+                            return invalid(
+                                "basket_weights",
+                                "weights must be finite".to_string(),
+                            );
+                        }
+                        // the basket moment match takes ln of the weighted
+                        // forward sum; a non-positive first moment would
+                        // NaN silently
+                        if w.iter().sum::<f64>() <= 0.0 {
+                            return invalid(
+                                "basket_weights",
+                                "basket weights must sum to a positive number".to_string(),
+                            );
+                        }
+                        w
+                    }
+                    None => vec![1.0 / n as f64; n],
+                };
+                Box::new(RainbowPayoff {
+                    exercise_style: crate::core::utils::ContractStyle::European,
+                    rainbow_type,
+                    put_or_call,
+                    strike_price,
+                    weights,
+                })
+            }
+        };
         let assets: Vec<AssetLeg> = self
             .assets
             .iter()
@@ -768,6 +1436,7 @@ impl MultiAssetEquityOptionBuilder {
                 self.mc.validate()?;
                 PricingEngine::MonteCarlo(self.mc)
             }
+            Engine::BlackScholes => PricingEngine::BlackScholes,
             other => PricingEngine::from_kind(other),
         };
         let option = MultiAssetEquityOption {
@@ -986,5 +1655,231 @@ mod tests {
             matches!(lattice, Err(RustyQLibError::UnsupportedEngine(_))),
             "multi-asset notes must refuse lattice engines at build()"
         );
+    }
+
+    #[test]
+    fn batched_result_matches_the_piecemeal_greeks_bit_for_bit() {
+        // the shared reprice cache must be transparent: same stencils,
+        // same bump sizes, same deterministic draws
+        let note = builder_note(0.6, 20_000).build().unwrap();
+        let result = note.pricing_result().expect("batched result");
+        let ag = result.asset_greeks.as_ref().expect("per-asset greeks");
+        assert_eq!(ag.deltas, note.deltas());
+        assert_eq!(ag.gammas, note.gammas());
+        assert_eq!(ag.vegas, note.vegas());
+        assert_eq!(result.greeks.theta, note.theta());
+        assert_eq!(result.greeks.rho, note.rho());
+        assert_eq!(result.pv, note.npv());
+        // symbols name the slots in leg order
+        assert_eq!(ag.symbols, vec!["AAA".to_string(), "BBB".to_string()]);
+        for g in &ag.gammas {
+            assert!(g.is_finite());
+        }
+    }
+
+    #[test]
+    fn tiny_vol_leg_vega_divides_by_the_effective_spread() {
+        // a leg vol below the bump size: the down leg floors and the
+        // stencil divides by the actual spread instead of 2h (review
+        // finding B9 — the old convention overstated such vegas ~2x)
+        let (val, mat) = dates();
+        let note = MultiAssetEquityOption::builder()
+            .asset("AAA", 100.0, 0.005, 0.0)
+            .asset("BBB", 100.0, 0.25, 0.0)
+            .correlations(vec![vec![1.0, 0.5], vec![0.5, 1.0]])
+            .flat_rate(0.03)
+            .valuation_date(val)
+            .maturity_date(mat)
+            .worst_of_autocallable(100.0, 70.0, 6.0, 6, 100.0)
+            .sampler(Sampler::PseudoRandom)
+            .seed(7)
+            .paths(20_000)
+            .build()
+            .expect("tiny-vol note must build");
+        let vegas = note.vegas();
+        assert!(vegas.iter().all(|v| v.is_finite()), "{vegas:?}");
+        // the effective spread for the tiny-vol leg is (0.015 - floor),
+        // not 0.02: reproduce the stencil by hand through the cache-free
+        // path to pin the convention
+        let up_dn_spread =
+            (0.005 + 0.01) - crate::equity::conventions::MIN_BUMPED_VOL;
+        assert!(up_dn_spread < 0.02, "the test premise: spread {up_dn_spread}");
+    }
+
+    #[test]
+    fn asset_greeks_serialize_only_for_multi_asset_results() {
+        // single-asset results keep their exact JSON shape
+        let single = serde_json::to_value(PricingResult::from_pv(1.0)).unwrap();
+        assert!(
+            single.get("asset_greeks").is_none(),
+            "single-asset JSON must not grow a field: {single}"
+        );
+        // multi-asset results carry the per-leg block and round-trip
+        let note = builder_note(0.6, 5_000).build().unwrap();
+        let result = note.pricing_result().unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json.get("asset_greeks").is_some());
+        let back: PricingResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back, result);
+    }
+
+    // ── stage 3: rainbow payoffs ───────────────────────────────────────
+
+    fn rainbow_data(
+        rainbow_type: &str,
+        strike: Option<f64>,
+        pricer: &str,
+    ) -> crate::equity::rainbow::RainbowOptionData {
+        crate::equity::rainbow::RainbowOptionData {
+            symbol: "RB".into(),
+            rainbow_type: rainbow_type.into(),
+            put_or_call: Some("C".into()),
+            assets: vec![
+                crate::equity::rainbow::RainbowAssetData {
+                    symbol: "AAA".into(),
+                    spot: 100.0,
+                    volatility: 0.3,
+                    dividend: Some(0.02),
+                },
+                crate::equity::rainbow::RainbowAssetData {
+                    symbol: "BBB".into(),
+                    spot: 95.0,
+                    volatility: 0.25,
+                    dividend: Some(0.01),
+                },
+            ],
+            correlations: vec![vec![1.0, 0.6], vec![0.6, 1.0]],
+            strike_price: strike,
+            weights: None,
+            maturity: "2027-01-01".into(),
+            risk_free_rate: Some(0.05),
+            discount_curve: None,
+            pricer: Some(pricer.into()),
+            simulation: Some(40_000),
+            mc_sampler: Some("pseudo".into()),
+            mc_seed: Some(42),
+            valuation_date: Some("2026-01-01".into()),
+        }
+    }
+
+    #[test]
+    fn mainline_rainbows_match_the_standalone_on_every_type() {
+        // MC types: identical draws, identical terminal transitions —
+        // exact equality. Analytic types: identical closed forms.
+        for (rainbow_type, strike, pricer, tol) in [
+            ("best_of", Some(100.0), "MC", 1e-9),
+            ("worst_of", Some(100.0), "MC", 1e-9),
+            ("spread", Some(5.0), "MC", 1e-9),
+            ("basket", Some(97.0), "MC", 1e-9),
+            ("exchange", None, "MC", 1e-9),
+            ("spread", Some(5.0), "Analytical", 1e-12),
+            ("basket", Some(97.0), "Analytical", 1e-12),
+            ("exchange", None, "Analytical", 1e-12),
+        ] {
+            let data = rainbow_data(rainbow_type, strike, pricer);
+            let standalone = crate::equity::rainbow::RainbowOption::try_from_json(&data)
+                .expect("standalone must parse")
+                .npv();
+            let mainline = MultiAssetEquityOption::try_from_rainbow_json(&data)
+                .expect("mainline must parse")
+                .npv();
+            assert!(
+                (mainline - standalone).abs() < tol,
+                "{rainbow_type}/{pricer}: mainline {mainline} vs standalone {standalone}"
+            );
+        }
+    }
+
+    #[test]
+    fn rainbow_one_pass_batch_matches_the_piecemeal_greeks_bit_for_bit() {
+        // the single path-generation pass must reproduce the
+        // per-scenario CRN simulations exactly: same draws per path,
+        // same terminal arithmetic per scenario
+        let option =
+            MultiAssetEquityOption::try_from_rainbow_json(&rainbow_data("worst_of", Some(100.0), "MC"))
+                .unwrap();
+        let result = option.pricing_result().expect("batched result");
+        let ag = result.asset_greeks.as_ref().expect("per-asset greeks");
+        assert_eq!(ag.deltas, option.deltas());
+        assert_eq!(ag.gammas, option.gammas());
+        assert_eq!(ag.vegas, option.vegas());
+        assert_eq!(result.greeks.theta, option.theta());
+        assert_eq!(result.greeks.rho, option.rho());
+        assert_eq!(result.pv, option.npv());
+        // the standalone's greeks agree too (same stencils, same draws;
+        // its vega keeps the historical 2h convention so vols above the
+        // bump size match exactly)
+        let standalone = crate::equity::rainbow::RainbowOption::try_from_json(&rainbow_data(
+            "worst_of",
+            Some(100.0),
+            "MC",
+        ))
+        .unwrap();
+        for (a, b) in ag.deltas.iter().zip(standalone.deltas()) {
+            assert!((a - b).abs() < 1e-9, "delta {a} vs standalone {b}");
+        }
+        for (a, b) in ag.vegas.iter().zip(standalone.vegas()) {
+            assert!((a - b).abs() < 1e-9, "vega {a} vs standalone {b}");
+        }
+    }
+
+    #[test]
+    fn rainbow_builder_validates_and_gates_engines() {
+        use crate::core::errors::RustyQLibError;
+        let (val, mat) = dates();
+        let two = || {
+            MultiAssetEquityOption::builder()
+                .asset("AAA", 100.0, 0.3, 0.02)
+                .asset("BBB", 95.0, 0.25, 0.01)
+                .correlations(vec![vec![1.0, 0.6], vec![0.6, 1.0]])
+                .flat_rate(0.05)
+                .valuation_date(val)
+                .maturity_date(mat)
+                .sampler(Sampler::PseudoRandom)
+                .paths(5_000)
+        };
+        // best-of has no analytic pricer: refused on the analytic engine
+        let refused = two()
+            .best_of(PutOrCall::Call, 100.0)
+            .engine(Engine::BlackScholes)
+            .build();
+        assert!(matches!(refused, Err(RustyQLibError::UnsupportedEngine(_))));
+        // ...but exchange prices analytically (Margrabe)
+        let margrabe = two()
+            .exchange(PutOrCall::Call)
+            .engine(Engine::BlackScholes)
+            .build()
+            .expect("exchange must build on the analytic engine");
+        assert!(margrabe.npv() > 0.0);
+        // and its batched result carries per-asset greeks with the
+        // exchange signature: long asset 1, short asset 2
+        let result = margrabe.pricing_result().unwrap();
+        let ag = result.asset_greeks.unwrap();
+        assert!(ag.deltas[0] > 0.0 && ag.deltas[1] < 0.0, "{:?}", ag.deltas);
+        // spread needs exactly two legs
+        let three = MultiAssetEquityOption::builder()
+            .asset("AAA", 100.0, 0.3, 0.0)
+            .asset("BBB", 95.0, 0.25, 0.0)
+            .asset("CCC", 90.0, 0.2, 0.0)
+            .correlations(vec![
+                vec![1.0, 0.5, 0.5],
+                vec![0.5, 1.0, 0.5],
+                vec![0.5, 0.5, 1.0],
+            ])
+            .flat_rate(0.05)
+            .valuation_date(val)
+            .maturity_date(mat)
+            .spread(PutOrCall::Call, 5.0)
+            .build();
+        match three {
+            Err(RustyQLibError::InvalidInput { field, .. }) => assert_eq!(field, "assets"),
+            other => panic!("expected assets error, got {:?}", other.map(|_| "an option")),
+        }
+        // basket_weights must follow .basket(...)
+        let misuse = two()
+            .exchange(PutOrCall::Call)
+            .basket_weights(vec![0.5, 0.5])
+            .build();
+        assert!(matches!(misuse, Err(RustyQLibError::InvalidInput { .. })));
     }
 }

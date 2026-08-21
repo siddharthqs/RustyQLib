@@ -213,6 +213,7 @@ pub fn pricing_result(option: &EquityOption) -> crate::core::results::PricingRes
             zomma: (vol_up.gamma - vol_down.gamma) / (2.0 * hv),
         },
         std_err: None,
+        asset_greeks: None,
     }
 }
 

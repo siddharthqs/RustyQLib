@@ -411,6 +411,7 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
                     zomma: pricer.zomma(option),
                 },
                 std_err: None,
+                asset_greeks: None,
             }
         }
         Route::Bump(bumps) => {
@@ -470,6 +471,7 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
                     zomma: bump_zomma(repricer, &bumps),
                 },
                 std_err,
+                asset_greeks: None,
             }
         }
     }

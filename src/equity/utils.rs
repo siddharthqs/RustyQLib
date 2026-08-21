@@ -185,6 +185,7 @@ pub enum PayoffType {
     Accumulator,
     Cliquet,
     VarianceSwap,
+    Rainbow,
     Chooser,
 }
 impl FromStr for PayoffType {
@@ -200,6 +201,7 @@ impl FromStr for PayoffType {
             "accumulator" | "decumulator" => Ok(PayoffType::Accumulator),
             "cliquet" | "ratchet" => Ok(PayoffType::Cliquet),
             "variance_swap" | "varianceswap" => Ok(PayoffType::VarianceSwap),
+            "rainbow" => Ok(PayoffType::Rainbow),
             "lookback" => Ok(PayoffType::Lookback),
             "chooser" => Ok(PayoffType::Chooser),
             _ => Err("Invalid payoff type".into()),

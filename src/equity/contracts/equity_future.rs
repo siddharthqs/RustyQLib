@@ -99,6 +99,7 @@ impl Instrument for EquityFuture {
                 ..Default::default()
             },
             std_err: None,
+            asset_greeks: None,
         })
     }
 }

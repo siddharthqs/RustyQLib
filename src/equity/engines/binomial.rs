@@ -306,6 +306,7 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
             zomma: (vol_up.gamma - vol_down.gamma) / (2.0 * hv),
         },
         std_err: None,
+        asset_greeks: None,
     }
 }
 

@@ -109,6 +109,7 @@ impl Instrument for EquityForward {
                 ..Default::default()
             },
             std_err: None,
+            asset_greeks: None,
         })
     }
 }

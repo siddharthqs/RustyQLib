@@ -13,6 +13,13 @@
 //! Greeks: per-asset `deltas` and `vegas` by common-random-number bumps;
 //! scalar theta and rho. Each asset carries a flat vol; per-asset smiles
 //! for multi-asset payoffs are future work.
+//!
+//! The standalone [`RainbowOption`] is the flat-market **validation
+//! reference**: production pricing (curve discounting, per-leg
+//! surfaces, market rebinding, the one-pass batched Greeks) lives on
+//! [`MultiAssetEquityOption`](super::multi_asset::MultiAssetEquityOption),
+//! which the JSON service routes through. [`RainbowPayoff`] and the
+//! shared closed forms in this file are what the mainline consumes.
 
 use chrono::NaiveDate;
 use libm::exp;
@@ -99,6 +106,200 @@ pub struct RainbowOption {
     chol: Vec<Vec<f64>>,
 }
 
+/// Terminal payoff of one rainbow type on realized asset levels —
+/// shared by the standalone product and [`RainbowPayoff`].
+pub(crate) fn rainbow_terminal_value(
+    rainbow_type: RainbowType,
+    put_or_call: PutOrCall,
+    strike: f64,
+    weights: &[f64],
+    terminal: &[f64],
+) -> f64 {
+    let phi = match put_or_call {
+        PutOrCall::Call => 1.0,
+        PutOrCall::Put => -1.0,
+    };
+    let k = strike;
+    match rainbow_type {
+        RainbowType::BestOf => {
+            let best = terminal.iter().cloned().fold(f64::MIN, f64::max);
+            (phi * (best - k)).max(0.0)
+        }
+        RainbowType::WorstOf => {
+            let worst = terminal.iter().cloned().fold(f64::MAX, f64::min);
+            (phi * (worst - k)).max(0.0)
+        }
+        RainbowType::Spread => (phi * (terminal[0] - terminal[1] - k)).max(0.0),
+        RainbowType::Basket => {
+            let basket: f64 = weights.iter().zip(terminal).map(|(w, s)| w * s).sum();
+            (phi * (basket - k)).max(0.0)
+        }
+        RainbowType::Exchange => match put_or_call {
+            PutOrCall::Call => (terminal[0] - terminal[1]).max(0.0),
+            PutOrCall::Put => (terminal[1] - terminal[0]).max(0.0),
+        },
+    }
+}
+
+/// Margrabe (1978), exact: exchange option pays (S1 - S2)^+
+/// (mirrored for puts).
+pub(crate) fn margrabe_price(
+    spots: &[f64],
+    dividends: &[f64],
+    vols: &[f64],
+    rho: f64,
+    t: f64,
+    put_or_call: PutOrCall,
+) -> f64 {
+    let (i, j) = match put_or_call {
+        PutOrCall::Call => (0, 1),
+        PutOrCall::Put => (1, 0),
+    };
+    let sigma =
+        (vols[i] * vols[i] + vols[j] * vols[j] - 2.0 * rho * vols[i] * vols[j]).sqrt();
+    let (q_i, q_j) = (dividends[i], dividends[j]);
+    let st = sigma * t.sqrt();
+    if st < 1e-12 {
+        // perfectly correlated identical dynamics: the exchange is
+        // deterministic — discounted positive forward difference
+        return (spots[i] * exp(-q_i * t) - spots[j] * exp(-q_j * t)).max(0.0);
+    }
+    let d1 = ((spots[i] / spots[j]).ln() + (q_j - q_i + 0.5 * sigma * sigma) * t) / st;
+    let d2 = d1 - st;
+    spots[i] * exp(-q_i * t) * norm_cdf(d1) - spots[j] * exp(-q_j * t) * norm_cdf(d2)
+}
+
+/// Kirk's (1995) approximation for spread options (S1 - S2 - K)^+.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn kirk_price(
+    spots: &[f64],
+    dividends: &[f64],
+    vols: &[f64],
+    rho: f64,
+    r: f64,
+    t: f64,
+    strike: f64,
+    put_or_call: PutOrCall,
+) -> f64 {
+    let f1 = spots[0] * exp((r - dividends[0]) * t);
+    let f2 = spots[1] * exp((r - dividends[1]) * t);
+    let k = strike;
+    let w = f2 / (f2 + k);
+    let sigma = (vols[0] * vols[0] - 2.0 * rho * vols[0] * vols[1] * w
+        + vols[1] * vols[1] * w * w)
+        .sqrt();
+    let st = sigma * t.sqrt();
+    let d1 = ((f1 / (f2 + k)).ln() + 0.5 * sigma * sigma * t) / st;
+    let d2 = d1 - st;
+    let df = exp(-r * t);
+    match put_or_call {
+        PutOrCall::Call => df * (f1 * norm_cdf(d1) - (f2 + k) * norm_cdf(d2)),
+        PutOrCall::Put => df * ((f2 + k) * norm_cdf(-d2) - f1 * norm_cdf(-d1)),
+    }
+}
+
+/// Lognormal moment matching for basket options (Levy /
+/// Turnbull-Wakeman style): match the basket forward's first two
+/// moments, price with Black's formula.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn basket_moment_match_price(
+    spots: &[f64],
+    dividends: &[f64],
+    vols: &[f64],
+    correlations: &[Vec<f64>],
+    weights: &[f64],
+    r: f64,
+    t: f64,
+    strike: f64,
+    put_or_call: PutOrCall,
+) -> f64 {
+    let n = spots.len();
+    let fwds: Vec<f64> = (0..n)
+        .map(|i| weights[i] * spots[i] * exp((r - dividends[i]) * t))
+        .collect();
+    let m1: f64 = fwds.iter().sum();
+    let mut m2 = 0.0;
+    for i in 0..n {
+        for j in 0..n {
+            m2 += fwds[i] * fwds[j] * exp(correlations[i][j] * vols[i] * vols[j] * t);
+        }
+    }
+    let log_var = (m2 / (m1 * m1)).ln().max(1e-12);
+    let sqrt_v = log_var.sqrt();
+    let k = strike;
+    let d1 = ((m1 / k).ln() + 0.5 * log_var) / sqrt_v;
+    let d2 = d1 - sqrt_v;
+    let df = exp(-r * t);
+    match put_or_call {
+        PutOrCall::Call => df * (m1 * norm_cdf(d1) - k * norm_cdf(d2)),
+        PutOrCall::Put => df * (k * norm_cdf(-d2) - m1 * norm_cdf(-d1)),
+    }
+}
+
+/// The rainbow payoffs as a mainline [`Payoff`], priced inside
+/// [`MultiAssetEquityOption`](super::multi_asset::MultiAssetEquityOption)
+/// on the terminal correlated-GBM route (best-of / worst-of / spread /
+/// basket / exchange) or the analytic engine (Margrabe / Kirk / moment
+/// matching). Terminal-only: the value is a function of the realized
+/// levels at maturity, evaluated through
+/// [`terminal_value`](Self::terminal_value). The standalone
+/// [`RainbowOption`] remains the flat-market validation reference.
+#[derive(Debug, Clone)]
+pub struct RainbowPayoff {
+    pub exercise_style: crate::core::utils::ContractStyle,
+    pub rainbow_type: RainbowType,
+    pub put_or_call: PutOrCall,
+    /// Strike (unused by exchange options).
+    pub strike_price: f64,
+    /// Basket weights in leg order (equal weights by default); unused
+    /// by the other types.
+    pub weights: Vec<f64>,
+}
+
+impl RainbowPayoff {
+    /// Payoff on the realized terminal levels, one value per leg.
+    pub fn terminal_value(&self, terminal: &[f64]) -> f64 {
+        rainbow_terminal_value(
+            self.rainbow_type,
+            self.put_or_call,
+            self.strike_price,
+            &self.weights,
+            terminal,
+        )
+    }
+}
+
+impl crate::equity::utils::Payoff for RainbowPayoff {
+    /// Degenerate single-asset value: zero (the payoff needs every
+    /// leg's terminal level).
+    fn payoff(&self, _spot: f64, _strike: f64) -> f64 {
+        0.0
+    }
+    fn path_payoff(&self, _path: &[f64], _strike: f64) -> f64 {
+        panic!(
+            "Rainbow payoffs read every leg's terminal level and cannot be              valued through a single-asset path; the multi-asset engines              price them via terminal_value"
+        );
+    }
+    fn is_path_dependent(&self) -> bool {
+        false
+    }
+    fn payoff_kind(&self) -> crate::equity::utils::PayoffType {
+        crate::equity::utils::PayoffType::Rainbow
+    }
+    fn put_or_call(&self) -> &PutOrCall {
+        &self.put_or_call
+    }
+    fn exercise_style(&self) -> &crate::core::utils::ContractStyle {
+        &self.exercise_style
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn crate::equity::utils::Payoff> {
+        Box::new(self.clone())
+    }
+}
+
 impl Instrument for RainbowOption {
     fn try_npv(&self) -> Result<f64, RustyQLibError> {
         self.check_engine_support()?;
@@ -129,6 +330,7 @@ impl Instrument for RainbowOption {
                 ..Default::default()
             },
             std_err,
+            asset_greeks: None,
         })
     }
 }
@@ -336,30 +538,13 @@ impl RainbowOption {
 
     /// Terminal payoff on realized asset levels.
     fn payoff(&self, terminal: &[f64]) -> f64 {
-        let phi = match self.put_or_call {
-            PutOrCall::Call => 1.0,
-            PutOrCall::Put => -1.0,
-        };
-        let k = self.strike_price;
-        match self.rainbow_type {
-            RainbowType::BestOf => {
-                let best = terminal.iter().cloned().fold(f64::MIN, f64::max);
-                (phi * (best - k)).max(0.0)
-            }
-            RainbowType::WorstOf => {
-                let worst = terminal.iter().cloned().fold(f64::MAX, f64::min);
-                (phi * (worst - k)).max(0.0)
-            }
-            RainbowType::Spread => (phi * (terminal[0] - terminal[1] - k)).max(0.0),
-            RainbowType::Basket => {
-                let basket: f64 = self.weights.iter().zip(terminal).map(|(w, s)| w * s).sum();
-                (phi * (basket - k)).max(0.0)
-            }
-            RainbowType::Exchange => match self.put_or_call {
-                PutOrCall::Call => (terminal[0] - terminal[1]).max(0.0),
-                PutOrCall::Put => (terminal[1] - terminal[0]).max(0.0),
-            },
-        }
+        rainbow_terminal_value(
+            self.rainbow_type,
+            self.put_or_call,
+            self.strike_price,
+            &self.weights,
+            terminal,
+        )
     }
 
     // ── Pricing ─────────────────────────────────────────────────────────
@@ -467,74 +652,42 @@ impl RainbowOption {
         }
     }
 
-    /// Margrabe (1978), exact: exchange option pays (S1 - S2)^+.
     fn margrabe(&self, p: &Params) -> f64 {
-        let (i, j) = match self.put_or_call {
-            PutOrCall::Call => (0, 1),
-            PutOrCall::Put => (1, 0),
-        };
-        let rho = self.correlations[0][1];
-        let sigma = (p.vols[i] * p.vols[i] + p.vols[j] * p.vols[j]
-            - 2.0 * rho * p.vols[i] * p.vols[j])
-            .sqrt();
-        let (q_i, q_j) = (self.dividends[i], self.dividends[j]);
-        let st = sigma * p.t.sqrt();
-        if st < 1e-12 {
-            // perfectly correlated identical dynamics: the exchange is
-            // deterministic — discounted positive forward difference
-            return (p.spots[i] * exp(-q_i * p.t) - p.spots[j] * exp(-q_j * p.t)).max(0.0);
-        }
-        let d1 = ((p.spots[i] / p.spots[j]).ln() + (q_j - q_i + 0.5 * sigma * sigma) * p.t) / st;
-        let d2 = d1 - st;
-        p.spots[i] * exp(-q_i * p.t) * norm_cdf(d1) - p.spots[j] * exp(-q_j * p.t) * norm_cdf(d2)
+        margrabe_price(
+            &p.spots,
+            &self.dividends,
+            &p.vols,
+            self.correlations[0][1],
+            p.t,
+            self.put_or_call,
+        )
     }
 
-    /// Kirk's (1995) approximation for spread options (S1 - S2 - K)^+.
     fn kirk(&self, p: &Params) -> f64 {
-        let f1 = p.spots[0] * exp((p.r - self.dividends[0]) * p.t);
-        let f2 = p.spots[1] * exp((p.r - self.dividends[1]) * p.t);
-        let k = self.strike_price;
-        let rho = self.correlations[0][1];
-        let w = f2 / (f2 + k);
-        let sigma = (p.vols[0] * p.vols[0] - 2.0 * rho * p.vols[0] * p.vols[1] * w
-            + p.vols[1] * p.vols[1] * w * w)
-            .sqrt();
-        let st = sigma * p.t.sqrt();
-        let d1 = ((f1 / (f2 + k)).ln() + 0.5 * sigma * sigma * p.t) / st;
-        let d2 = d1 - st;
-        let df = exp(-p.r * p.t);
-        match self.put_or_call {
-            PutOrCall::Call => df * (f1 * norm_cdf(d1) - (f2 + k) * norm_cdf(d2)),
-            PutOrCall::Put => df * ((f2 + k) * norm_cdf(-d2) - f1 * norm_cdf(-d1)),
-        }
+        kirk_price(
+            &p.spots,
+            &self.dividends,
+            &p.vols,
+            self.correlations[0][1],
+            p.r,
+            p.t,
+            self.strike_price,
+            self.put_or_call,
+        )
     }
 
-    /// Lognormal moment matching for basket options (Levy / Turnbull-Wakeman
-    /// style): match the basket forward's first two moments, price with
-    /// Black's formula.
     fn basket_moment_match(&self, p: &Params) -> f64 {
-        let n = p.spots.len();
-        let fwds: Vec<f64> = (0..n)
-            .map(|i| self.weights[i] * p.spots[i] * exp((p.r - self.dividends[i]) * p.t))
-            .collect();
-        let m1: f64 = fwds.iter().sum();
-        let mut m2 = 0.0;
-        for i in 0..n {
-            for j in 0..n {
-                m2 +=
-                    fwds[i] * fwds[j] * exp(self.correlations[i][j] * p.vols[i] * p.vols[j] * p.t);
-            }
-        }
-        let log_var = (m2 / (m1 * m1)).ln().max(1e-12);
-        let sqrt_v = log_var.sqrt();
-        let k = self.strike_price;
-        let d1 = ((m1 / k).ln() + 0.5 * log_var) / sqrt_v;
-        let d2 = d1 - sqrt_v;
-        let df = exp(-p.r * p.t);
-        match self.put_or_call {
-            PutOrCall::Call => df * (m1 * norm_cdf(d1) - k * norm_cdf(d2)),
-            PutOrCall::Put => df * (k * norm_cdf(-d2) - m1 * norm_cdf(-d1)),
-        }
+        basket_moment_match_price(
+            &p.spots,
+            &self.dividends,
+            &p.vols,
+            &self.correlations,
+            &self.weights,
+            p.r,
+            p.t,
+            self.strike_price,
+            self.put_or_call,
+        )
     }
 
     // ── Monte Carlo (correlated terminal GBM) ───────────────────────────

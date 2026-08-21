@@ -168,6 +168,14 @@ impl EquityOption {
                      or as the standalone 'variance_swap' product contract",
                 ));
             }
+            PayoffType::Rainbow => {
+                return Err(RustyQLibError::invalid_input(
+                    "payoff_type",
+                    "rainbow payoffs are multi-asset: build through \
+                     MultiAssetEquityOption::builder, or as the 'rainbow_option' \
+                     product contract",
+                ));
+            }
             PayoffType::Vanilla => builder.vanilla(side),
             PayoffType::Binary => {
                 let binary_type = match data
