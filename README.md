@@ -1,521 +1,35 @@
-[![Build and Tests](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml/badge.svg)](https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-![Crates.io](https://img.shields.io/crates/dr/rustyqlib)
-![Crates.io](https://img.shields.io/crates/v/rustyqlib)
-[![codecov](https://codecov.io/gh/siddharthqs/RustyQLib/graph/badge.svg?token=879K6LTTR4)](https://codecov.io/gh/siddharthqs/RustyQLib)
+<p align="center">
+  <img src="docs/logo.png" alt="RustyQLib" width="260">
+</p>
 
-# RustyQLib — Pricing Options using JSON or XML
+<h1 align="center">RustyQLib</h1>
+<p align="center"><em>Quantitative finance in Rust — price derivatives from JSON, XML, or Rust.</em></p>
 
-RustyQLib is a lightweight quantitative finance library written entirely in Rust.
-It prices equity derivatives through JSON or XML contracts (a stateless pricing service
-in a single binary) or as a Rust library, with an emphasis on numerically validated
-implementations: every pricer is cross-checked against independent oracles,
-put-call parity, replication identities and cross-engine agreement in the test suite.
+<p align="center">
+<a href="https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml"><img src="https://github.com/siddharthqs/RustyQLib/actions/workflows/rust.yml/badge.svg" alt="Build and Tests"></a>
+<a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+<img src="https://img.shields.io/crates/v/rustyqlib" alt="Crates.io">
+<img src="https://img.shields.io/crates/dr/rustyqlib" alt="Downloads">
+<a href="https://codecov.io/gh/siddharthqs/RustyQLib"><img src="https://codecov.io/gh/siddharthqs/RustyQLib/graph/badge.svg?token=879K6LTTR4" alt="codecov"></a>
+</p>
 
-## Highlights
+---
 
-- **Six pricing engines** — analytic closed forms, two analytic American
-  approximations (Barone-Adesi-Whaley and Bjerksund-Stensland 2002), binomial
-  tree, finite difference (log-spot Crank-Nicolson with Rannacher smoothing),
-  and parallel Monte Carlo — behind one dispatch, so the same contract prices
-  on any suitable engine.
-- **Six volatility frameworks** — Black-Scholes, **Dupire local volatility**
-  (calibrated non-parametrically from an implied vol surface), **Heston
-  stochastic volatility** (semi-analytic characteristic-function pricing +
-  Monte Carlo) with **Bates jump-diffusion extensions** (Heston + lognormal
-  Merton jumps, and Heston + Kou double-exponential jumps, both priced
-  semi-analytically through the shared characteristic-function machinery and
-  calibrated by the same Levenberg-Marquardt transform-space pattern),
-  **rough Bergomi** (Bayer-Friz-Gatheral rough volatility: non-Markovian
-  Volterra variance simulated by the exact joint-Gaussian scheme on
-  moderate grids and the FFT-accelerated Bennedsen-Lunde-Pakkanen hybrid
-  scheme on fine ones, European vanillas priced on the conditional
-  Romano-Touzi estimator — captures the `T^{H-1/2}` short-dated skew
-  explosion diffusive models cannot),
-  **stochastic local volatility** (Heston-style variance times a leverage
-  function calibrated to the Dupire surface by the particle / binning
-  method, so vanillas reprice while forward smiles stay stochastic),
-  **SABR** (Hagan-Kumar-Lesniewski-Woodward: Hagan's lognormal implied-vol
-  expansion into the Black-Scholes closed forms on the analytic engine —
-  vanillas plus smile-consistent digitals carrying the `vega * dsigma/dK`
-  skew correction — two-factor `(forward, alpha)` Monte Carlo for
-  path-dependent payoffs, per-expiry Levenberg-Marquardt smile calibration
-  at fixed or free `beta`, and a `SabrSurfaceFit` smoother that
-  parameterizes a noisy chain-implied surface into smooth C^2 smiles),
-  and **SVI / SSVI parametric implied surfaces** (Gatheral,
-  Gatheral-Jacquier) — Levenberg-Marquardt smile and surface calibration,
-  Gatheral-Jacquier butterfly (`g(k)`) and calendar no-arbitrage checks, and
-  sampling into the pricing vol surface.
-- **JSON and XML** contracts and results, over a single shared schema.
-- **Market-standard infrastructure** — discount curves with discount factors as the
-  source of truth (flat / zero rates / discount factors / forward rates in, any
-  compounding), volatility surfaces (flat, strike x expiry, moneyness, FX-style
-  delta quotes), robust implied vol, day counts, term-structure-consistent PDE
-  discounting, and **holiday calendars with business-day conventions**
-  (weekends-only, TARGET, NYSE, UK bank holidays, custom lists — rule-based,
-  any year): date adjustment (following / modified following / preceding),
-  settlement lags (`add_business_days`), and periodic **schedule generation**
-  (forward/backward with stubs). Autocallable observation dates can be
-  calendar-generated (`.autocall_schedule(3, Calendar::UsNyse)`) or supplied
-  explicitly (`autocall_observation_dates` in JSON), so observations never
-  land on weekends or holidays.
-- **Options on futures**: European vanillas priced with Black-76, both
-  standard (discounted premium) and futures-style (margined, undiscounted).
-- **Payoffs**: European & American vanillas, cash- and asset-or-nothing binaries,
-  all eight barrier types (knock-in/out, up/down) with **rebates** (at hit or
-  at expiry) and **double-barrier corridors** (Ikeda-Kunitomo), Asian options (arithmetic /
-  geometric, fixed / floating strike), forward-start options, **chooser
-  options** (holder picks call or put at the choice date; simple choosers
-  by the Rubinstein parity decomposition, complex choosers — per-leg
-  strikes and expiries — by critical-spot solve plus bivariate normals),
-  autocallable
-  notes with coupons and knock-in protection (incl. **Phoenix certificates**
-  with conditional and memory coupons), **lookback options** (floating and
-  fixed strike, Goldman-Sosin-Gatto / Conze-Viswanathan closed forms),
-  **accumulators / decumulators** (daily geared accrual with knock-out,
-  priced as a strip of barrier-option pairs or by Monte Carlo),
-  **variance, gamma and corridor variance swaps** (model-free replication
-  over any smile: DDKZ log contract, spot-weighted `S ln S` contract with
-  exact carry adjustment, Carr-Lewis corridor truncation with exact corridor
-  additivity; seasoned MtM with accrued realized variance and the exact GBM
-  volatility-swap strike), **cliquets / ratchets, reverse
-  cliquets and Napoleons** (capped-floored return strips, coupon-minus-losses
-  and coupon-plus-worst-month structures; closed forms under Black-Scholes
-  where the payoff permits, Monte Carlo under GBM or Heston), and **multi-asset rainbow
-  options** (best-of, worst-of, spread, basket, exchange) on n correlated
-  assets. Carry handles dividend yield, discrete cash dividends and stock
-  borrow cost.
+A lightweight quantitative finance library written entirely in Rust. Its
+numerical core — solvers, optimizers, lattices, PDE grids, FFT, adjoint
+differentiation — is written in-crate rather than pulled from a numerics
+stack, and the whole library contains **zero `unsafe`**. Use it as a stateless
+pricing service in a single binary, or as a library.
 
-## Products and engines
+Every pricer is cross-checked in the test suite against independent oracles,
+put-call parity, replication identities and cross-engine agreement.
 
-| Payoff | Analytic | Binomial | Finite difference | Monte Carlo |
-|---|---|---|---|---|
-| Vanilla European | Black-Scholes / Heston CF | yes | yes (grid Greeks) | yes (+ stderr) |
-| Vanilla on a future | Black-76 (discounted / margined) | — | — | — |
-| Vanilla American | Barone-Adesi-Whaley / Bjerksund-Stensland 2002 (approx.) | yes | Brennan-Schwartz | two-pass Longstaff-Schwartz |
-| Vanilla Bermudan (discrete exercise dates) | — | yes | Brennan-Schwartz on exercise dates | LSMC restricted to exercise dates |
-| Perpetual American | Merton closed form (exact) | — | — | — |
-| Binary (cash / asset) | closed form / Heston CF | yes | yes (Rannacher + cell averaging) | yes |
-| Barrier (8 types, + rebates at hit / at expiry) | Reiner-Rubinstein + E/F rebate terms | — | absorbing boundary / parity | Brownian-bridge corrected (rebate at expiry) |
-| Double barrier (knock-in / knock-out corridor) | Ikeda-Kunitomo image series | — | — | discrete corridor monitoring |
-| Asian (arith / geo, fixed / floating) | Turnbull-Wakeman (fixed + Henderson-Wojakowski average-strike) / exact geometric (fixed + average-strike) | — | — | geometric control variate |
-| Forward-start | Rubinstein (BS) | — | — | yes (incl. Heston forward smile) |
-| Chooser (pick call or put at the choice date; simple or per-leg strikes/expiries) | Rubinstein: parity decomposition (simple) / critical-spot + bivariate normal (complex) | — | — | — |
-| Autocallable / Phoenix (conditional + memory coupons) | — | — | — | multi-date discounting; GBM / local vol / Heston |
-| Rainbow (best/worst-of, spread, basket, exchange) | Margrabe / Kirk / moment matching | — | — | correlated terminal GBM |
-| Accumulator / decumulator (geared, knock-out) | strip of Reiner-Rubinstein knock-out pairs | — | — | discrete daily knockout |
-| Lookback (floating / fixed strike) | Goldman-Sosin-Gatto / Conze-Viswanathan (continuous) | — | — | discrete monitoring |
-| Variance / gamma / corridor variance swap (+ GBM vol-swap strike) | model-free replication: DDKZ 1/K^2 kernel, S ln S contract with carry adjustment, Carr-Lewis corridor truncation | — | — | — |
-| Cliquet / ratchet / reverse cliquet / Napoleon | forward-start call/put spreads (no global clamp; Napoleon MC-only) | — | — | per-period GBM or Heston paths |
-
-Model availability: local vol runs on the FD and MC engines; Heston runs on the
-analytic (vanilla + binary) and MC engines (all payoffs above except American
-and rainbow); SABR runs on the analytic (vanilla + binary, Hagan vol into the
-Black-Scholes closed forms) and MC engines (European exercise); rough Bergomi
-runs on the MC engine only (European exercise —
-the non-Markovian variance has no characteristic function, PDE state, or
-LSMC-compatible exercise state). Rainbow options are a separate product type
-(`"product_type": "rainbow_option"`) with per-asset spots/vols/dividends and a
-correlation matrix; outputs include per-asset `deltas` and `vegas`.
-
-### Engine details
-
-- **Binomial lattice**: six parameterizations behind one enum —
-  **Leisen-Reimer** (the default: strike-aware Peizer-Pratt, second-order
-  smooth convergence, at ~100 steps it matches CRR at 1000 — ~90x
-  faster), Cox-Ross-Rubinstein, Jarrow-Rudd, Tian, Trigeorgis and the
-  additive equal-probability tree — selected per contract (`tree_type`,
-  `tree_steps`). The engine lives in `core::lattice`, asset-class
-  agnostic (payoffs and early exercise enter as closures), with two
-  implementations: an optimized rolling-array engine (O(n) memory) and a
-  diagnostic engine that keeps the full spot/value trees, the
-  early-exercise boundary per layer, tree Greeks and wall-clock timing,
-  plus a `convergence_study` helper for step-ladder analysis. A
-  **trinomial lattice** rounds out `core::lattice` for fixed income:
-  per-node branching (Hull-White edge-switching included), per-node
-  discounting (the short rate lives on the node), and Arrow-Debreu state
-  prices by forward induction — validated by repricing the Vasicek
-  zero-coupon bond closed form on a mean-reverting clamped tree. A
-  **term-structure lattice** (`tree_term_structure` in JSON,
-  `.tree_term_structure()` on the builder) applies time-dependent
-  parameters directly on the tree: a variance-equal time grid keeps the
-  tree recombining under a vol term structure, while per-step
-  probabilities and discount factors take each step's forward rate and
-  carry from the curve — so rate timing (not just the zero rate to
-  maturity) prices into early exercise.
-- **Finite difference**: theta-scheme in log-spot with per-node, per-step
-  coefficients (local vol ready), forward rates from the discount curve per time
-  step, cell-averaged terminal conditions for digitals, barrier-aligned absorbing
-  boundaries, and delta/gamma/theta read directly off the grid. Grid sizes are
-  configurable per contract. The numerical kernels live in a reusable
-  `core::fd_solvers` toolkit covering 1-D to 3-D problems: Thomas tridiagonal,
-  Brennan-Schwartz and PSOR obstacle solvers (one- and two-sided), tensor-grid
-  axis operators, and Douglas / Hundsdorfer-Verwer ADI time steppers with
-  explicit mixed-derivative (correlation) terms — the machinery a 2-D Heston or
-  hybrid three-factor PDE needs.
-- **Monte Carlo**: deterministic per-path RNG streams (bit-reproducible under
-  rayon parallelism), low-discrepancy sampling through a Brownian bridge,
-  exact/Euler/Milstein stepping, antithetic + moment matching, geometric control
-  variates for Asians, Brownian-bridge barrier monitoring, and standard errors
-  reported with every price. Greeks via common-random-number bumps.
-- **Analytic American approximations**: Barone-Adesi-Whaley (`pricer: "BAW"`,
-  quadratic approximation with a Newton solve for the exercise boundary) and
-  Bjerksund-Stensland 2002 (`pricer: "BS2002"`, two-step flat exercise
-  boundary priced in closed form via the cumulative bivariate normal — a lower
-  bound on the true price, generally the tighter of the two). Both price in
-  under a microsecond, within a few cents of a fine tree, and return true
-  American Greeks (unlike the tree, whose Greeks fall back to the European
-  closed form). Use them when speed matters more than the last basis point.
-  **Perpetual American** calls and puts have exact Merton closed forms
-  (`equity::perpetual`), verified against the stationary pricing ODE, smooth
-  pasting and the finite-maturity limit.
-- **Calibration workflow**: quoted option prices -> robust implied vols
-  (safeguarded Newton with arbitrage bounds) -> implied surface -> Dupire local
-  vol -> reprice anything, including barriers under smile dynamics. **Heston
-  calibration** fits all five parameters to vanilla quotes by
-  Levenberg-Marquardt in an unconstrained transform space (log/atanh).
-  The Heston/Bates calibration objectives price through the **COS method**
-  (Fang-Oosterlee Fourier-cosine expansion): one characteristic-function
-  sweep per expiry prices the whole strike strip, making a 20-strike smile
-  ~90x faster than per-strike integration (`heston::cos_smile`). The
-  truncation range comes from numerically estimated cumulants (including
-  the kurtosis term, so Feller-violated fat tails stay covered), deep
-  ITM prices recover via put-call parity from the CF-implied forward, and
-  the legacy P1/P2 integration is kept as the independent cross-check
-  oracle — the two methods agree to ~1e-6 across the test grid.
-  Alongside COS, the **Carr-Madan FFT** engine (`equity::carr_madan`)
-  prices a dense ~0.4%-spaced log-strike grid from one FFT of the
-  Heston / Bates characteristic function (damped-call transform, Simpson
-  weights, 4-point Lagrange readout) — the natural tool for generating
-  whole implied-vol surfaces from fitted parameters; the two Fourier
-  methods cross-check each other in the tests.
-- **Risk analytics** (`risk`): Value-at-Risk and Expected Shortfall in the
-  standard flavors — historical, parametric normal, Cornish-Fisher
-  higher-moment corrected, and delta-normal multi-asset VaR with the exact
-  Euler component / marginal decomposition — plus scenario **VaR/ES for an
-  options book** (delta-gamma-vega-theta from aggregated Greeks and full
-  revaluation through the portfolio repricer, on shared scenarios so the
-  difference isolates the Taylor error), EWMA / realized volatility,
-  max drawdown, Sharpe / Sortino, the Kupiec VaR backtest, and
-  **TOML-configured stress MtM**: named shock scenarios (relative / absolute
-  bumps on spot, vol, rates and time, with per-underlying filters and
-  key-rate `tenors` restricting a rate shock to part of the curve) prepared
-  into bumped market data, checked against a configurable no-arbitrage
-  guard (`allow` / `warn` / `reject` on the minimum implied forward) and
-  fully revalued, reported per trade and aggregated per scenario.
-- **Adjoint Algorithmic Differentiation** (`core::aad`): a tape-based
-  reverse-mode differentiator with operator overloading — write a pricer over
-  `Var` and one backward sweep returns every input sensitivity at a fixed
-  small multiple of pricing cost. Ships with the Black-Scholes closed form
-  on tape (all six first-order Greeks from one sweep, validated to the
-  library's closed forms) and pathwise Monte Carlo Greeks (delta / vega /
-  rho differentiated straight through the simulation).
-- **Numerical toolkits** in `core`: 1-D root finding (`solvers`: bisection,
-  Newton-Raphson, secant, Halley, safeguarded Newton — pluggable by enum),
-  multi-dimensional optimization (`optimization`: Levenberg-Marquardt, BFGS,
-  conjugate gradient, steepest descent, Nelder-Mead, differential evolution —
-  the fitting layer for the Heston, SABR and SVI calibrations), FD
-  linear solvers (`fd_solvers`, 1-D to 3-D), asset-agnostic Monte Carlo
-  machinery (`montecarlo`: reproducible per-path RNG streams, Sobol with
-  digital-shift scrambling, Halton with Cranley-Patterson rotation, Brownian
-  bridge, stratified / Latin-hypercube sampling, control variates, moment
-  matching, Welford statistics), a fast Fourier transform (`fft`: radix-2 +
-  Bluestein for any length, with a reusable real-convolution plan — the
-  engine of the rough Bergomi hybrid scheme), an interpolation toolkit
-  (`interpolation`:
-  linear, cubic splines with natural / clamped / not-a-knot boundaries,
-  shape-preserving PCHIP and Akima, bilinear grids and thin-plate splines for
-  2-D vol surfaces), and linear algebra (`linalg`: Cholesky / QR / SVD /
-  symmetric-eigen decompositions with least-squares and pseudo-inverse
-  solves, plus correlation repair — PSD-tolerant Cholesky and Higham's
-  nearest-correlation projection, auto-applied to non-PSD rainbow
-  correlation inputs).
-
-## Feature flags
-
-The default build is the lean pricing library — no CLI, no XML, ~40% fewer
-transitive dependencies. Opt in to what you need:
-
-| Feature | Adds | Extra deps |
-|---|---|---|
-| *(default)* | pricing, calibration, risk, JSON contracts | — |
-| `xml` | XML contract input/output | `quick-xml` |
-| `stress-config` | TOML stress-scenario files | `toml` |
-| `fetch` | free official EOD market data (US Treasury par yields) | `ureq`, `csv` |
-| `cli` | the `rustyqlib` binary (implies `xml`, `stress-config`, `fetch`) | `clap`, `clap_complete`, `csv`, `anyhow`, `inquire` |
+## Quick start
 
 ```bash
-cargo add rustyqlib                    # library only
-cargo install rustyqlib --features cli # the command-line tool
+cargo add rustyqlib                     # library
+cargo install rustyqlib --features cli  # command-line tool
 ```
-
-## Benchmarks
-
-`cargo bench` runs a criterion suite over the public API (one benchmark per
-engine, implied vol, and a 1,000-option batch), with fixed seeds and grids
-so runs are comparable; criterion flags statistically significant
-regressions against the previous run. Indicative single-threaded numbers:
-a fully-loaded Black-Scholes `npv()` (discount curve and vol surface
-lookups included) runs in ~0.7 µs — about 1.5M prices/sec; a 20-strike
-Heston smile prices in ~1.6 ms via the COS method vs ~137 ms by
-per-strike integration (~90x, the ratio the calibration loop inherits);
-an American put on a Leisen-Reimer 101-step tree prices in ~26 µs vs
-~2.3 ms on the CRR-1000 tree at comparable accuracy.
-
-## Running the CLI
-
-```bash
-cargo build --release --features cli
-# price a JSON/XML file of contracts (omit --output to print to stdout)
-rustyqlib price --input contracts.json --output results.json
-# price every contract file in a directory (parallel)
-rustyqlib price --input contracts/ --output results/
-# compose with pipes: '-' reads stdin, stdout is the default output
-cat contracts.json | rustyqlib price -i - | jq '.[].output.pv'
-# force the output format regardless of extensions
-rustyqlib price -i contracts.json --format xml
-# build an implied vol surface from quoted options
-rustyqlib build --input quotes.json --output out/
-# fetch the latest US Treasury par yield curve, as published
-rustyqlib fetch ust -o ust.json
-# a specific business day, or XML output
-rustyqlib fetch ust --date 2026-08-05 --format xml
-# NY Fed reference rates: SOFR / EFFR
-rustyqlib fetch sofr
-rustyqlib fetch effr --date 2026-08-04
-# listed option chain (Cboe, 15-min delayed): verbatim feed, or normalized
-rustyqlib fetch chain --symbol AAPL -o aapl_raw.json
-rustyqlib fetch chain --symbol AAPL --normalize -o aapl_chain.json
-# chain -> implied vol surface + Dupire local vol (document + 3D plot each),
-# discounted off the fetched Treasury curve (or a flat --rate)
-rustyqlib fetch ust -o ust.json
-rustyqlib fetch chain --symbol AAPL --normalize | rustyqlib build --curve ust.json -i - -o out/
-# stress MtM: revalue a one-underlying options book under TOML scenarios
-rustyqlib stress -i portfolio.json -c scenarios.toml
-# VaR / Expected Shortfall by scenario simulation (delta-gamma and full revaluation)
-rustyqlib risk -i portfolio.json --confidence 0.99 --horizon-days 1
-# implied Black-Scholes vol from a quoted price
-rustyqlib implied-vol --spot 100 --strike 105 --price 4.2 --maturity 0.5 -p C --rate 0.05
-# guided pricing in the terminal
-rustyqlib interactive
-# shell completions (bash, zsh, fish, powershell, elvish)
-rustyqlib completions bash > /etc/bash_completion.d/rustyqlib
-```
-
-Every command reads files or stdin (`-i -`) and writes to `--output` or
-stdout, so results pipe cleanly into `jq` and friends; diagnostics go to
-stderr — tune them with `-v`/`-vv` (info/debug), `-q`/`-qq` (errors
-only/silent), or `RUST_LOG`. Errors and confirmations are color-coded in
-a terminal; `--color always|never` overrides the auto-detection (which
-also honors `NO_COLOR`), and piped output is always plain. Errors exit non-zero with
-a one-line message; in a batch, a bad contract is reported in its own
-result's `error` field without aborting the rest. For `stress` and `risk`
-the portfolio is a contracts document of options on one underlying, with
-the signed position quantity taken from each contract's `long_short`
-(default 1; see `src/examples/stress_config.toml` for the scenario
-format). The pre-0.0.4 `file` and `dir` subcommands remain as hidden
-aliases of `price`.
-
-### Free market data (`fetch`)
-
-`fetch` pulls free, keyless official data and emits it (JSON or XML)
-exactly as published — nothing reinterpreted. Four sources so far:
-`ust`, the [US Treasury daily par yield curve](https://home.treasury.gov/resource-center/data-chart-center/interest-rates)
-(relative tenor labels and percent yields, verbatim); the
-[NY Fed reference rates](https://www.newyorkfed.org/markets/reference-rates/)
-`sofr` and `effr` (one observation per business day — rate, percentiles,
-volume, and for EFFR the FOMC target range, passed through as the feed's
-own record); and `chain`, the Cboe 15-minute-delayed listed option chain
-for any underlying. `chain` emits the feed verbatim by default, or with
-`--normalize` as the library's unified `OptionChain` document — the
-input to `implied_vol_surface_from_chain`, which cleans the quotes,
-implies each expiry's forward from put-call parity, solves Black-76
-implied vols and returns a `VolSurface` (with a build report of the
-forwards used, every quote dropped by reason, and static-arbitrage
-diagnostics — butterfly and calendar violations at the quoted pillars,
-reported rather than enforced). Surfaces save and
-reload as JSON documents via `to_json`/`from_json`, bit-exact. The
-`build` command consumes any chain document (raw, wrapped or
-normalized) directly, writing that reloadable surface document plus an
-interactive 3-D Plotly plot of the surface with the raw quote pillars
-marked on it — and then calibrates Dupire local vol from the built
-surface, writing a sampled local-vol grid document and its own 3-D
-plot alongside. Chains discount off a flat `--rate`, or off
-`--curve ust.json`: a fetched Treasury par-yield document that `build`
-bootstraps into a full discount curve (par yields below one year as
-bills on the discount basis, synthetic par bonds beyond — the explicit
-interpretation step the pass-through `fetch` documents deliberately
-omit). Each surface and local-vol artifact comes in **four flavors**: *raw*
-(the market as quoted, violations reported), *cleaned*
-(`vol_surface_cleaned`, `local_vol_cleaned`: a minimal-change
-static-arbitrage repair — per-expiry convex-hull projection of call
-prices plus a forward total-variance sweep — that moves only violating
-pillars and records every adjustment), *SVI-fitted*
-(`vol_surface_svi`, `local_vol_svi`: one Gatheral SVI smile per expiry
-calibrated to the cleaned surface, butterfly density checked per
-slice, with **analytic** Dupire local vol from the closed-form SVI
-derivatives — smooth by construction, no interpolation spikes; fit
-RMSE in vol bps per slice lands in the metadata), and *SABR-fitted*
-(`vol_surface_sabr`: one Hagan smile per expiry at `beta = 1`, three
-parameters per slice, wings extrapolated by the model's dynamics —
-the smoothing parameterization of choice when you also want the
-calibrated `(alpha, rho, nu)` per expiry for quoting or hedging). Every local-vol
-document also carries a **usability report**: round-trip repricing of
-interior vanillas through the finite-difference local-vol engine,
-scored in implied-vol basis points against the surface's own vols
-(sampled at delta-comparable strikes), the fraction of the grid pinned
-at the clamps or silently guarded back to implied vol, the
-quote-backed trusted region, and a desk-rule verdict — so "is this
-local vol usable?" is a number in the metadata, not a squint at the
-plot. Note the Cboe data is delayed exchange data on
-personal-use terms, unlike the public-domain government feeds. The `ust` curve is Treasury's *fitted* end-of-day curve
-(par yields read off a spline through the on-the-run quotes), and the
-document says so: every fetched document carries a `metadata` block
-recording the source, what the data is, its date, units, quote basis
-and fetch time, so any downstream use is auditable and reproducible
-from the file alone. `--date` pins a business day
-(naming the nearest published day when markets were closed) and
-`--from-file` re-reads a saved CSV offline; the network never touches
-anything else in the library.
-
-```json
-{
-  "metadata": {
-    "source": "US Treasury daily par yield curve rates (home.treasury.gov)",
-    "curve_type": "par yield curve (fitted by the Treasury from on-the-run quotes)",
-    "curve_date": "2026-08-05", "unit": "percent",
-    "quote_basis": "bond-equivalent yield, semiannual coupon convention",
-    "url": "https://home.treasury.gov/...", "fetched_at": "..."
-  },
-  "points": [ {"tenor": "1 Mo", "yield": 3.77}, {"tenor": "30 Yr", "yield": 5.17} ]
-}
-```
-
-### Contract examples
-
-Vanilla European call priced analytically (a flat rate builds a flat curve):
-
-```json
-{
-  "asset": "EQ",
-  "contracts": [{
-    "action": "PV", "asset": "EQ",
-    "product_type": {
-      "product_type": "option", "symbol": "ABC",
-      "underlying_price": 100.0, "put_or_call": "C", "payoff_type": "vanilla",
-      "strike_price": 100.0, "volatility": 0.3, "maturity": "2027-07-17",
-      "risk_free_rate": 0.05, "dividend": 0.0, "pricer": "Analytical"
-    }
-  }]
-}
-```
-
-The same contract can carry richer market data and model choices:
-
-```json
-{
-  "discount_curve": { "type": "zero_rates", "tenors": [0.25, 1.0, "2029-07-17"],
-                      "rates": [0.045, 0.05, 0.055], "compounding": "continuous" },
-  "vol_surface":    { "type": "strike_expiry", "expiries": [0.5, 1.0],
-                      "strikes": [90.0, 100.0, 110.0],
-                      "vols": [[0.32, 0.30, 0.28], [0.33, 0.31, 0.30]] },
-  "mc_model": "heston",
-  "heston": { "v0": 0.09, "kappa": 2.0, "theta": 0.09, "vol_of_vol": 0.4, "rho": -0.7 },
-  "pricer": "MC", "simulation": 100000
-}
-```
-
-Selected fields (all optional unless noted):
-
-| Field | Meaning |
-|---|---|
-| `valuation_date` | pricing as-of date `YYYY-MM-DD`; defaults to today — set it for reproducible pricing and historical re-marking |
-| `pricer` | `Analytical`, `Binomial`, `FD`, `MC`, `BAW`, `BS2002` (analytic American) |
-| `payoff_type` | `vanilla`, `binary`, `barrier`, `asian`, `forward_start`, `autocallable`, `lookback`, `chooser` |
-| `exercise_style` | `European` (default), `American`, `Bermudan` (needs `exercise_dates`) |
-| `exercise_dates` | Bermudan exercise dates `["YYYY-MM-DD", ...]`, strictly increasing; expiry is always exercisable |
-| `binary_type`, `cash_amount` | `cash` / `asset`, cash paid when ITM |
-| `barrier_type`, `barrier_level` | `up_in`, `up_out`, `down_in`, `down_out` |
-| `averaging_type`, `asian_strike_type` | `arithmetic`/`geometric`, `fixed`/`floating` |
-| `rainbow_type`, `assets`, `correlations`, `weights` | rainbow options: `best_of`, `worst_of`, `spread`, `basket`, `exchange` |
-| `forward_start_date`, `strike_fraction` | forward-start options |
-| `choice_date` | chooser options (date the holder picks call or put) |
-| `chooser_call_strike`, `chooser_put_strike`, `chooser_call_expiry`, `chooser_put_expiry` | complex chooser legs; absent fields default to `strike_price` / `maturity` |
-| `autocall_barrier`, `protection_barrier`, `autocall_coupon`, `autocall_observations`, `notional` | autocallable notes |
-| `borrow_cost` | continuous stock borrow (repo) cost, part of the carry |
-| `futures_settlement` | option on a future (Black-76): `discounted` (standard) or `margined` (futures-style); `underlying_price` is then the futures price |
-| `cash_dividends` | discrete dividends `[{"date", "amount"}]`; escrowed model on analytic/tree/terminal-MC, jumps on path-MC and FD |
-| `discount_curve` | `flat`, `zero_rates`, `discount_factors`, `forward_rates` |
-| `vol_surface` | `flat`, `strike_expiry`, `moneyness_expiry`, `delta_expiry` |
-| `mc_model` | `gbm` (default), `local_vol`, `heston` (needs `heston` params), `rbergomi` (needs `rbergomi` params: `xi0`, `eta`, `hurst`, `rho`), `sabr` (needs `sabr` params: `alpha`, `beta`, `rho`, `nu`) |
-| `simulation`, `mc_time_steps`, `mc_scheme`, `mc_sampler`, `mc_seed` | Monte Carlo controls |
-| `fd_spot_steps`, `fd_time_steps` | finite difference grid |
-| `tree_type`, `tree_steps` | binomial lattice: `LeisenReimer` (default), `CRR`, `JarrowRudd`, `Tian`, `Trigeorgis`, `EQP`; steps default 1000 |
-| `tree_term_structure` | apply the discount curve's forward rates and the vol term structure per tree step (variance-equal grid) |
-
-Working examples for every product live in [`src/examples/EQ/`](src/examples/EQ/).
-Monte Carlo outputs include the standard error (`std_err`) alongside price and Greeks.
-
-### XML contracts
-
-Every contract can equally be written in XML — the input format is detected from the
-content and the output format from the output file extension, so `-o results.xml`
-writes XML and `-o results.json` writes JSON regardless of the input:
-
-```xml
-<contracts>
-  <asset>EQ</asset>
-  <contracts>
-    <item>
-      <action>PV</action>
-      <asset>EQ</asset>
-      <product_type product_type="option">
-        <symbol>ABC</symbol>
-        <underlying_price>100.0</underlying_price>
-        <put_or_call>C</put_or_call>
-        <payoff_type>vanilla</payoff_type>
-        <strike_price>100.0</strike_price>
-        <volatility>0.3</volatility>
-        <maturity>2027-07-17</maturity>
-        <risk_free_rate>0.05</risk_free_rate>
-        <pricer>Analytical</pricer>
-      </product_type>
-    </item>
-  </contracts>
-</contracts>
-```
-
-Conventions: elements are object fields; **attributes are fields too** (convenient for
-enum tags such as `type="flat"`); `<item>` children make an array, including
-single-element ones; scalars are inferred, so numbers become numbers while
-`2027-07-17` and `C` stay strings. See
-[`src/examples/EQ/equity_option.xml`](src/examples/EQ/equity_option.xml), and convert
-between formats with `cargo run --features xml --example convert_format -- in.json out.xml`.
-
-XML is a *syntax* over the same data model — documents are transcoded to
-`serde_json::Value` and deserialized with the same derives, so both formats share one
-schema, one set of defaults and one set of validation rules, and every new product
-supports both automatically.
-
-## Runnable examples
-
-One file per product under [`examples/`](examples/), each pricing across every
-applicable engine and model with identity checks:
-
-```bash
-cargo run --release --example vanilla_option     # all four engines, European + American
-cargo run --release --example barrier_option     # eight barrier types, in-out parity
-cargo run --release --example heston_option      # char. function vs MC, smile shape
-cargo run --release --example local_vol_calibration  # quotes -> surface -> Dupire -> reprice
-# a real Cboe chain -> parity forwards -> implied surface (saved/reloaded) -> local vol -> reprice
-cargo run --release --features fetch --example chain_to_local_vol
-```
-
-See [`examples/README.md`](examples/README.md) for the full list.
-
-## Using it as a library
-
-Build contracts with the fluent builder:
 
 ```rust
 use rustyqlib::equity::builder::EquityOptionBuilder;
@@ -526,89 +40,106 @@ use rustyqlib::Instrument;
 // build() validates every input and the engine/payoff combination:
 // an option that builds is guaranteed to price
 let option = EquityOptionBuilder::new()
-    .spot(100.0)
-    .strike(100.0)
-    .flat_vol(0.30)
-    .flat_rate(0.05)
-    .dividend_yield(0.02)
+    .spot(100.0).strike(100.0)
+    .flat_vol(0.30).flat_rate(0.05).dividend_yield(0.02)
     .years_to_maturity(1.0)
     .vanilla(PutOrCall::Call)
     .engine(Engine::FiniteDifference)
     .build()?;
 
-// one call returns value, all Greeks and (on MC engines) the std error
-let result = option.price()?;
-println!(
-    "pv {:.6}  delta {:.4}  vanna {:.4}  charm {:.4}",
-    result.pv, result.greeks.delta, result.greeks.vanna, result.greeks.charm
-);
-
-// ...or use the per-Greek accessors individually
-println!("npv {:.6}  gamma {:.4}", option.npv(), option.gamma());
+// one call returns value, all Greeks, and (on MC engines) the standard error
+let r = option.price()?;
+println!("pv {:.6}  delta {:.4}  vega {:.4}", r.pv, r.greeks.delta, r.greeks.vega);
 ```
 
-...or deserialize the same JSON the CLI consumes:
+## Modules
 
-```rust
-use rustyqlib::equity::vanilla_option::EquityOption;
-use rustyqlib::core::data_models::EquityOptionData;
+Each has its own guide:
 
-let contract: EquityOptionData = serde_json::from_str(json)?;
-let option = EquityOption::from_json(&contract);
+| Module | Covers |
+|---|---|
+| **[`src/equity`](src/equity/README.md)** | Equity derivatives — 10 pricing engines, 20+ payoffs, and the volatility model zoo (local vol, Heston, Bates, SABR, SLV, rough Bergomi, SVI/SSVI/eSSVI) |
+| **[`src/bonds`](src/bonds/README.md)** | Fixed income — Treasury and corporate bonds, bills, FRNs, futures basis, convertibles, credit, and curve bootstrapping |
+| **[`src/cmdty`](src/cmdty/README.md)** | Commodities — swaps, APOs, spread options, swaptions; Bachelier and shifted-lognormal models for underlyings that print negative |
+| **[`src/validation`](src/validation/README.md)** | Model validation — runtime checks that measure model quality on *today's* data, reported in z-scores |
+
+Supporting modules: [`src/core`](src/core) (curves, vol surfaces, day counts,
+holiday calendars, solvers, optimizers, AAD, FFT), [`src/risk`](src/risk)
+(VaR, Expected Shortfall, stress), [`src/data`](src/data) (free market-data
+feeds).
+
+## What's inside
+
+- **10 pricing engines** behind one dispatch — analytic, Black-76, two
+  American approximations (BAW, Bjerksund-Stensland), binomial, finite
+  difference, Heston ADI, parallel Monte Carlo, COS and Carr-Madan.
+- **Eight volatility frameworks** — Black-Scholes, Dupire local vol, Heston,
+  Bates (Merton and Kou jumps), SABR, SLV, rough Bergomi, and SVI/SSVI/eSSVI
+  parametric surfaces with no-arbitrage checks.
+- **20+ payoffs** — vanillas, binaries, all eight barrier types with rebates
+  and double-barrier corridors, Asians, lookbacks, choosers, autocallables and
+  Phoenix notes, cliquets and Napoleons, accumulators, variance/gamma/corridor
+  swaps, and multi-asset rainbows.
+- **Market-standard infrastructure** — discount curves (discount factors as
+  the source of truth), vol surfaces (strike, moneyness, FX delta), robust
+  implied vol, day counts, and holiday calendars with business-day conventions
+  and schedule generation.
+- **Free market data** — US Treasury par yields, NY Fed SOFR/EFFR, and Cboe
+  delayed option chains.
+
+## Feature flags
+
+The default build is the lean pricing library — no CLI, no XML, ~40% fewer
+transitive dependencies.
+
+| Feature | Adds |
+|---|---|
+| *(default)* | pricing, calibration, risk, JSON contracts |
+| `xml` | XML contract input/output |
+| `stress-config` | TOML stress-scenario files |
+| `fetch` | free official market data |
+| `cli` | the `rustyqlib` binary (implies all of the above) |
+
+## CLI
+
+```bash
+# price a JSON/XML file, a directory, or stdin
+rustyqlib price --input contracts.json --output results.json
+cat contracts.json | rustyqlib price -i - | jq '.[].output.pv'
+
+# fetch free market data
+rustyqlib fetch ust -o ust.json                       # Treasury par yields
+rustyqlib fetch sofr                                  # NY Fed reference rates
+rustyqlib fetch chain --symbol AAPL --normalize       # Cboe option chain
+
+# chain -> implied vol surface -> Dupire local vol (documents + 3D plots)
+rustyqlib fetch chain --symbol AAPL --normalize | rustyqlib build --curve ust.json -i - -o out/
+
+# risk
+rustyqlib stress -i portfolio.json -c scenarios.toml
+rustyqlib risk -i portfolio.json --confidence 0.99 --horizon-days 1
+
+rustyqlib --help          # full command list
+rustyqlib interactive     # guided pricing in the terminal
 ```
 
-Lower-level building blocks are exported directly: `YieldCurve`, `VolSurface`,
-`DayCountConvention`, the `Payoff` trait, Dupire `LocalVol`, `HestonParams`, and
-the engine modules (`blackscholes`, `binomial`, `finite_difference`, `montecarlo`).
+## Performance
 
-## Design principles
+Indicative single-threaded figures from `cargo bench` (criterion, fixed seeds):
 
-- **Contracts and market state are separable** — instruments embed the
-  market they were built with (the stateless-service shape), and a
-  `MarketData` snapshot provides the desk shape: capture a book's market
-  once, `bump()` it with named shocks (relative/absolute spot, vol, rate
-  and time, per-underlying filters), and reprice the whole book under the
-  bumped snapshot (`book.npv_under(&market)`), each position revaluing
-  fully on its own engine. The TOML stress runner is a consumer of these
-  primitives.
-- **Discount factors are state, rates are views** — curves store pillar dfs;
-  zero/forward rates in any compounding are derived on demand. Vol surfaces
-  canonicalize every quoting style into per-expiry smiles with total-variance
-  time interpolation.
-- **One payoff trait, every engine** — payoffs implement `payoff(spot, strike)`
-  and (for path dependence) `path_payoff(path, strike)`; adding a payoff makes it
-  price on every compatible engine without engine changes.
-- **Validated numerics** — golden values against independently coded oracles,
-  parity and replication identities at 1e-10, cross-engine agreement tests, and
-  bit-reproducible Monte Carlo. Engines refuse unsupported combinations with a
-  clear error instead of silently mispricing.
-- **Typed errors, no panics at the boundary** — every fallible operation
-  returns `RustyQLibError` (`InvalidInput` naming the offending field,
-  `UnsupportedEngine`, `CalibrationFailed` with iterations and residual,
-  `NumericalError`, `ParseError`). Pricing is fallible via
-  `Instrument::try_npv()` / `try_from_json()`; the infallible `npv()` /
-  `from_json()` remain as conveniences for validated instruments.
-  `Instrument::price()` returns a structured `PricingResult { pv, greeks,
-  std_err }` — value, all nine Greeks and the Monte Carlo standard error
-  from a single call. `EquityOptionBuilder::build()` validates every field
-  and the engine/payoff combination up front, so an option that builds is
-  guaranteed to price — and setter order never matters. Batch
-  pricing reports failures per contract in the output's `error` field and
-  keeps going instead of aborting the file.
+| Operation | Time |
+|---|---|
+| Black-Scholes `npv()`, curve and surface lookups included | ~0.7 µs (~1.5M/sec) |
+| 20-strike Heston smile, COS | ~1.6 ms (vs ~137 ms per-strike, ~90×) |
+| American put, Leisen-Reimer 101 steps | ~26 µs (vs ~2.3 ms on CRR-1000) |
 
-## Roadmap
+## Documentation
 
-- Andersen QE scheme and American exercise (LSMC) under Heston; 2-D ADI finite
-  difference for stochastic vol
-- Barrier rebates, double/window barriers, seasoned Asians
-- Rates: curve bootstrapping from deposits/FRAs/swaps onto the core curve type,
-  swaps and swaptions; FX (Garman-Kohlhagen)
-- Market data: the Treasury bill-rates feed; a `compare` command diffing
-  a fetched fitted curve against a quote-bootstrapped curve pillar by
-  pillar
-- Stulz closed forms for two-asset best-of/worst-of; per-asset smiles and
-  path-dependent multi-asset payoffs; SVI smile parameterization with
-  no-arbitrage checks; pathwise / likelihood-ratio Greeks
+- **[Examples](examples/)** — runnable end-to-end programs, including a real
+  Cboe chain → parity forwards → implied surface → local vol → reprice.
+- **[The book](book/)** — *Compile the Smile: Pricing Equity Derivatives in
+  Rust*, a full-length book written against this library.
+- **[docs.rs](https://docs.rs/rustyqlib)** — API documentation.
 
 ## License
 
