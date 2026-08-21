@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="RustyQLib" width="260">
+  <img src="rustyqlib_logo.png" alt="RustyQLib" width="260">
 </p>
 
 <h1 align="center">RustyQLib</h1>
@@ -137,8 +137,6 @@ Indicative single-threaded figures from `cargo bench` (criterion, fixed seeds):
 
 - **[Examples](examples/)** — runnable end-to-end programs, including a real
   Cboe chain → parity forwards → implied surface → local vol → reprice.
-- **[The book](book/)** — *Compile the Smile: Pricing Equity Derivatives in
-  Rust*, a full-length book written against this library.
 - **[docs.rs](https://docs.rs/rustyqlib)** — API documentation.
 
 ## License
