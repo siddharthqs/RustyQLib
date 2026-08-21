@@ -19,3 +19,26 @@ pub use decomp::{
     cholesky_factor, cholesky_solve, least_squares, pseudo_solve, qr, svd, symmetric_eigen,
 };
 pub use nearest_correlation::nearest_correlation;
+
+/// Cholesky factor of a correlation matrix, repairing a non-PSD input
+/// with Higham's nearest-correlation projection (logged) — the standard
+/// treatment for empirical or hand-stressed matrices. Asymmetry or a
+/// non-unit diagonal is a data error and still rejected.
+pub fn cholesky_with_repair(
+    correlations: &[Vec<f64>],
+) -> Result<Vec<Vec<f64>>, crate::core::errors::RustyQLibError> {
+    match cholesky(correlations) {
+        Ok(l) => Ok(l),
+        Err(crate::core::errors::RustyQLibError::NumericalError(ref msg))
+            if msg.contains("positive semi-definite") =>
+        {
+            log::warn!(
+                "correlation matrix is not PSD; \
+                 projecting to the nearest correlation matrix (Higham)"
+            );
+            let repaired = nearest_correlation(correlations, 1e-12, 200)?;
+            cholesky(&repaired)
+        }
+        Err(e) => Err(e),
+    }
+}

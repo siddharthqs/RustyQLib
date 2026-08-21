@@ -16,6 +16,7 @@ pub mod equity_option;
 pub mod forward_start_option;
 mod from_json;
 pub mod lookback;
+pub mod multi_asset;
 pub mod perpetual;
 pub mod rainbow;
 pub mod vanilla_option;

@@ -109,6 +109,12 @@ impl Clone for EquityOption {
 }
 
 impl EquityOption {
+    /// Start a builder — shorthand for
+    /// [`EquityOptionBuilder::new`](crate::equity::builder::EquityOptionBuilder::new).
+    pub fn builder() -> crate::equity::builder::EquityOptionBuilder {
+        crate::equity::builder::EquityOptionBuilder::new()
+    }
+
     /// The Monte Carlo settings. Invariant: only called on the Monte
     /// Carlo engine's code paths (the dispatch guarantees it).
     pub(crate) fn mc_cfg(&self) -> &montecarlo::MonteCarloConfig {
@@ -473,11 +479,19 @@ impl EquityOption {
                     );
                 }
             }
+            (Model::Heston(_), PricingEngine::BlackScholes) => {
+                if matches!(self.payoff.payoff_kind(), PayoffType::VarianceSwap) {
+                    return unsupported(
+                        "variance swaps under Heston dynamics price on the MonteCarlo \
+                         engine; the Analytical engine replicates off the bound surface \
+                         under Black-Scholes dynamics (Model::Gbm)",
+                    );
+                }
+            }
             // BAW/BS2002 under Heston are refused by the engine rules below
             (
                 Model::Heston(_),
-                PricingEngine::BlackScholes
-                | PricingEngine::MonteCarlo(_)
+                PricingEngine::MonteCarlo(_)
                 | PricingEngine::BaroneAdesiWhaley
                 | PricingEngine::BjerksundStensland,
             ) => {}

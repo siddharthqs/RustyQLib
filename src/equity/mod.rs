@@ -29,7 +29,7 @@ pub mod service;
 // Flat-path compatibility re-exports.
 pub use contracts::{
     accumulator, asian, autocallable, barrier, binary_option, chooser, cliquet, equity_forward,
-    equity_future, equity_option, forward_start_option, lookback, perpetual, rainbow,
+    equity_future, equity_option, forward_start_option, lookback, multi_asset, perpetual, rainbow,
     vanilla_option, variance_swap, worst_of,
 };
 pub use engines::{

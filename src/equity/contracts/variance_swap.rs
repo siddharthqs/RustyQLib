@@ -36,15 +36,28 @@ pub fn realized_variance(log_returns: &[f64], periods_per_year: f64) -> f64 {
     log_returns.iter().map(|r| r * r).sum::<f64>() / log_returns.len() as f64 * periods_per_year
 }
 
-/// Model-free fair variance strike by the log-contract replication.
-/// `smile(strike) -> implied vol`; integration over ten ATM standard
-/// deviations of log-strike with a fine Simpson rule.
-pub fn fair_variance_strike(forward: f64, t: f64, smile: impl Fn(f64) -> f64) -> f64 {
-    assert!(forward > 0.0 && t > 0.0);
-    let atm_vol = smile(forward).max(1e-4);
-    let width = (10.0 * atm_vol * t.sqrt()).max(1.0);
+/// Half-width of the replication window in log-strike: ten ATM
+/// standard deviations, floored at one unit.
+fn replication_width(forward: f64, t: f64, smile: &impl Fn(f64) -> f64) -> f64 {
+    (10.0 * smile(forward).max(1e-4) * t.sqrt()).max(1.0)
+}
+
+/// The common core of the three replication strikes: a fine Simpson
+/// integral (4000 intervals) of `Q(F e^u) * kernel(u)` over
+/// `[u_lo, u_hi]`, where `Q` is the undiscounted Black OTM price on the
+/// smile. The strike kernels: `e^{-u}` gives `int Q(K)/K^2 dK / F`
+/// (variance, corridor), `1` gives `int Q(K)/K dK` (gamma) — both by
+/// the log-strike substitution `K = F e^u`.
+fn replication_integral(
+    forward: f64,
+    t: f64,
+    u_lo: f64,
+    u_hi: f64,
+    kernel: impl Fn(f64) -> f64,
+    smile: impl Fn(f64) -> f64,
+) -> f64 {
     let steps = 4000usize;
-    let du = 2.0 * width / steps as f64;
+    let du = (u_hi - u_lo) / steps as f64;
     // undiscounted Black OTM price at strike K = F e^u
     let otm = |u: f64| -> f64 {
         let k = forward * u.exp();
@@ -58,10 +71,9 @@ pub fn fair_variance_strike(forward: f64, t: f64, smile: impl Fn(f64) -> f64) ->
             k * norm_cdf(-d2) - forward * norm_cdf(-d1) // put
         }
     };
-    // int Q(K)/K^2 dK = int Q(F e^u) e^{-u} du / F  (Simpson)
     let mut sum = 0.0;
     for i in 0..=steps {
-        let u = -width + i as f64 * du;
+        let u = u_lo + i as f64 * du;
         let w = if i == 0 || i == steps {
             1.0
         } else if i % 2 == 1 {
@@ -69,9 +81,19 @@ pub fn fair_variance_strike(forward: f64, t: f64, smile: impl Fn(f64) -> f64) ->
         } else {
             2.0
         };
-        sum += w * otm(u) * (-u).exp();
+        sum += w * otm(u) * kernel(u);
     }
-    let integral = sum * du / 3.0 / forward;
+    sum * du / 3.0
+}
+
+/// Model-free fair variance strike by the log-contract replication.
+/// `smile(strike) -> implied vol`; integration over ten ATM standard
+/// deviations of log-strike with a fine Simpson rule.
+pub fn fair_variance_strike(forward: f64, t: f64, smile: impl Fn(f64) -> f64) -> f64 {
+    assert!(forward > 0.0 && t > 0.0);
+    let width = replication_width(forward, t, &smile);
+    let integral =
+        replication_integral(forward, t, -width, width, |u| (-u).exp(), smile) / forward;
     2.0 / t * integral
 }
 
@@ -92,36 +114,9 @@ pub fn fair_variance_strike(forward: f64, t: f64, smile: impl Fn(f64) -> f64) ->
 /// variance strike — the crash-discount that motivates the product.
 pub fn fair_gamma_swap_strike(spot: f64, forward: f64, t: f64, smile: impl Fn(f64) -> f64) -> f64 {
     assert!(spot > 0.0 && forward > 0.0 && t > 0.0);
-    let atm_vol = smile(forward).max(1e-4);
-    let width = (10.0 * atm_vol * t.sqrt()).max(1.0);
-    let steps = 4000usize;
-    let du = 2.0 * width / steps as f64;
-    let otm = |u: f64| -> f64 {
-        let k = forward * u.exp();
-        let sigma = smile(k).max(1e-6);
-        let st = sigma * t.sqrt();
-        let d1 = ((forward / k).ln() + 0.5 * st * st) / st;
-        let d2 = d1 - st;
-        if k >= forward {
-            forward * norm_cdf(d1) - k * norm_cdf(d2)
-        } else {
-            k * norm_cdf(-d2) - forward * norm_cdf(-d1)
-        }
-    };
+    let width = replication_width(forward, t, &smile);
     // int Q(K)/K dK = int Q(F e^u) du  (log-strike substitution)
-    let mut sum = 0.0;
-    for i in 0..=steps {
-        let u = -width + i as f64 * du;
-        let w = if i == 0 || i == steps {
-            1.0
-        } else if i % 2 == 1 {
-            4.0
-        } else {
-            2.0
-        };
-        sum += w * otm(u);
-    }
-    let integral = sum * du / 3.0;
+    let integral = replication_integral(forward, t, -width, width, |_| 1.0, smile);
     let b_t = (forward / spot).ln();
     let phi = if b_t.abs() < 1e-12 {
         1.0
@@ -146,8 +141,7 @@ pub fn fair_corridor_variance_strike(
     smile: impl Fn(f64) -> f64,
 ) -> f64 {
     assert!(forward > 0.0 && t > 0.0 && low >= 0.0 && high > low);
-    let atm_vol = smile(forward).max(1e-4);
-    let width = (10.0 * atm_vol * t.sqrt()).max(1.0);
+    let width = replication_width(forward, t, &smile);
     // integrate in log-strike over the corridor clipped to the window
     let u_lo = if low <= 0.0 {
         -width
@@ -162,33 +156,8 @@ pub fn fair_corridor_variance_strike(
     if u_hi <= u_lo {
         return 0.0;
     }
-    let steps = 4000usize;
-    let du = (u_hi - u_lo) / steps as f64;
-    let otm = |u: f64| -> f64 {
-        let k = forward * u.exp();
-        let sigma = smile(k).max(1e-6);
-        let st = sigma * t.sqrt();
-        let d1 = ((forward / k).ln() + 0.5 * st * st) / st;
-        let d2 = d1 - st;
-        if k >= forward {
-            forward * norm_cdf(d1) - k * norm_cdf(d2)
-        } else {
-            k * norm_cdf(-d2) - forward * norm_cdf(-d1)
-        }
-    };
-    let mut sum = 0.0;
-    for i in 0..=steps {
-        let u = u_lo + i as f64 * du;
-        let w = if i == 0 || i == steps {
-            1.0
-        } else if i % 2 == 1 {
-            4.0
-        } else {
-            2.0
-        };
-        sum += w * otm(u) * (-u).exp();
-    }
-    let integral = sum * du / 3.0 / forward;
+    let integral =
+        replication_integral(forward, t, u_lo, u_hi, |u| (-u).exp(), smile) / forward;
     2.0 / t * integral
 }
 
@@ -396,6 +365,135 @@ impl VarianceSwap {
 impl Instrument for VarianceSwap {
     fn try_npv(&self) -> Result<f64, RustyQLibError> {
         Ok(self.mtm())
+    }
+}
+
+// ── The Market-bound payoff ─────────────────────────────────────────────
+
+/// Which realized-variance statistic the swap pays.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VarianceSwapKind {
+    /// Plain annualized variance of log returns.
+    Variance,
+    /// Spot-weighted (gamma) variance, `(A/n) sum (S_i/S_0) r_i^2`.
+    Gamma,
+    /// Variance accruing only while the previous observation lies
+    /// inside `[low, high]`.
+    Corridor { low: f64, high: f64 },
+}
+
+/// The variance swap as a mainline [`Payoff`], pricing inside
+/// [`EquityOption`](crate::equity::vanilla_option::EquityOption) —
+/// which gives it the market context the standalone lacks: the bound
+/// vol surface feeds the replication on the **Analytical** engine
+/// (term-curve discounting, cash-dividend-consistent forwards), and
+/// the **MonteCarlo** engine prices the discretely monitored contract
+/// under every model the engine carries (GBM, local vol, Heston, SABR,
+/// rough Bergomi) — model-based valuation the standalone never had.
+/// The standalone [`VarianceSwap`] remains the flat-market validation
+/// reference.
+///
+/// The realized leg annualizes by the observation schedule's own
+/// frequency (`observations / t`), so a flat-vol simulation converges
+/// to `sigma^2` for any observation count and agrees with the
+/// (continuous) replication strike up to the discrete-monitoring bias
+/// — deliberately avoiding the 252-vs-365 annualization blend the
+/// caller-supplied convention invited (review finding B15).
+#[derive(Debug, Clone)]
+pub struct VarianceSwapPayoff {
+    pub exercise_style: crate::core::utils::ContractStyle,
+    pub kind: VarianceSwapKind,
+    /// Strike in **variance** units (`strike_vol^2`).
+    pub strike_variance: f64,
+    /// Variance notional (payout per unit of annualized variance).
+    pub notional: f64,
+    /// Observation count of the Monte Carlo (discrete) route; the
+    /// analytic route replicates continuous monitoring.
+    pub observations: usize,
+    /// Seasoned swaps: (elapsed years, annualized variance realized
+    /// over them), blended time-weighted with the remaining leg.
+    pub accrued: Option<(f64, f64)>,
+    /// Spot at inception — denominator of the first return and the
+    /// `S_0` of the gamma weighting.
+    pub initial_fixing: f64,
+}
+
+impl VarianceSwapPayoff {
+    /// Time-weighted blend of the accrued and remaining annualized
+    /// variance (the standalone's convention).
+    pub fn blend(&self, remaining: f64, t_remaining: f64) -> f64 {
+        match self.accrued {
+            None => remaining,
+            Some((elapsed, accrued)) => {
+                (elapsed * accrued + t_remaining * remaining) / (elapsed + t_remaining)
+            }
+        }
+    }
+
+    /// Value of one simulated path: the kind's realized statistic over
+    /// the observation spots (first return against `initial_fixing`),
+    /// annualized by the schedule frequency, seasoned-blended, and the
+    /// strike difference paid at maturity. `t` is the remaining life
+    /// the observation grid spans (bumped views pass the bumped life).
+    pub fn path_value(&self, path: &[f64], obs_idx: &[usize], dfs: &[f64], t: f64) -> f64 {
+        let mut sum = 0.0;
+        let mut s_prev = self.initial_fixing;
+        for &idx in obs_idx {
+            let s = path[idx];
+            let r = (s / s_prev).ln();
+            match self.kind {
+                VarianceSwapKind::Variance => sum += r * r,
+                VarianceSwapKind::Gamma => sum += s / self.initial_fixing * r * r,
+                VarianceSwapKind::Corridor { low, high } => {
+                    // standard convention: the step accrues when the
+                    // *previous* observation was inside the corridor
+                    if s_prev >= low && s_prev <= high {
+                        sum += r * r;
+                    }
+                }
+            }
+            s_prev = s;
+        }
+        // annualization by the schedule's own frequency: (A/n) sum r^2
+        // with A = n/t collapses to sum / t
+        let realized = sum / t;
+        let total = self.blend(realized, t);
+        self.notional * (total - self.strike_variance) * dfs.last().copied().unwrap_or(1.0)
+    }
+}
+
+impl crate::equity::utils::Payoff for VarianceSwapPayoff {
+    /// Degenerate single-point value: zero (the value is the realized
+    /// statistic of the whole path).
+    fn payoff(&self, _spot: f64, _strike: f64) -> f64 {
+        0.0
+    }
+    fn path_payoff(&self, _path: &[f64], _strike: f64) -> f64 {
+        panic!(
+            "Variance swaps observe a fixing schedule and cannot be valued \
+             through path_payoff; the Monte Carlo engine prices them via \
+             path_value and the analytic engine by replication"
+        );
+    }
+    fn is_path_dependent(&self) -> bool {
+        true
+    }
+    fn payoff_kind(&self) -> crate::equity::utils::PayoffType {
+        crate::equity::utils::PayoffType::VarianceSwap
+    }
+    fn put_or_call(&self) -> &crate::core::trade::PutOrCall {
+        // by convention: long realized variance is long volatility,
+        // call-shaped in variance; not used by pricing
+        &crate::core::trade::PutOrCall::Call
+    }
+    fn exercise_style(&self) -> &crate::core::utils::ContractStyle {
+        &self.exercise_style
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn crate::equity::utils::Payoff> {
+        Box::new(self.clone())
     }
 }
 
@@ -697,4 +795,226 @@ mod tests {
             c_swap.fair_remaining_variance
         );
     }
+
+    // ── the mainline VarianceSwapPayoff (Market-bound spine) ───────────
+
+    fn builder_vswap(strike_vol: f64) -> crate::equity::builder::EquityOptionBuilder {
+        use crate::equity::builder::EquityOptionBuilder;
+        EquityOptionBuilder::new()
+            .symbol("VSWAP")
+            .spot(100.0)
+            .flat_vol(0.25)
+            .flat_rate(0.03)
+            .valuation_date(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .maturity_date(chrono::NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+            .variance_swap(strike_vol, 100.0)
+            .seed(42)
+    }
+
+    #[test]
+    fn mainline_analytic_matches_the_standalone_replication() {
+        use crate::equity::utils::Engine;
+        // identical flat market: the bound-surface replication must equal
+        // the standalone product (same integral, same forward, same df)
+        let mainline = builder_vswap(0.22)
+            .engine(Engine::BlackScholes)
+            .build()
+            .expect("variance swap must build")
+            .npv();
+        let standalone = VarianceSwap {
+            notional: 100.0,
+            strike_variance: 0.22 * 0.22,
+            t_remaining: 1.0,
+            r: 0.03,
+            fair_remaining_variance: fair_variance_strike(
+                100.0 * (0.03_f64).exp(),
+                1.0,
+                |_| 0.25,
+            ),
+            accrued: None,
+        }
+        .mtm();
+        assert!(
+            (mainline - standalone).abs() < 1e-9,
+            "mainline {mainline} vs standalone {standalone}"
+        );
+        // struck at fair vol the swap is worth ~zero
+        let fair = builder_vswap(0.25)
+            .engine(Engine::BlackScholes)
+            .build()
+            .unwrap()
+            .npv();
+        assert!(fair.abs() < 1e-3, "at-fair pv {fair}");
+    }
+
+    #[test]
+    fn mainline_mc_agrees_with_the_replication_on_flat_vol() {
+        use crate::equity::utils::Engine;
+        // GBM Monte Carlo of the discrete contract vs the continuous
+        // replication: the discrete-monitoring gap under GBM is O(dt)
+        // drift terms, far below the tolerance
+        let analytic = builder_vswap(0.25)
+            .engine(Engine::BlackScholes)
+            .build()
+            .unwrap()
+            .npv();
+        let mc = builder_vswap(0.25)
+            .engine(Engine::MonteCarlo)
+            .paths(50_000)
+            .build()
+            .expect("MC variance swap must build")
+            .npv();
+        assert!(
+            (mc - analytic).abs() < 0.03,
+            "mc {mc} vs replication {analytic} (notional 100)"
+        );
+    }
+
+    #[test]
+    fn mainline_heston_mc_recovers_the_integrated_variance_expectation() {
+        use crate::equity::utils::Engine;
+        // under Heston the fair variance strike is the closed-form
+        // expected integrated variance
+        // theta + (v0 - theta)(1 - e^{-kappa T})/(kappa T)
+        let (v0, kappa, theta, t) = (0.09_f64, 2.0_f64, 0.04_f64, 1.0_f64);
+        let expected = theta + (v0 - theta) * (1.0 - (-kappa * t).exp()) / (kappa * t);
+        let pv = builder_vswap(expected.sqrt())
+            .heston(crate::equity::heston::HestonParams {
+                v0,
+                kappa,
+                theta,
+                vol_of_vol: 0.4,
+                rho: -0.7,
+            })
+            .engine(Engine::MonteCarlo)
+            .paths(50_000)
+            .build()
+            .expect("heston variance swap must build")
+            .npv();
+        // struck at the model's own expectation the swap is ~worthless
+        assert!(pv.abs() < 0.15, "heston var swap at model-fair strike: {pv}");
+    }
+
+    #[test]
+    fn mainline_corridor_and_gamma_track_their_replication_strikes() {
+        use crate::equity::utils::Engine;
+        // corridor: MC discrete accrual vs truncated replication
+        let corridor_analytic = builder_vswap(0.2)
+            .corridor(90.0, 115.0)
+            .engine(Engine::BlackScholes)
+            .build()
+            .unwrap()
+            .npv();
+        let corridor_mc = builder_vswap(0.2)
+            .corridor(90.0, 115.0)
+            .variance_swap_observations(504)
+            .engine(Engine::MonteCarlo)
+            .paths(30_000)
+            .build()
+            .unwrap()
+            .npv();
+        assert!(
+            (corridor_mc - corridor_analytic).abs() < 0.4,
+            "corridor mc {corridor_mc} vs replication {corridor_analytic}"
+        );
+        // gamma: spot-weighted MC vs the S ln S replication with carry
+        let gamma_analytic = builder_vswap(0.25)
+            .gamma_swap()
+            .engine(Engine::BlackScholes)
+            .build()
+            .unwrap()
+            .npv();
+        let gamma_mc = builder_vswap(0.25)
+            .gamma_swap()
+            .engine(Engine::MonteCarlo)
+            .paths(50_000)
+            .build()
+            .unwrap()
+            .npv();
+        assert!(
+            (gamma_mc - gamma_analytic).abs() < 0.1,
+            "gamma mc {gamma_mc} vs replication {gamma_analytic}"
+        );
+    }
+
+    #[test]
+    fn mainline_seasoning_blends_and_greeks_report() {
+        use crate::equity::utils::Engine;
+        // seasoned blend against the hand formula, on the analytic engine
+        let fresh = builder_vswap(0.2)
+            .engine(Engine::BlackScholes)
+            .build()
+            .unwrap();
+        let fair = fair_variance_strike(100.0 * (0.03_f64).exp(), 1.0, |_| 0.25);
+        let seasoned = builder_vswap(0.2)
+            .seasoned_variance(0.5, 0.09)
+            .engine(Engine::BlackScholes)
+            .build()
+            .unwrap()
+            .npv();
+        let blend = (0.5 * 0.09 + 1.0 * fair) / 1.5;
+        let expect = 100.0 * (-0.03_f64).exp() * (blend - 0.04);
+        assert!(
+            (seasoned - expect).abs() < 1e-9,
+            "seasoned {seasoned} vs {expect}"
+        );
+        // the batch result carries the replication vega (long variance =
+        // long vol) and a near-zero delta on a flat smile
+        let result = fresh.price().expect("greeks must evaluate");
+        assert!(result.greeks.vega > 0.0, "vega {}", result.greeks.vega);
+        assert!(
+            result.greeks.delta.abs() < 0.05,
+            "flat-smile variance swap is ~delta-neutral: {}",
+            result.greeks.delta
+        );
+    }
+
+    #[test]
+    fn mainline_variance_swap_engine_and_input_validation() {
+        use crate::core::errors::RustyQLibError;
+        use crate::equity::utils::Engine;
+        // lattice/PDE engines are refused at build()
+        for (engine, name) in [
+            (Engine::Binomial, "Binomial"),
+            (Engine::FiniteDifference, "FiniteDifference"),
+        ] {
+            let result = builder_vswap(0.2).engine(engine).build();
+            assert!(
+                matches!(result, Err(RustyQLibError::UnsupportedEngine(_))),
+                "variance swap must be refused on {name}"
+            );
+        }
+        // Heston + Analytical is refused (replication is a GBM-engine
+        // route; Heston variance swaps price on MC)
+        let result = builder_vswap(0.2)
+            .heston(crate::equity::heston::HestonParams {
+                v0: 0.04,
+                kappa: 2.0,
+                theta: 0.04,
+                vol_of_vol: 0.4,
+                rho: -0.5,
+            })
+            .engine(Engine::BlackScholes)
+            .build();
+        assert!(matches!(result, Err(RustyQLibError::UnsupportedEngine(_))));
+        // corridor bounds must be ordered
+        match builder_vswap(0.2).corridor(115.0, 90.0).build() {
+            Err(RustyQLibError::InvalidInput { field, .. }) => assert_eq!(field, "corridor"),
+            other => panic!("expected corridor error, got {:?}", other.map(|_| "an option")),
+        }
+        // modifiers without .variance_swap(...) report the misuse
+        match crate::equity::builder::EquityOptionBuilder::new()
+            .spot(100.0)
+            .flat_vol(0.2)
+            .flat_rate(0.03)
+            .years_to_maturity(1.0)
+            .vanilla(crate::core::trade::PutOrCall::Call)
+            .gamma_swap()
+            .build()
+        {
+            Err(RustyQLibError::InvalidInput { field, .. }) => assert_eq!(field, "gamma_swap"),
+            other => panic!("expected setter error, got {:?}", other.map(|_| "an option")),
+        }
+    }
 }
+

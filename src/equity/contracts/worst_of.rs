@@ -25,7 +25,6 @@ use rayon::prelude::*;
 
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::errors::RustyQLibError;
-use crate::core::linalg::{cholesky, nearest_correlation};
 use crate::core::montecarlo::paths::{FactorScratch, MultiDraws};
 use crate::core::montecarlo::process::StochasticProcess;
 use crate::core::results::PricingResult;
@@ -108,20 +107,7 @@ impl WorstOfAutocallable {
                 "correlations must be an n x n matrix",
             ));
         }
-        let chol = match cholesky(&correlations) {
-            Ok(l) => l,
-            Err(RustyQLibError::NumericalError(ref msg))
-                if msg.contains("positive semi-definite") =>
-            {
-                log::warn!(
-                    "correlation matrix is not PSD; \
-                     projecting to the nearest correlation matrix (Higham)"
-                );
-                let repaired = nearest_correlation(&correlations, 1e-12, 200)?;
-                cholesky(&repaired)?
-            }
-            Err(e) => return Err(e),
-        };
+        let chol = crate::core::linalg::cholesky_with_repair(&correlations)?;
         Ok(WorstOfAutocallable {
             symbol: symbol.to_string(),
             spots,

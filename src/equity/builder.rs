@@ -33,6 +33,7 @@ use crate::core::utils::ContractStyle;
 use crate::core::vols::VolSurface;
 use crate::equity::accumulator::{AccumulatorPayoff, AccumulatorSide};
 use crate::equity::cliquet::{CliquetPayoff, CliquetStyle};
+use crate::equity::variance_swap::{VarianceSwapKind, VarianceSwapPayoff};
 use crate::equity::asian::{AsianStrikeType, AveragingType};
 use crate::equity::autocallable::AutocallablePayoff;
 use crate::equity::barrier::{BarrierDirection, KnockType};
@@ -113,6 +114,14 @@ enum PayoffSpec {
         global_cap: Option<f64>,
         notional: f64,
         style: CliquetStyle,
+    },
+    VarianceSwap {
+        kind: VarianceSwapKind,
+        /// Strike quoted in volatility units; squared at materialize.
+        strike_vol: f64,
+        notional: f64,
+        observations: usize,
+        accrued: Option<(f64, f64)>,
     },
     /// Escape hatch: a caller-supplied payoff is used as given (its own
     /// exercise style included).
@@ -359,6 +368,50 @@ impl PayoffSpec {
                 }
                 Ok(())
             }
+            PayoffSpec::VarianceSwap {
+                kind,
+                strike_vol,
+                notional,
+                observations,
+                accrued,
+            } => {
+                if !(strike_vol.is_finite() && *strike_vol >= 0.0) {
+                    return invalid(
+                        "strike_vol",
+                        format!("strike_vol must be non-negative and finite, got {strike_vol}"),
+                    );
+                }
+                crate::equity::conventions::check_vol_band("strike_vol", *strike_vol)?;
+                if !(notional.is_finite() && *notional > 0.0) {
+                    return invalid(
+                        "notional",
+                        format!("notional must be positive and finite, got {notional}"),
+                    );
+                }
+                if *observations < 1 {
+                    return invalid("observations", "need at least one observation".to_string());
+                }
+                if let VarianceSwapKind::Corridor { low, high } = kind {
+                    if !(low.is_finite() && *low >= 0.0 && *high > *low) {
+                        return invalid(
+                            "corridor",
+                            format!("corridor needs 0 <= low < high, got [{low}, {high}]"),
+                        );
+                    }
+                }
+                if let Some((elapsed, accrued_var)) = accrued {
+                    if !(elapsed.is_finite() && *elapsed >= 0.0)
+                        || !(accrued_var.is_finite() && *accrued_var >= 0.0)
+                    {
+                        return invalid(
+                            "seasoned_variance",
+                            "elapsed and accrued variance must be non-negative and finite"
+                                .to_string(),
+                        );
+                    }
+                }
+                Ok(())
+            }
             PayoffSpec::Cliquet {
                 resets,
                 local_floor,
@@ -596,6 +649,21 @@ impl PayoffSpec {
                 global_cap,
                 notional,
                 style: cliquet_style,
+                initial_fixing: ctx.spot,
+            }),
+            PayoffSpec::VarianceSwap {
+                kind,
+                strike_vol,
+                notional,
+                observations,
+                accrued,
+            } => Box::new(VarianceSwapPayoff {
+                exercise_style: style,
+                kind,
+                strike_variance: strike_vol * strike_vol,
+                notional,
+                observations,
+                accrued,
                 initial_fixing: ctx.spot,
             }),
             PayoffSpec::Custom(p) => p,
@@ -1112,6 +1180,94 @@ impl EquityOptionBuilder {
                 self.setter_error = Some(RustyQLibError::invalid_input(
                     "cliquet_style",
                     "cliquet_style must follow .cliquet(...)",
+                ));
+            }
+        }
+        self
+    }
+
+    /// Variance swap: pays `notional * (realized annualized variance -
+    /// strike_vol^2)` at maturity, realized as the schedule-frequency
+    /// annualized squared log returns over `observations` equally
+    /// spaced fixings (first against the build-time spot). On the
+    /// **Analytical** engine the fair leg is the model-free log-contract
+    /// replication over the bound smile (continuous monitoring); on
+    /// **MonteCarlo** the discretely monitored contract prices under
+    /// the configured model (GBM, local vol, Heston, SABR, rough
+    /// Bergomi). Gamma/corridor flavors and seasoning attach via the
+    /// modifiers below.
+    pub fn variance_swap(mut self, strike_vol: f64, notional: f64) -> Self {
+        self.payoff = Some(PayoffSpec::VarianceSwap {
+            kind: VarianceSwapKind::Variance,
+            strike_vol,
+            notional,
+            observations: 252,
+            accrued: None,
+        });
+        self
+    }
+
+    /// Observation count of the Monte Carlo (discrete) route; must
+    /// follow [`variance_swap`](Self::variance_swap).
+    pub fn variance_swap_observations(mut self, n: usize) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::VarianceSwap { observations, .. }) => *observations = n,
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "variance_swap_observations",
+                    "variance_swap_observations must follow .variance_swap(...)",
+                ));
+            }
+        }
+        self
+    }
+
+    /// Switch to the spot-weighted (gamma) variance statistic; must
+    /// follow [`variance_swap`](Self::variance_swap).
+    pub fn gamma_swap(mut self) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::VarianceSwap { kind, .. }) => *kind = VarianceSwapKind::Gamma,
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "gamma_swap",
+                    "gamma_swap must follow .variance_swap(...)",
+                ));
+            }
+        }
+        self
+    }
+
+    /// Restrict variance accrual to spots inside `[low, high]`
+    /// (previous-observation convention); must follow
+    /// [`variance_swap`](Self::variance_swap).
+    pub fn corridor(mut self, low: f64, high: f64) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::VarianceSwap { kind, .. }) => {
+                *kind = VarianceSwapKind::Corridor { low, high }
+            }
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "corridor",
+                    "corridor must follow .variance_swap(...)",
+                ));
+            }
+        }
+        self
+    }
+
+    /// Seasoned swap: `elapsed` years already observed at an annualized
+    /// realized variance of `accrued_variance`, blended time-weighted
+    /// with the remaining leg; must follow
+    /// [`variance_swap`](Self::variance_swap).
+    pub fn seasoned_variance(mut self, elapsed: f64, accrued_variance: f64) -> Self {
+        match &mut self.payoff {
+            Some(PayoffSpec::VarianceSwap { accrued, .. }) => {
+                *accrued = Some((elapsed, accrued_variance))
+            }
+            _ => {
+                self.setter_error = Some(RustyQLibError::invalid_input(
+                    "seasoned_variance",
+                    "seasoned_variance must follow .variance_swap(...)",
                 ));
             }
         }

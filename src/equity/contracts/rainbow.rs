@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
-use crate::core::linalg::{cholesky, nearest_correlation};
 use crate::core::montecarlo::path_normals;
 use crate::core::results::{Greeks, PricingResult};
 use crate::core::trade::PutOrCall;
@@ -241,20 +240,7 @@ impl RainbowOption {
         // an empirical / hand-stressed matrix that fails PSD is repaired
         // with Higham's nearest-correlation projection; asymmetry or a
         // non-unit diagonal is a data error and still rejected
-        let chol = match cholesky(&data.correlations) {
-            Ok(l) => l,
-            Err(RustyQLibError::NumericalError(ref msg))
-                if msg.contains("positive semi-definite") =>
-            {
-                log::warn!(
-                    "correlation matrix is not PSD; \
-                     projecting to the nearest correlation matrix (Higham)"
-                );
-                let repaired = nearest_correlation(&data.correlations, 1e-12, 200)?;
-                cholesky(&repaired)?
-            }
-            Err(e) => return Err(e),
-        };
+        let chol = crate::core::linalg::cholesky_with_repair(&data.correlations)?;
         for (i, a) in data.assets.iter().enumerate() {
             crate::equity::conventions::check_vol_band(&format!("assets[{i}].volatility"), a.volatility)?;
         }
@@ -606,6 +592,7 @@ impl RainbowOption {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::linalg::cholesky;
     use crate::equity::blackscholes::bs_price;
     use crate::equity::utils::Engine;
     use chrono::Local;

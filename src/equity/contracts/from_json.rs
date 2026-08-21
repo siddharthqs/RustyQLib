@@ -161,6 +161,13 @@ impl EquityOption {
                      standalone 'cliquet_option' product contract",
                 ));
             }
+            PayoffType::VarianceSwap => {
+                return Err(RustyQLibError::invalid_input(
+                    "payoff_type",
+                    "variance swaps are built through EquityOptionBuilder::variance_swap, \
+                     or as the standalone 'variance_swap' product contract",
+                ));
+            }
             PayoffType::Vanilla => builder.vanilla(side),
             PayoffType::Binary => {
                 let binary_type = match data

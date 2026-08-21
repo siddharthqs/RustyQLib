@@ -76,6 +76,9 @@ pub use crate::core::traits::Instrument;
 pub use crate::core::vols::{SmileCoordinate, VolInput, VolSurface, VolSurfaceDocument};
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;
+pub use crate::equity::multi_asset::{
+    AssetLeg, MultiAssetEquityOption, MultiAssetEquityOptionBuilder, MultiAssetMarketData,
+};
 pub use crate::equity::option_chain::{
     implied_vol_surface_from_chain, FilterConfig, OptionChain, OptionQuote, SurfaceBuildReport,
 };

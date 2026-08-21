@@ -41,6 +41,7 @@ impl BlackScholesPricer {
             PayoffType::Lookback => Self::lookback_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0),
             PayoffType::ForwardStart => self.npv_forward_start(bsd_option),
             PayoffType::Chooser => Self::chooser_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0),
+            PayoffType::VarianceSwap => self.npv_variance_swap(bsd_option),
             other => unreachable!(
                 "check_engine_support admits only analytic payoffs here; got {other:?}"
             ),
@@ -67,6 +68,7 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.delta_forward_start(bsd_option),
             PayoffType::Lookback => self.delta_lookback(bsd_option),
             PayoffType::Chooser => self.delta_chooser(bsd_option),
+            PayoffType::VarianceSwap => self.delta_vswap(bsd_option),
             other => unreachable!(
                 "check_engine_support admits only analytic payoffs here; got {other:?}"
             ),
@@ -84,6 +86,7 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.gamma_forward_start(bsd_option),
             PayoffType::Lookback => self.gamma_lookback(bsd_option),
             PayoffType::Chooser => self.gamma_chooser(bsd_option),
+            PayoffType::VarianceSwap => self.gamma_vswap(bsd_option),
             other => unreachable!(
                 "check_engine_support admits only analytic payoffs here; got {other:?}"
             ),
@@ -101,6 +104,7 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.vega_forward_start(bsd_option),
             PayoffType::Lookback => self.vega_lookback(bsd_option),
             PayoffType::Chooser => self.vega_chooser(bsd_option),
+            PayoffType::VarianceSwap => self.vega_vswap(bsd_option),
             other => unreachable!(
                 "check_engine_support admits only analytic payoffs here; got {other:?}"
             ),
@@ -118,6 +122,7 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.theta_forward_start(bsd_option),
             PayoffType::Lookback => self.theta_lookback(bsd_option),
             PayoffType::Chooser => self.theta_chooser(bsd_option),
+            PayoffType::VarianceSwap => self.theta_vswap(bsd_option),
             other => unreachable!(
                 "check_engine_support admits only analytic payoffs here; got {other:?}"
             ),
@@ -135,6 +140,7 @@ impl BlackScholesPricer {
             PayoffType::ForwardStart => self.rho_forward_start(bsd_option),
             PayoffType::Lookback => self.rho_lookback(bsd_option),
             PayoffType::Chooser => self.rho_chooser(bsd_option),
+            PayoffType::VarianceSwap => self.rho_vswap(bsd_option),
             other => unreachable!(
                 "check_engine_support admits only analytic payoffs here; got {other:?}"
             ),
@@ -424,6 +430,9 @@ impl BlackScholesPricer {
             }
             PayoffType::Lookback => Self::lookback_price_with(bsd_option, ds, dsigma, dr, dt_shift),
             PayoffType::Chooser => Self::chooser_price_with(bsd_option, ds, dsigma, dr, dt_shift),
+            PayoffType::VarianceSwap => {
+                Self::variance_swap_price_with(bsd_option, ds, dsigma, dr, dt_shift)
+            }
             _ => panic!("cross-Greeks are not available for this analytic payoff"),
         }
     }
@@ -748,6 +757,85 @@ impl BlackScholesPricer {
         let h = 1e-5;
         (Self::barrier_price_with(bsd_option, 0.0, 0.0, h, 0.0)
             - Self::barrier_price_with(bsd_option, 0.0, 0.0, -h, 0.0))
+            / (2.0 * h)
+    }
+
+    // ── Variance swaps (log-contract replication) ──────────────────────
+    // NPV integrates the bound smile through the model-free replication
+    // (continuous monitoring); Greeks are central-difference bumps of it,
+    // the barrier pattern. The forward is the escrowed one (cash
+    // dividends carved out), the standard price-return convention —
+    // dividend jumps do not accrue variance.
+
+    /// Replication value with additive bumps to (spot, vol, rate,
+    /// expiry). The vol bump shifts the whole smile in parallel.
+    fn variance_swap_price_with(
+        bsd_option: &EquityOption,
+        ds: f64,
+        dsigma: f64,
+        dr: f64,
+        dt_shift: f64,
+    ) -> f64 {
+        use crate::equity::variance_swap::{
+            fair_corridor_variance_strike, fair_gamma_swap_strike, fair_variance_strike,
+            VarianceSwapKind, VarianceSwapPayoff,
+        };
+        let vs = bsd_option
+            .payoff
+            .as_any()
+            .downcast_ref::<VarianceSwapPayoff>()
+            .expect("variance-swap route reached with a non-variance-swap payoff");
+        let t = (bsd_option.time_to_maturity() + dt_shift).max(1e-6);
+        let s = Self::bumped_spot(bsd_option, ds);
+        let r = bsd_option.risk_free_rate() + dr;
+        let q = bsd_option.carry_yield();
+        let forward = s * ((r - q) * t).exp();
+        let surface = &bsd_option.market.vol_surface;
+        let smile = |k: f64| {
+            (surface.vol(k, forward, t) + dsigma).max(crate::equity::conventions::MIN_BUMPED_VOL)
+        };
+        let fair = match vs.kind {
+            VarianceSwapKind::Variance => fair_variance_strike(forward, t, smile),
+            VarianceSwapKind::Gamma => fair_gamma_swap_strike(s, forward, t, smile),
+            VarianceSwapKind::Corridor { low, high } => {
+                fair_corridor_variance_strike(forward, t, low, high, smile)
+            }
+        };
+        let total = vs.blend(fair, t);
+        vs.notional * (total - vs.strike_variance) * (-r * t).exp()
+    }
+    fn npv_variance_swap(&self, bsd_option: &EquityOption) -> f64 {
+        Self::variance_swap_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+    }
+    fn delta_vswap(&self, bsd_option: &EquityOption) -> f64 {
+        let h = bsd_option.market.spot.value() * 1e-4;
+        (Self::variance_swap_price_with(bsd_option, h, 0.0, 0.0, 0.0)
+            - Self::variance_swap_price_with(bsd_option, -h, 0.0, 0.0, 0.0))
+            / (2.0 * h)
+    }
+    fn gamma_vswap(&self, bsd_option: &EquityOption) -> f64 {
+        let h = bsd_option.market.spot.value() * 1e-3;
+        (Self::variance_swap_price_with(bsd_option, h, 0.0, 0.0, 0.0)
+            - 2.0 * Self::variance_swap_price_with(bsd_option, 0.0, 0.0, 0.0, 0.0)
+            + Self::variance_swap_price_with(bsd_option, -h, 0.0, 0.0, 0.0))
+            / (h * h)
+    }
+    fn vega_vswap(&self, bsd_option: &EquityOption) -> f64 {
+        let h = 1e-4;
+        (Self::variance_swap_price_with(bsd_option, 0.0, h, 0.0, 0.0)
+            - Self::variance_swap_price_with(bsd_option, 0.0, -h, 0.0, 0.0))
+            / (2.0 * h)
+    }
+    fn theta_vswap(&self, bsd_option: &EquityOption) -> f64 {
+        let h = (1.0 / 365.0_f64).min(0.5 * bsd_option.time_to_maturity());
+        -(Self::variance_swap_price_with(bsd_option, 0.0, 0.0, 0.0, h)
+            - Self::variance_swap_price_with(bsd_option, 0.0, 0.0, 0.0, -h))
+            / (2.0 * h)
+    }
+    fn rho_vswap(&self, bsd_option: &EquityOption) -> f64 {
+        let h = 1e-5;
+        (Self::variance_swap_price_with(bsd_option, 0.0, 0.0, h, 0.0)
+            - Self::variance_swap_price_with(bsd_option, 0.0, 0.0, -h, 0.0))
             / (2.0 * h)
     }
 
