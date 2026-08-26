@@ -160,18 +160,21 @@ impl SabrParams {
 
     /// The Gatheral butterfly function `g(k)` (the density up to a
     /// positive factor) evaluated with numerical total-variance
-    /// derivatives — negative values flag butterfly arbitrage, which
-    /// Hagan's expansion is known to produce on far wings at long
-    /// expiries. Same convention as
+    /// derivatives on the shared stencil — negative values flag
+    /// butterfly arbitrage, which Hagan's expansion is known to produce
+    /// on far wings at long expiries. Same implementation as
     /// [`SviParams::butterfly_g`](crate::equity::svi::SviParams::butterfly_g).
     pub fn butterfly_g(&self, f: f64, k: f64, t: f64) -> f64 {
-        let h = 1e-4;
-        let w = self.total_variance(f, k, t);
-        let wp = self.total_variance(f, k + h, t);
-        let wm = self.total_variance(f, k - h, t);
-        let w1 = (wp - wm) / (2.0 * h);
-        let w2 = (wp - 2.0 * w + wm) / (h * h);
-        (1.0 - k * w1 / (2.0 * w)).powi(2) - (w1 * w1 / 4.0) * (1.0 / w + 0.25) + w2 / 2.0
+        let [w, w1, w2] = numeric_k_derivatives(|k| self.total_variance(f, k, t), k);
+        crate::equity::smoothed_surface::butterfly_g(
+            &VarianceDerivatives {
+                w,
+                dk: w1,
+                dkk: w2,
+                dt: 0.0,
+            },
+            k,
+        )
     }
 }
 

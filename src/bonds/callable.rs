@@ -211,9 +211,7 @@ impl FixedRateBond {
                     format!("call price must be positive, got {}", call.call_price),
                 ));
             }
-            let outstanding = self.outstanding_face(call.call_date);
-            let strike = outstanding * call.call_price / 100.0
-                + outstanding * self.accrued_interest(call.call_date)? / 100.0;
+            let strike = self.dirty_redemption_amount(call.call_date, call.call_price)?;
             upsert(event_time(call.call_date), &mut |event| {
                 event.call_strike = Some(strike);
             });
@@ -228,9 +226,7 @@ impl FixedRateBond {
                     format!("put price must be positive, got {}", put.put_price),
                 ));
             }
-            let outstanding = self.outstanding_face(put.put_date);
-            let strike = outstanding * put.put_price / 100.0
-                + outstanding * self.accrued_interest(put.put_date)? / 100.0;
+            let strike = self.dirty_redemption_amount(put.put_date, put.put_price)?;
             upsert(event_time(put.put_date), &mut |event| {
                 event.put_strike = Some(strike);
             });

@@ -31,13 +31,12 @@
 
 use chrono::{Months, NaiveDate};
 
-use crate::bonds::convertible::ConvertibleMarket;
+use crate::bonds::convertible::{solve_implied_credit_spread, spot_bump_delta, ConvertibleMarket};
 use crate::bonds::schedule::coupon_dates;
 use crate::bonds::CallOption;
 use crate::core::calendar::Frequency;
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
-use crate::core::solvers::Solver1d;
 
 /// Tree truncation horizon for perpetual preferreds, in years; the
 /// dividend stream beyond it is carried as an exact perpetuity tail.
@@ -324,18 +323,7 @@ impl ConvertiblePreferred {
         curve: &YieldCurve,
         settlement: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
-        let bump = 0.01 * market.spot;
-        let up = ConvertibleMarket {
-            spot: market.spot + bump,
-            ..*market
-        };
-        let down = ConvertibleMarket {
-            spot: market.spot - bump,
-            ..*market
-        };
-        Ok((self.dirty_price(&up, curve, settlement)?
-            - self.dirty_price(&down, curve, settlement)?)
-            / (2.0 * bump))
+        spot_bump_delta(market, |m| self.dirty_price(m, curve, settlement))
     }
 
     /// The credit spread implied by a market price, holding the equity
@@ -353,30 +341,9 @@ impl ConvertiblePreferred {
                 format!("price must be positive, got {dirty_price}"),
             ));
         }
-        let objective = |spread: f64| {
-            let with_spread = ConvertibleMarket {
-                credit_spread: spread,
-                ..*market
-            };
-            dirty_price
-                - self
-                    .dirty_price(&with_spread, curve, settlement)
-                    .expect("the spread bracket keeps the tree valid")
-        };
-        let probe = ConvertibleMarket {
-            credit_spread: -0.2,
-            ..*market
-        };
-        self.dirty_price(&probe, curve, settlement)?;
-        let root = Solver1d::new(1e-8, 100).bisection(objective, -0.2, 3.0)?;
-        if !root.converged {
-            return Err(RustyQLibError::CalibrationFailed {
-                iterations: root.iterations,
-                residual: objective(root.x).abs(),
-                reason: "implied credit spread solve did not converge".to_string(),
-            });
-        }
-        Ok(root.x)
+        solve_implied_credit_spread(dirty_price, market, |m| {
+            self.dirty_price(m, curve, settlement)
+        })
     }
 }
 

@@ -112,6 +112,26 @@ pub(crate) fn validate_bond_option_terms(
     Ok(())
 }
 
+/// `B(t,T) = (1 - e^{-a(T-t)}) / a` — the affine loading of the bond
+/// price on the short rate, shared by the mean-reverting Gaussian
+/// models (Vasicek and Hull-White).
+pub(crate) fn b_factor(a: f64, t: f64, maturity: f64) -> f64 {
+    (1.0 - (-a * (maturity - t)).exp()) / a
+}
+
+/// Conditional standard deviation of `r(t + dt)` given `r(t)` for a
+/// mean-reverting Gaussian short rate — identical for Vasicek and
+/// Hull-White, since `theta(t)` shifts only the mean.
+pub(crate) fn gaussian_short_rate_std(a: f64, sigma: f64, dt: f64) -> f64 {
+    (sigma * sigma * (1.0 - (-2.0 * a * dt).exp()) / (2.0 * a)).sqrt()
+}
+
+/// Price volatility of the `bond_maturity` bond at `expiry` — the
+/// `sigma_p` in [`gaussian_zero_bond_option`].
+pub(crate) fn gaussian_bond_price_vol(a: f64, sigma: f64, expiry: f64, bond_maturity: f64) -> f64 {
+    gaussian_short_rate_std(a, sigma, expiry) * b_factor(a, expiry, bond_maturity)
+}
+
 /// The Gaussian zero-bond option formula shared by Vasicek and
 /// Hull-White (Jamshidian 1989): a Black-style exchange option between
 /// the `bond_maturity` bond and `strike` units of the `expiry` bond,

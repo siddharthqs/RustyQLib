@@ -16,7 +16,7 @@ use crate::core::errors::RustyQLibError;
 use crate::rates::leg::{
     accrual_periods, annuity, float_leg_pv, float_leg_pv_with_fixing, AccrualPeriod,
 };
-use crate::rates::PayerReceiver;
+use crate::rates::{validate_swap_terms, PayerReceiver};
 
 #[derive(Debug, Clone)]
 pub struct OvernightIndexSwap {
@@ -49,24 +49,14 @@ impl OvernightIndexSwap {
         convention: BusinessDayConvention,
         payment_lag: i64,
     ) -> Result<Self, RustyQLibError> {
-        if !notional.is_finite() || notional <= 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "ois",
-                format!("notional must be positive, got {notional}"),
-            ));
-        }
-        if !fixed_rate.is_finite() {
-            return Err(RustyQLibError::invalid_input(
-                "ois",
-                format!("fixed rate must be finite, got {fixed_rate}"),
-            ));
-        }
-        if maturity_date <= effective_date {
-            return Err(RustyQLibError::invalid_input(
-                "ois",
-                format!("maturity {maturity_date} must be after effective {effective_date}"),
-            ));
-        }
+        validate_swap_terms(
+            "ois",
+            notional,
+            fixed_rate,
+            "fixed rate",
+            effective_date,
+            maturity_date,
+        )?;
         Ok(OvernightIndexSwap {
             notional,
             fixed_rate,

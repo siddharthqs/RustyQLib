@@ -28,3 +28,17 @@ pub use cholesky::{cholesky_factor, cholesky_solve};
 pub use eigen::symmetric_eigen;
 pub use qr::{least_squares, qr};
 pub use svd::{pseudo_solve, svd};
+
+/// Jacobi rotation parameters `(c, s)` annihilating the off-diagonal
+/// entry of the symmetric 2x2 pivot `[[a_pp, a_pq], [a_pq, a_qq]]` —
+/// the standard stable formulas, taking the smaller root for `t` so the
+/// rotation angle stays within `[-pi/4, pi/4]`. Shared by the two-sided
+/// Jacobi sweep in [`eigen`] (pivot entries of the matrix itself) and
+/// the one-sided sweep in [`svd`] (entries of the implicit Gram matrix
+/// of columns). Callers guard against `a_pq == 0`.
+pub(crate) fn jacobi_rotation(a_pp: f64, a_qq: f64, a_pq: f64) -> (f64, f64) {
+    let tau = (a_qq - a_pp) / (2.0 * a_pq);
+    let t = tau.signum() / (tau.abs() + (1.0 + tau * tau).sqrt());
+    let c = 1.0 / (1.0 + t * t).sqrt();
+    (c, c * t)
+}

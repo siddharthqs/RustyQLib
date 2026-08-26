@@ -65,6 +65,23 @@ pub enum Tenor {
     YearFraction(f64),
 }
 
+impl Tenor {
+    /// Resolve this pillar location against an anchor: the year fraction
+    /// from `reference_date` under `day_count`, plus the calendar date when
+    /// one was quoted. Pure mapping, no validation — each consumer polices
+    /// the resulting times by its own rules.
+    pub(crate) fn resolve(
+        self,
+        reference_date: NaiveDate,
+        day_count: DayCountConvention,
+    ) -> (f64, Option<NaiveDate>) {
+        match self {
+            Tenor::Date(d) => (day_count.year_fraction(reference_date, d), Some(d)),
+            Tenor::YearFraction(t) => (t, None),
+        }
+    }
+}
+
 /// The accepted *input forms* for a curve. This is what deserializes from
 /// JSON; every form is canonicalized to discount factors at construction
 /// ([`YieldCurve::from_input`]), so pricing code sees a single representation.
@@ -707,21 +724,10 @@ impl YieldCurve {
         if tenors.is_empty() {
             return Err(CurveError::Empty);
         }
-        let mut times = Vec::with_capacity(tenors.len());
-        let mut dates = Vec::with_capacity(tenors.len());
-        for tenor in tenors {
-            match tenor {
-                Tenor::Date(d) => {
-                    times.push(day_count.year_fraction(reference_date, *d));
-                    dates.push(Some(*d));
-                }
-                Tenor::YearFraction(t) => {
-                    times.push(*t);
-                    dates.push(None);
-                }
-            }
-        }
-        Ok((times, dates))
+        Ok(tenors
+            .iter()
+            .map(|tenor| tenor.resolve(reference_date, day_count))
+            .unzip())
     }
 
     fn from_parts(

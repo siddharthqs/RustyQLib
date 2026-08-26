@@ -16,6 +16,7 @@
 use crate::core::utils::inv_norm_cdf;
 
 use super::rng::splitmix64;
+use super::sampling::uniform_to_normal;
 
 /// Bits of resolution per coordinate (fits the f64 mantissa).
 const BITS: usize = 52;
@@ -124,7 +125,7 @@ impl SobolSequence {
     pub fn normals(&self, index: u64, out: &mut [f64]) {
         self.uniforms(index, out);
         for u in out.iter_mut() {
-            *u = inv_norm_cdf(u.clamp(1e-15, 1.0 - 1e-15));
+            *u = uniform_to_normal(*u);
         }
     }
 }

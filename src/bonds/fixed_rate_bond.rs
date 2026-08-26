@@ -371,6 +371,19 @@ impl FixedRateBond {
         Ok(100.0 * self.rate_for(period.start) * fraction)
     }
 
+    /// Absolute dirty redemption amount at `date` for a price quoted
+    /// per 100 face: the price plus the accrued interest, scaled by the
+    /// outstanding face — the strike an embedded call or put settles at.
+    pub(crate) fn dirty_redemption_amount(
+        &self,
+        date: NaiveDate,
+        price_per_100: f64,
+    ) -> Result<f64, RustyQLibError> {
+        let outstanding = self.outstanding_face(date);
+        let accrued = self.accrued_interest(date)?;
+        Ok(outstanding * price_per_100 / 100.0 + outstanding * accrued / 100.0)
+    }
+
     // ── Yield analytics (street convention) ─────────────────────────────
 
     /// Dirty (invoice) price per 100 face at `settlement` for a given

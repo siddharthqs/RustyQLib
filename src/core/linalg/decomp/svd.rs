@@ -39,10 +39,7 @@ pub fn svd(a: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>) {
                     continue;
                 }
                 off = off.max(g.abs());
-                let zeta = (beta - alpha) / (2.0 * g);
-                let t = zeta.signum() / (zeta.abs() + (1.0 + zeta * zeta).sqrt());
-                let c = 1.0 / (1.0 + t * t).sqrt();
-                let s = c * t;
+                let (c, s) = super::jacobi_rotation(alpha, beta, g);
                 for row in b.iter_mut() {
                     let (bi, bj) = (row[i], row[j]);
                     row[i] = c * bi - s * bj;

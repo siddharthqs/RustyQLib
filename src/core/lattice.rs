@@ -327,6 +327,26 @@ pub struct LatticeSolution {
     pub theta: f64,
 }
 
+/// The delta/gamma read-off shared by all three engines: delta from the
+/// two first-layer nodes, gamma from the change of the one-sided deltas
+/// across the second layer over the half-span. Layers run low spot to
+/// high. Theta is *not* shared — each engine's elapsed time and drift
+/// handling differ, so it stays at the call site.
+fn tree_delta_gamma(
+    spots1: [f64; 2],
+    values1: [f64; 2],
+    spots2: [f64; 3],
+    values2: [f64; 3],
+) -> (f64, f64) {
+    let delta = (values1[1] - values1[0]) / (spots1[1] - spots1[0]);
+    let [s_dd, s_ud, s_uu] = spots2;
+    let [v_dd, v_ud, v_uu] = values2;
+    let d_up = (v_uu - v_ud) / (s_uu - s_ud);
+    let d_down = (v_ud - v_dd) / (s_ud - s_dd);
+    let gamma = (d_up - d_down) / (0.5 * (s_uu - s_dd));
+    (delta, gamma)
+}
+
 /// The same rolling-array induction as [`price_backward`] (identical price,
 /// bit for bit) that additionally keeps the first two layers, so the value
 /// and the tree delta/gamma/theta come out of **one** pass — no re-pricing
@@ -369,15 +389,16 @@ pub fn price_backward_with_greeks(
     }
 
     let price = v[0];
-    let delta = (layer1[1] - layer1[0]) / (spot(1, 1) - spot(1, 0));
-    let (s_uu, s_ud, s_dd) = (spot(2, 2), spot(2, 1), spot(2, 0));
-    let d_up = (layer2[2] - layer2[1]) / (s_uu - s_ud);
-    let d_down = (layer2[1] - layer2[0]) / (s_ud - s_dd);
-    let gamma = (d_up - d_down) / (0.5 * (s_uu - s_dd));
+    let (delta, gamma) = tree_delta_gamma(
+        [spot(1, 0), spot(1, 1)],
+        layer1,
+        [spot(2, 0), spot(2, 1), spot(2, 2)],
+        layer2,
+    );
     // the second-layer center sits at s0 only on symmetric trees; remove
     // the spot displacement with the tree's delta and gamma before reading
     // the calendar decay over the 2*dt elapsed
-    let ds = s_ud - s0;
+    let ds = spot(2, 1) - s0;
     let theta = (layer2[1] - price - delta * ds - 0.5 * gamma * ds * ds) / (2.0 * dt);
 
     LatticeSolution {
@@ -467,13 +488,13 @@ pub fn price_with_diagnostics(
     }
 
     let price = value_tree[0][0];
-    let delta = (value_tree[1][1] - value_tree[1][0]) / (spot_tree[1][1] - spot_tree[1][0]);
-    let (s_uu, s_ud, s_dd) = (spot_tree[2][2], spot_tree[2][1], spot_tree[2][0]);
-    let (v_uu, v_ud, v_dd) = (value_tree[2][2], value_tree[2][1], value_tree[2][0]);
-    let d_up = (v_uu - v_ud) / (s_uu - s_ud);
-    let d_down = (v_ud - v_dd) / (s_ud - s_dd);
-    let gamma = (d_up - d_down) / (0.5 * (s_uu - s_dd));
-    let theta = (v_ud - price) / (2.0 * dt);
+    let (delta, gamma) = tree_delta_gamma(
+        [spot_tree[1][0], spot_tree[1][1]],
+        [value_tree[1][0], value_tree[1][1]],
+        [spot_tree[2][0], spot_tree[2][1], spot_tree[2][2]],
+        [value_tree[2][0], value_tree[2][1], value_tree[2][2]],
+    );
+    let theta = (value_tree[2][1] - price) / (2.0 * dt);
 
     LatticeDiagnostics {
         price,
@@ -729,11 +750,12 @@ impl TermLattice {
         }
 
         let price = v[0];
-        let delta = (layer1[1] - layer1[0]) / (spot(1, 1) - spot(1, 0));
-        let (s_uu, s_ud, s_dd) = (spot(2, 2), spot(2, 1), spot(2, 0));
-        let d_up = (layer2[2] - layer2[1]) / (s_uu - s_ud);
-        let d_down = (layer2[1] - layer2[0]) / (s_ud - s_dd);
-        let gamma = (d_up - d_down) / (0.5 * (s_uu - s_dd));
+        let (delta, gamma) = tree_delta_gamma(
+            [spot(1, 0), spot(1, 1)],
+            layer1,
+            [spot(2, 0), spot(2, 1), spot(2, 2)],
+            layer2,
+        );
         let theta = (layer2[1] - price) / self.times[2];
         LatticeSolution {
             price,

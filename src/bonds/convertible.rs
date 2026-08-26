@@ -199,18 +199,7 @@ impl ConvertibleBond {
         curve: &YieldCurve,
         settlement: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
-        let bump = 0.01 * market.spot;
-        let up = ConvertibleMarket {
-            spot: market.spot + bump,
-            ..*market
-        };
-        let down = ConvertibleMarket {
-            spot: market.spot - bump,
-            ..*market
-        };
-        let price_up = self.dirty_price(&up, curve, settlement)?;
-        let price_down = self.dirty_price(&down, curve, settlement)?;
-        Ok((price_up - price_down) / (2.0 * bump))
+        spot_bump_delta(market, |m| self.dirty_price(m, curve, settlement))
     }
 
     /// The credit spread implied by a quoted clean price, holding the
@@ -228,33 +217,62 @@ impl ConvertibleBond {
                 format!("clean price must be positive, got {clean_price}"),
             ));
         }
-        // price is decreasing in the spread (only the cash part reacts):
-        // target - price(s) is increasing
-        let objective = |spread: f64| {
-            let with_spread = ConvertibleMarket {
-                credit_spread: spread,
-                ..*market
-            };
-            clean_price
-                - self
-                    .clean_price(&with_spread, curve, settlement)
-                    .expect("the spread bracket keeps the tree valid")
-        };
-        let probe = ConvertibleMarket {
-            credit_spread: -0.2,
+        solve_implied_credit_spread(clean_price, market, |m| {
+            self.clean_price(m, curve, settlement)
+        })
+    }
+}
+
+/// Equity delta of a tree pricer from a symmetric 1% spot bump: the
+/// central difference of `price` in the spot. Shared by the convertible
+/// bond and the convertible preferred.
+pub(crate) fn spot_bump_delta(
+    market: &ConvertibleMarket,
+    price: impl Fn(&ConvertibleMarket) -> Result<f64, RustyQLibError>,
+) -> Result<f64, RustyQLibError> {
+    let bump = 0.01 * market.spot;
+    let up = ConvertibleMarket {
+        spot: market.spot + bump,
+        ..*market
+    };
+    let down = ConvertibleMarket {
+        spot: market.spot - bump,
+        ..*market
+    };
+    Ok((price(&up)? - price(&down)?) / (2.0 * bump))
+}
+
+/// The credit spread at which `price` reproduces `target`, holding the
+/// other market inputs fixed. Shared by the convertible bond and the
+/// convertible preferred.
+pub(crate) fn solve_implied_credit_spread(
+    target: f64,
+    market: &ConvertibleMarket,
+    price: impl Fn(&ConvertibleMarket) -> Result<f64, RustyQLibError>,
+) -> Result<f64, RustyQLibError> {
+    // price is decreasing in the spread (only the cash part reacts):
+    // target - price(s) is increasing
+    let objective = |spread: f64| {
+        let with_spread = ConvertibleMarket {
+            credit_spread: spread,
             ..*market
         };
-        self.clean_price(&probe, curve, settlement)?;
-        let root = Solver1d::new(1e-8, 100).bisection(objective, -0.2, 3.0)?;
-        if !root.converged {
-            return Err(RustyQLibError::CalibrationFailed {
-                iterations: root.iterations,
-                residual: objective(root.x).abs(),
-                reason: "implied credit spread solve did not converge".to_string(),
-            });
-        }
-        Ok(root.x)
+        target - price(&with_spread).expect("the spread bracket keeps the tree valid")
+    };
+    let probe = ConvertibleMarket {
+        credit_spread: -0.2,
+        ..*market
+    };
+    price(&probe)?;
+    let root = Solver1d::new(1e-8, 100).bisection(objective, -0.2, 3.0)?;
+    if !root.converged {
+        return Err(RustyQLibError::CalibrationFailed {
+            iterations: root.iterations,
+            residual: objective(root.x).abs(),
+            reason: "implied credit spread solve did not converge".to_string(),
+        });
     }
+    Ok(root.x)
 }
 
 /// The Tsiveriotis-Fernandes backward induction. Returns the dirty
@@ -340,9 +358,7 @@ fn tf_tree_value(
         if call.call_date <= settlement || call.call_date >= bond.maturity_date {
             continue;
         }
-        let outstanding = bond.outstanding_face(call.call_date);
-        let strike = outstanding * call.call_price / 100.0
-            + outstanding * bond.accrued_interest(call.call_date)? / 100.0;
+        let strike = bond.dirty_redemption_amount(call.call_date, call.call_price)?;
         let index = (((year_fraction(call.call_date) - t0) / dt).round() as usize).min(steps);
         call_at_step[index] = Some(strike);
     }
@@ -351,9 +367,7 @@ fn tf_tree_value(
         if put.put_date <= settlement || put.put_date >= bond.maturity_date {
             continue;
         }
-        let outstanding = bond.outstanding_face(put.put_date);
-        let strike = outstanding * put.put_price / 100.0
-            + outstanding * bond.accrued_interest(put.put_date)? / 100.0;
+        let strike = bond.dirty_redemption_amount(put.put_date, put.put_price)?;
         let index = (((year_fraction(put.put_date) - t0) / dt).round() as usize).min(steps);
         put_at_step[index] = Some(strike);
     }

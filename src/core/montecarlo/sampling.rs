@@ -5,6 +5,12 @@ use crate::core::utils::inv_norm_cdf;
 
 use super::rng::splitmix64;
 
+/// Map a uniform to a standard normal through the inverse CDF, clamped
+/// away from 0 and 1 so the tails stay finite.
+pub(crate) fn uniform_to_normal(u: f64) -> f64 {
+    inv_norm_cdf(u.clamp(1e-15, 1.0 - 1e-15))
+}
+
 /// Tiny counter-based uniform generator on top of SplitMix64.
 struct Counter {
     state: u64,
@@ -40,7 +46,7 @@ pub fn stratified_uniforms(n: usize, seed: u64) -> Vec<f64> {
 pub fn stratified_normals(n: usize, seed: u64) -> Vec<f64> {
     stratified_uniforms(n, seed)
         .into_iter()
-        .map(|u| inv_norm_cdf(u.clamp(1e-15, 1.0 - 1e-15)))
+        .map(uniform_to_normal)
         .collect()
 }
 

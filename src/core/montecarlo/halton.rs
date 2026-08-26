@@ -3,9 +3,8 @@
 //! is the quasi-random workhorse when the problem's dimension exceeds
 //! the embedded Sobol table ([`SobolSequence`](super::sobol::SobolSequence)).
 
-use crate::core::utils::inv_norm_cdf;
-
 use super::rng::splitmix64;
+use super::sampling::uniform_to_normal;
 
 fn first_primes(n: usize) -> Vec<u64> {
     let mut primes: Vec<u64> = Vec::with_capacity(n);
@@ -66,7 +65,7 @@ impl QmcSequence {
             if u >= 1.0 {
                 u -= 1.0;
             }
-            *z = inv_norm_cdf(u.clamp(1e-15, 1.0 - 1e-15));
+            *z = uniform_to_normal(u);
         }
     }
 }

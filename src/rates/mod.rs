@@ -47,6 +47,7 @@ pub use sofr_future::{hull_convexity_adjustment, SofrContract, SofrFuture};
 pub use vanilla_swap::VanillaSwap;
 
 use crate::core::curves::YieldCurve;
+use crate::core::errors::RustyQLibError;
 
 /// Which side of the fixed leg the position is on. `Payer` pays fixed
 /// and receives floating; `Receiver` the reverse.
@@ -64,6 +65,39 @@ impl PayerReceiver {
             PayerReceiver::Receiver => -1.0,
         }
     }
+}
+
+/// Reused across swap types: validate the terms every swap constructor
+/// shares. `instrument` names the swap type in errors and `rate_label`
+/// its rate-like input ("fixed rate" or "spread"), so each
+/// constructor's messages read exactly as before.
+pub(crate) fn validate_swap_terms(
+    instrument: &str,
+    notional: f64,
+    rate: f64,
+    rate_label: &str,
+    effective_date: chrono::NaiveDate,
+    maturity_date: chrono::NaiveDate,
+) -> Result<(), RustyQLibError> {
+    if !notional.is_finite() || notional <= 0.0 {
+        return Err(RustyQLibError::invalid_input(
+            instrument,
+            format!("notional must be positive, got {notional}"),
+        ));
+    }
+    if !rate.is_finite() {
+        return Err(RustyQLibError::invalid_input(
+            instrument,
+            format!("{rate_label} must be finite, got {rate}"),
+        ));
+    }
+    if maturity_date <= effective_date {
+        return Err(RustyQLibError::invalid_input(
+            instrument,
+            format!("maturity {maturity_date} must be after effective {effective_date}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Reused across swap types: reject a non-positive discount factor from

@@ -5,6 +5,8 @@
 //! sampling in [`sobol`](super::sobol) / [`halton`](super::halton) is
 //! itself the strongest variance reduction for smooth payoffs.)
 
+use super::stats::mean_std_err;
+
 /// Rescale draws in place to sample mean 0 and variance 1 exactly —
 /// removes the O(1/sqrt(n)) noise in the first two sample moments.
 pub fn moment_match(draws: &mut [f64]) {
@@ -52,9 +54,8 @@ pub fn control_variate_estimate(
         sum += adjusted;
         sum_sq += adjusted * adjusted;
     }
-    let mean = sum / n;
-    let var = (sum_sq / n - mean * mean).max(0.0);
-    (mean, (var / n).sqrt(), beta)
+    let (mean, std_err) = mean_std_err(sum, sum_sq, payoffs.len());
+    (mean, std_err, beta)
 }
 
 #[cfg(test)]

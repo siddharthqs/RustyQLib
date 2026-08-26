@@ -39,20 +39,34 @@ fn brennan_schwartz_sweep(
     exercise: &[f64],
 ) -> Vec<f64> {
     let n = d.len();
+    assert!(b.len() == n && a.len() == n - 1 && c.len() == n - 1 && exercise.len() == n);
+    // near-zero pivot = breakdown of the no-pivoting elimination (the
+    // system is not diagonally dominant); fail loudly instead of
+    // silently returning NaN/garbage — the same guard policy as
+    // `thomas_algorithm` in tridiagonal.rs
+    let check = |piv: f64, i: usize| {
+        assert!(
+            piv.abs() > 1e-14 * (1.0 + b[i].abs()),
+            "Brennan-Schwartz solve broke down at row {i} (near-zero pivot): \
+             the system is not diagonally dominant"
+        );
+        piv
+    };
     if n == 1 {
-        return vec![(d[0] / b[0]).max(exercise[0])];
+        return vec![(d[0] / check(b[0], 0)).max(exercise[0])];
     }
     let mut c_ = c.to_vec();
     let mut d_ = d.to_vec();
     let mut x = vec![0.0; n];
-    c_[0] /= b[0];
-    d_[0] /= b[0];
+    let b0 = check(b[0], 0);
+    c_[0] /= b0;
+    d_[0] /= b0;
     for i in 1..n - 1 {
-        let id = 1.0 / (b[i] - a[i - 1] * c_[i - 1]);
+        let id = 1.0 / check(b[i] - a[i - 1] * c_[i - 1], i);
         c_[i] *= id;
         d_[i] = (d_[i] - a[i - 1] * d_[i - 1]) * id;
     }
-    d_[n - 1] = (d_[n - 1] - a[n - 2] * d_[n - 2]) / (b[n - 1] - a[n - 2] * c_[n - 2]);
+    d_[n - 1] = (d_[n - 1] - a[n - 2] * d_[n - 2]) / check(b[n - 1] - a[n - 2] * c_[n - 2], n - 1);
 
     x[n - 1] = d_[n - 1].max(exercise[n - 1]);
     for i in (0..n - 1).rev() {

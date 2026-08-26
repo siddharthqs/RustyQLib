@@ -54,24 +54,47 @@ pub fn price(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64, put_or_call: Pu
             if b >= r {
                 return euro;
             }
-            let s_star = critical_call(k, r, b, sigma, t);
+            let (s_star, q2, a2) = premium_pieces(k, r, b, sigma, t, put_or_call);
             if s >= s_star {
                 return intrinsic;
             }
-            let q2 = quadratic_root(r, b, sigma, t, true);
-            let d1 = d1_of(s_star, k, b, sigma, t);
-            let a2 = (s_star / q2) * (1.0 - ((b - r) * t).exp() * norm_cdf(d1));
             euro + a2 * (s / s_star).powf(q2)
         }
         PutOrCall::Put => {
-            let s_star = critical_put(k, r, b, sigma, t);
+            let (s_star, q1, a1) = premium_pieces(k, r, b, sigma, t, put_or_call);
             if s <= s_star {
                 return intrinsic;
             }
+            euro + a1 * (s / s_star).powf(q1)
+        }
+    }
+}
+
+/// The spot-independent pieces of the early-exercise premium — the critical
+/// price `S*`, the quadratic exponent and the premium coefficient — from
+/// `(K, r, b, sigma, T)`. Shared by [`price`] and [`SpotKernel::new`].
+fn premium_pieces(
+    k: f64,
+    r: f64,
+    b: f64,
+    sigma: f64,
+    t: f64,
+    put_or_call: PutOrCall,
+) -> (f64, f64, f64) {
+    match put_or_call {
+        PutOrCall::Call => {
+            let s_star = critical_call(k, r, b, sigma, t);
+            let q2 = quadratic_root(r, b, sigma, t, true);
+            let d1 = d1_of(s_star, k, b, sigma, t);
+            let a2 = (s_star / q2) * (1.0 - ((b - r) * t).exp() * norm_cdf(d1));
+            (s_star, q2, a2)
+        }
+        PutOrCall::Put => {
+            let s_star = critical_put(k, r, b, sigma, t);
             let q1 = quadratic_root(r, b, sigma, t, false);
             let d1 = d1_of(s_star, k, b, sigma, t);
             let a1 = -(s_star / q1) * (1.0 - ((b - r) * t).exp() * norm_cdf(-d1));
-            euro + a1 * (s / s_star).powf(q1)
+            (s_star, q1, a1)
         }
     }
 }
@@ -171,33 +194,14 @@ fn critical_put(k: f64, r: f64, b: f64, sigma: f64, t: f64) -> f64 {
 }
 
 // ── EquityOption integration ────────────────────────────────────────────
-// Flat Black-Scholes inputs are read the same way the analytic vanilla
-// pricer reads them: escrowed spot (cash dividends carved out), the curve's
-// continuous zero rate, the total carry, and the surface vol at this strike.
+// The market reads and exercise-style dispatch are shared with the BS2002
+// engine through [`american_analytic_npv`](super::american_analytic_npv).
 
 /// Price under a market view; `None` prices the base market (identical
 /// to a zero-bump view, bit for bit). Bumped views serve the central
 /// sensitivity engine's stencils and PnL attribution.
 pub fn npv(option: &EquityOption, bumped_market: Option<&BumpedMarket>) -> f64 {
-    let base = BumpedMarket::base(&option.market);
-    let m = bumped_market.unwrap_or(&base);
-    let maturity = option.base.maturity_date;
-    let s = m.effective_spot(maturity);
-    let k = option.base.strike_price;
-    let r = m.risk_free_rate(maturity);
-    let q = m.carry_yield();
-    let sigma = m.volatility(k, maturity);
-    let t = m.time_to_maturity(maturity).max(1e-8);
-    let pc = *option.payoff.put_or_call();
-    match option.payoff.exercise_style() {
-        ContractStyle::American => price(s, k, r, q, sigma, t, pc),
-        // BAW on a European contract is just the European price
-        ContractStyle::European => bs_price(s, k, r, q, sigma, t, pc),
-        // invariant: check_engine_support refuses Bermudan on this engine
-        ContractStyle::Bermudan(_) => {
-            unreachable!("Bermudan exercise is rejected on the BAW engine before pricing")
-        }
-    }
+    super::american_analytic_npv(option, bumped_market, price, "BAW")
 }
 
 /// Critical early-exercise spot for this option (the BAW boundary `S*`).
@@ -258,20 +262,7 @@ impl SpotKernel {
             match pc {
                 // never optimal to exercise a call early when b >= r
                 PutOrCall::Call if b >= r => None,
-                PutOrCall::Call => {
-                    let s_star = critical_call(k, r, b, sigma, t);
-                    let q2 = quadratic_root(r, b, sigma, t, true);
-                    let d1 = d1_of(s_star, k, b, sigma, t);
-                    let a2 = (s_star / q2) * (1.0 - ((b - r) * t).exp() * norm_cdf(d1));
-                    Some((s_star, q2, a2))
-                }
-                PutOrCall::Put => {
-                    let s_star = critical_put(k, r, b, sigma, t);
-                    let q1 = quadratic_root(r, b, sigma, t, false);
-                    let d1 = d1_of(s_star, k, b, sigma, t);
-                    let a1 = -(s_star / q1) * (1.0 - ((b - r) * t).exp() * norm_cdf(-d1));
-                    Some((s_star, q1, a1))
-                }
+                _ => Some(premium_pieces(k, r, b, sigma, t, pc)),
             }
         };
         SpotKernel {

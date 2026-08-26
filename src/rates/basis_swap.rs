@@ -15,6 +15,7 @@ use crate::core::errors::RustyQLibError;
 use crate::rates::leg::{
     accrual_periods, annuity, float_leg_pv, float_leg_pv_with_fixing, AccrualPeriod,
 };
+use crate::rates::validate_swap_terms;
 
 /// One floating leg's conventions.
 #[derive(Debug, Clone, Copy)]
@@ -50,24 +51,14 @@ impl BasisSwap {
         calendar: Calendar,
         convention: BusinessDayConvention,
     ) -> Result<Self, RustyQLibError> {
-        if !notional.is_finite() || notional <= 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "basis swap",
-                format!("notional must be positive, got {notional}"),
-            ));
-        }
-        if !spread.is_finite() {
-            return Err(RustyQLibError::invalid_input(
-                "basis swap",
-                format!("spread must be finite, got {spread}"),
-            ));
-        }
-        if maturity_date <= effective_date {
-            return Err(RustyQLibError::invalid_input(
-                "basis swap",
-                format!("maturity {maturity_date} must be after effective {effective_date}"),
-            ));
-        }
+        validate_swap_terms(
+            "basis swap",
+            notional,
+            spread,
+            "spread",
+            effective_date,
+            maturity_date,
+        )?;
         Ok(BasisSwap {
             notional,
             spread,

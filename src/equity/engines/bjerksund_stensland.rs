@@ -18,7 +18,7 @@
 //! especially for longer maturities.
 
 use crate::core::trade::PutOrCall;
-use crate::core::utils::{bivariate_norm_cdf, norm_cdf, ContractStyle};
+use crate::core::utils::{bivariate_norm_cdf, norm_cdf};
 use crate::equity::blackscholes::bs_price;
 use crate::equity::bump::BumpedMarket;
 use crate::equity::vanilla_option::EquityOption;
@@ -156,24 +156,7 @@ fn psi(
 /// to a zero-bump view, bit for bit). Bumped views serve the central
 /// sensitivity engine's stencils and PnL attribution.
 pub fn npv(option: &EquityOption, bumped_market: Option<&BumpedMarket>) -> f64 {
-    let base = BumpedMarket::base(&option.market);
-    let m = bumped_market.unwrap_or(&base);
-    let maturity = option.base.maturity_date;
-    let s = m.effective_spot(maturity);
-    let k = option.base.strike_price;
-    let r = m.risk_free_rate(maturity);
-    let q = m.carry_yield();
-    let sigma = m.volatility(k, maturity);
-    let t = m.time_to_maturity(maturity).max(1e-8);
-    let pc = *option.payoff.put_or_call();
-    match option.payoff.exercise_style() {
-        ContractStyle::American => price(s, k, r, q, sigma, t, pc),
-        ContractStyle::European => bs_price(s, k, r, q, sigma, t, pc),
-        // invariant: check_engine_support refuses Bermudan on this engine
-        ContractStyle::Bermudan(_) => {
-            unreachable!("Bermudan exercise is rejected on the BS2002 engine before pricing")
-        }
-    }
+    super::american_analytic_npv(option, bumped_market, price, "BS2002")
 }
 
 // Greeks: central-difference bumps on the fast closed form, produced by

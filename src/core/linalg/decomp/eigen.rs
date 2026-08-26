@@ -28,10 +28,7 @@ pub fn symmetric_eigen(a: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
                 if m[p][q].abs() < 1e-300 {
                     continue;
                 }
-                let theta = (m[q][q] - m[p][p]) / (2.0 * m[p][q]);
-                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
-                let c = 1.0 / (t * t + 1.0).sqrt();
-                let s = t * c;
+                let (c, s) = super::jacobi_rotation(m[p][p], m[q][q], m[p][q]);
                 for k in 0..n {
                     let (mkp, mkq) = (m[k][p], m[k][q]);
                     m[k][p] = c * mkp - s * mkq;

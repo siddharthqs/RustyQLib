@@ -9,7 +9,7 @@ use crate::core::errors::RustyQLibError;
 use crate::rates::leg::{
     accrual_periods, annuity, fixed_leg_pv, float_leg_pv, float_leg_pv_with_fixing, AccrualPeriod,
 };
-use crate::rates::PayerReceiver;
+use crate::rates::{validate_swap_terms, PayerReceiver};
 
 /// A vanilla interest rate swap: a periodic fixed leg against a
 /// periodic floating leg, both from `effective_date` to
@@ -45,24 +45,14 @@ impl VanillaSwap {
         calendar: Calendar,
         convention: BusinessDayConvention,
     ) -> Result<Self, RustyQLibError> {
-        if !notional.is_finite() || notional <= 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "swap",
-                format!("notional must be positive, got {notional}"),
-            ));
-        }
-        if !fixed_rate.is_finite() {
-            return Err(RustyQLibError::invalid_input(
-                "swap",
-                format!("fixed rate must be finite, got {fixed_rate}"),
-            ));
-        }
-        if maturity_date <= effective_date {
-            return Err(RustyQLibError::invalid_input(
-                "swap",
-                format!("maturity {maturity_date} must be after effective {effective_date}"),
-            ));
-        }
+        validate_swap_terms(
+            "swap",
+            notional,
+            fixed_rate,
+            "fixed rate",
+            effective_date,
+            maturity_date,
+        )?;
         Ok(VanillaSwap {
             notional,
             fixed_rate,

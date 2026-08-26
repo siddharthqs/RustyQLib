@@ -147,10 +147,20 @@ impl SviParams {
 
     /// The Gatheral-Jacquier butterfly function
     /// `g(k) = (1 - k w'/(2w))^2 - (w'^2/4)(1/w + 1/4) + w''/2`,
-    /// which must stay non-negative for an arbitrage-free density.
+    /// which must stay non-negative for an arbitrage-free density —
+    /// closed-form derivatives fed through the shared
+    /// [`butterfly_g`](crate::equity::smoothed_surface::butterfly_g).
     pub fn butterfly_g(&self, k: f64) -> f64 {
         let (w, w1, w2) = self.variance_derivatives(k);
-        (1.0 - k * w1 / (2.0 * w)).powi(2) - (w1 * w1 / 4.0) * (1.0 / w + 0.25) + w2 / 2.0
+        crate::equity::smoothed_surface::butterfly_g(
+            &VarianceDerivatives {
+                w,
+                dk: w1,
+                dkk: w2,
+                dt: 0.0,
+            },
+            k,
+        )
     }
 
     /// Minimum of `g(k)` over a wide log-moneyness scan; negative means

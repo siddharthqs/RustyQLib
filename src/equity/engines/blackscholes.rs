@@ -528,8 +528,7 @@ impl BlackScholesPricer {
         let q = bsd_option.carry_yield();
         let sigma = Self::bumped_vol(bsd_option, dsigma);
         let t = bsd_option.time_to_maturity() + dt_shift;
-        let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * t.sqrt());
-        let d2 = d1 - sigma * t.sqrt();
+        let (d1, d2) = bs_d1_d2(s, k, r, q, sigma, t);
         match (binary_type, bsd_option.payoff.put_or_call()) {
             (BinaryType::CashOrNothing, PutOrCall::Call) => cash * (-r * t).exp() * norm_cdf(d2),
             (BinaryType::CashOrNothing, PutOrCall::Put) => cash * (-r * t).exp() * norm_cdf(-d2),
@@ -1187,6 +1186,15 @@ impl BlackScholesPricer {
     }
 }
 
+/// The Black-Scholes `(d1, d2)` pair as a pure function of its inputs,
+/// shared by the closed forms in this file.
+fn bs_d1_d2(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> (f64, f64) {
+    let sqrt_t = t.sqrt();
+    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    let d2 = d1 - sigma * sqrt_t;
+    (d1, d2)
+}
+
 /// Black-Scholes price of a European vanilla as a pure function of its
 /// inputs (no option object needed).
 pub fn bs_price(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64, put_or_call: PutOrCall) -> f64 {
@@ -1196,9 +1204,7 @@ pub fn bs_price(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64, put_or_call:
             PutOrCall::Put => (k * exp(-r * t) - s * exp(-q * t)).max(0.0),
         };
     }
-    let sqrt_t = t.sqrt();
-    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
-    let d2 = d1 - sigma * sqrt_t;
+    let (d1, d2) = bs_d1_d2(s, k, r, q, sigma, t);
     match put_or_call {
         PutOrCall::Call => s * exp(-q * t) * norm_cdf(d1) - k * exp(-r * t) * norm_cdf(d2),
         PutOrCall::Put => k * exp(-r * t) * norm_cdf(-d2) - s * exp(-q * t) * norm_cdf(-d1),
@@ -1208,21 +1214,21 @@ pub fn bs_price(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64, put_or_call:
 /// Black-Scholes vega as a pure function (per unit of vol).
 pub fn bs_vega(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
     let sqrt_t = t.sqrt();
-    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    let (d1, _) = bs_d1_d2(s, k, r, q, sigma, t);
     s * exp(-q * t) * norm_pdf(d1) * sqrt_t
 }
 
 /// Black-Scholes vanna, the change in spot delta per unit of volatility.
 pub fn bs_vanna(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
     let sqrt_t = t.sqrt();
-    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    let (d1, _) = bs_d1_d2(s, k, r, q, sigma, t);
     exp(-q * t) * norm_pdf(d1) * (sqrt_t - d1 / sigma)
 }
 
 /// Black-Scholes charm, the change in spot delta per year of calendar time.
 pub fn bs_charm(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64, put_or_call: PutOrCall) -> f64 {
     let sqrt_t = t.sqrt();
-    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    let (d1, _) = bs_d1_d2(s, k, r, q, sigma, t);
     let df_q = exp(-q * t);
     let d1_dt = (r - q + 0.5 * sigma * sigma) / (sigma * sqrt_t) - d1 / (2.0 * t);
     let delta_component = match put_or_call {
@@ -1235,8 +1241,7 @@ pub fn bs_charm(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64, put_or_call:
 /// Black-Scholes zomma, the change in spot gamma per unit of volatility.
 pub fn bs_zomma(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
     let sqrt_t = t.sqrt();
-    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
-    let d2 = d1 - sigma * sqrt_t;
+    let (d1, d2) = bs_d1_d2(s, k, r, q, sigma, t);
     let gamma = exp(-q * t) * norm_pdf(d1) / (s * sigma * sqrt_t);
     gamma * (d1 * d2 - 1.0) / sigma
 }
@@ -1246,8 +1251,7 @@ pub fn bs_zomma(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
 /// volatility-independent); negative at the money, positive in the wings.
 pub fn bs_volga(s: f64, k: f64, r: f64, q: f64, sigma: f64, t: f64) -> f64 {
     let sqrt_t = t.sqrt();
-    let d1 = ((s / k).ln() + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
-    let d2 = d1 - sigma * sqrt_t;
+    let (d1, d2) = bs_d1_d2(s, k, r, q, sigma, t);
     let vega = s * exp(-q * t) * norm_pdf(d1) * sqrt_t;
     vega * d1 * d2 / sigma
 }

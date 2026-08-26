@@ -877,10 +877,7 @@ impl VolSurface {
         }
         let times: Vec<f64> = expiries
             .iter()
-            .map(|tenor| match tenor {
-                Tenor::Date(d) => day_count.year_fraction(reference_date, *d),
-                Tenor::YearFraction(t) => *t,
-            })
+            .map(|tenor| tenor.resolve(reference_date, day_count).0)
             .collect();
         for &t in &times {
             // written so NaN fails too: `t <= 0.0` is false for NaN and

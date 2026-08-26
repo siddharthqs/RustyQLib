@@ -26,7 +26,8 @@ use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 use crate::core::trade::PutOrCall;
 use crate::rates::models::{
-    gaussian_zero_bond_option, validate_bond_option_terms, OneFactorAffine, ShortRateModel,
+    gaussian_bond_price_vol, gaussian_short_rate_std, gaussian_zero_bond_option,
+    validate_bond_option_terms, OneFactorAffine, ShortRateModel,
 };
 
 /// Step for the log-df difference approximating `f(0,t)`.
@@ -80,7 +81,7 @@ impl HullWhite {
 
     /// `B(t,T) = (1 - e^{-a(T-t)}) / a`.
     fn b_factor(&self, t: f64, maturity: f64) -> f64 {
-        (1.0 - (-self.a * (maturity - t)).exp()) / self.a
+        crate::rates::models::b_factor(self.a, t, maturity)
     }
 
     /// `alpha(t) = f(0,t) + sigma^2/(2a^2)(1 - e^{-at})^2` — the mean
@@ -98,12 +99,7 @@ impl HullWhite {
 
     /// Conditional standard deviation of `r(t + dt)` given `r(t)`.
     pub fn short_rate_std(&self, dt: f64) -> f64 {
-        (self.sigma * self.sigma * (1.0 - (-2.0 * self.a * dt).exp()) / (2.0 * self.a)).sqrt()
-    }
-
-    /// Price volatility of the `bond_maturity` bond at `expiry`.
-    fn bond_price_vol(&self, expiry: f64, bond_maturity: f64) -> f64 {
-        self.short_rate_std(expiry) * self.b_factor(expiry, bond_maturity)
+        gaussian_short_rate_std(self.a, self.sigma, dt)
     }
 }
 
@@ -156,7 +152,7 @@ impl OneFactorAffine for HullWhite {
         validate_bond_option_terms(expiry, bond_maturity, strike)?;
         let p_expiry = self.curve.df(expiry);
         let p_bond = self.curve.df(bond_maturity);
-        let sigma_p = self.bond_price_vol(expiry, bond_maturity);
+        let sigma_p = gaussian_bond_price_vol(self.a, self.sigma, expiry, bond_maturity);
         Ok(gaussian_zero_bond_option(
             p_expiry,
             p_bond,
