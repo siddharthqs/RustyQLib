@@ -141,9 +141,10 @@ where
 ///
 /// - **below the first pillar**, variance accrues proportionally from
 ///   zero, so `w(t) = w(t_1) t / t_1` and `dw/dt = w(t_1) / t_1`;
-/// - **at or beyond the last pillar**, the smile is flat-extrapolated and
-///   the forward variance comes from `beyond_last_dwdt` (each fit's last
-///   inter-slice segment);
+/// - **at or beyond the last pillar**, the smile shape is held and
+///   variance keeps accruing at the forward rate from `beyond_last_dwdt`
+///   (each fit's last inter-slice segment), so
+///   `w(t) = w(t_n) + (t - t_n) dw/dt`;
 /// - **between pillars**, everything is linear in `t` and the forward
 ///   variance is the segment's slope.
 ///
@@ -175,11 +176,15 @@ pub fn interpolate_slices(
             dt: da[0] / ta,
         }
     } else if ta == tb {
+        // beyond the last pillar: the smile shape is held while variance
+        // keeps accruing at the supplied forward rate, so implied vol
+        // tends to a level instead of decaying like 1/sqrt(t)
+        let dwdt = beyond_last_dwdt();
         VarianceDerivatives {
-            w: da[0],
+            w: da[0] + dwdt * (t - ta),
             dk: da[1],
             dkk: da[2],
-            dt: beyond_last_dwdt(),
+            dt: dwdt,
         }
     } else {
         VarianceDerivatives {
@@ -343,9 +348,11 @@ mod tests {
         assert!((below.w - 0.01).abs() < 1e-14, "{}", below.w);
         assert!((below.dt - 0.04).abs() < 1e-14);
 
-        // beyond the last pillar: flat smile, supplied forward variance
+        // beyond the last pillar: the smile shape is held and variance
+        // keeps accruing at the supplied forward rate
         let beyond = interpolate_slices(late, late, 1.5, 0.0, || 0.06);
-        assert!((beyond.w - 0.05).abs() < 1e-14);
+        assert!((beyond.w - (0.05 + 0.06 * 0.5)).abs() < 1e-14);
+        assert!((beyond.dk - 0.02).abs() < 1e-14);
         assert!((beyond.dt - 0.06).abs() < 1e-14);
 
         // grazing slices: the later variance is floored at the earlier,

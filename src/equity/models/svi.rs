@@ -670,15 +670,19 @@ impl SviSurfaceFit {
 
     /// Total variance at log-moneyness `k`: linear in time between
     /// slices at fixed `k`, floored to be non-decreasing; proportional
-    /// to `t` below the first slice (variance accrues from zero).
+    /// to `t` below the first slice (variance accrues from zero); beyond
+    /// the last slice the smile shape is held and variance keeps
+    /// accruing at the last segment's forward rate, so implied vol tends
+    /// to a level instead of decaying like `1/sqrt(t)`.
     pub fn total_variance(&self, k: f64, t: f64) -> f64 {
         let (a, b, weight) = self.bracket(t);
-        let (wa, wb) = (
-            a.params.total_variance(k),
-            b.params.total_variance(k).max(a.params.total_variance(k)),
-        );
+        let wa = a.params.total_variance(k);
+        let wb = b.params.total_variance(k).max(wa);
         let w = if t <= a.t {
             wa * (t / a.t).min(1.0)
+        } else if a.t == b.t {
+            // beyond the last pillar (the bracket clamps to it)
+            wb + self.last_segment_dwdt(k) * (t - b.t)
         } else {
             wa + (wb - wa) * weight
         };
@@ -713,6 +717,10 @@ impl SviSurfaceFit {
         <Self as SmoothedSurface>::local_vol_checked(self, level, t)
     }
 
+    /// Forward variance of the last inter-slice segment at `k` (floored
+    /// at zero for calendar safety), used to extrapolate beyond the
+    /// final pillar (a single-slice fit accrues its variance from zero
+    /// instead, extending the slice at flat implied vol).
     fn last_segment_dwdt(&self, k: f64) -> f64 {
         let n = self.slices.len();
         if n == 1 {
@@ -720,7 +728,8 @@ impl SviSurfaceFit {
             return s.params.total_variance(k) / s.t;
         }
         let (prev, last) = (&self.slices[n - 2], &self.slices[n - 1]);
-        (last.params.total_variance(k) - prev.params.total_variance(k)) / (last.t - prev.t)
+        ((last.params.total_variance(k) - prev.params.total_variance(k)) / (last.t - prev.t))
+            .max(0.0)
     }
 
     /// Sample the fit into the canonical pricing [`VolSurface`]: per
@@ -1763,6 +1772,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn variance_keeps_accruing_beyond_the_last_pillar() {
+        // two flat smiles (b = 0) at the same implied vol: w = vol^2 t at
+        // both pillars, so the extrapolated term structure must stay flat
+        let vol = 0.2_f64;
+        let flat = |t: f64| SviSlice {
+            t,
+            forward: 100.0,
+            params: SviParams {
+                a: vol * vol * t,
+                b: 0.0,
+                rho: 0.0,
+                m: 0.0,
+                sigma: 0.1,
+            },
+            rmse: 0.0,
+            converged: true,
+            k_range: (-0.5, 0.5),
+            min_g: 0.0,
+        };
+        let reference = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let fit = SviSurfaceFit {
+            reference_date: reference,
+            day_count: DayCountConvention::Act365,
+            slices: vec![flat(0.5), flat(1.0)],
+            skipped_slices: 0,
+            max_calendar_crossing: 0.0,
+        };
+        // w keeps accruing at the last segment's forward variance...
+        assert!((fit.total_variance(0.0, 2.0) - vol * vol * 2.0).abs() < 1e-14);
+        // ...so implied vol holds its level instead of decaying like 1/sqrt(t)
+        for t in [1.0, 2.0, 5.0, 30.0] {
+            assert!((fit.vol(100.0, t) - vol).abs() < 1e-9, "t = {t}");
+        }
+        // the Dupire derivatives path sees the same extension
+        let d = fit.variance_derivatives(0.0, 4.0);
+        assert!((d.w - fit.total_variance(0.0, 4.0)).abs() < 1e-14);
+        assert!((d.dt - vol * vol).abs() < 1e-14);
+
+        // a single-slice fit extends at flat implied vol
+        let single = SviSurfaceFit {
+            reference_date: reference,
+            day_count: DayCountConvention::Act365,
+            slices: vec![flat(0.5)],
+            skipped_slices: 0,
+            max_calendar_crossing: 0.0,
+        };
+        assert!((single.vol(100.0, 3.0) - vol).abs() < 1e-9);
+
+        // a decreasing last segment (fit tension) is floored: variance
+        // is held beyond the pillar rather than bled away
+        let tense = SviSurfaceFit {
+            reference_date: reference,
+            day_count: DayCountConvention::Act365,
+            slices: vec![flat(0.5), {
+                let mut s = flat(1.0);
+                s.params.a = 0.9 * vol * vol * 0.5; // below the first pillar's w
+                s
+            }],
+            skipped_slices: 0,
+            max_calendar_crossing: 0.0,
+        };
+        let held = tense.total_variance(0.0, 1.0);
+        assert!((tense.total_variance(0.0, 5.0) - held).abs() < 1e-14);
     }
 
     #[test]

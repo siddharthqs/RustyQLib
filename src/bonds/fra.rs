@@ -9,7 +9,7 @@
 use chrono::NaiveDate;
 
 use crate::bonds::{df_to_start, CurveInstrument};
-use crate::core::curves::{Compounding, YieldCurve};
+use crate::core::curves::YieldCurve;
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
 
@@ -70,12 +70,25 @@ impl Fra {
     }
 
     /// The simple forward rate over the FRA period read off `curve` —
-    /// the fair fixed rate for this FRA on that curve.
+    /// the fair fixed rate for this FRA on that curve, quoted on the
+    /// FRA's **own** day count so it exactly inverts
+    /// [`implied_df`](CurveInstrument::implied_df) whatever day count
+    /// the curve itself carries.
     pub fn forward_rate(&self, curve: &YieldCurve) -> Result<f64, RustyQLibError> {
-        let dc = curve.day_count();
-        let t1 = dc.year_fraction(curve.reference_date(), self.start_date);
-        let t2 = dc.year_fraction(curve.reference_date(), self.maturity_date);
-        Ok(curve.forward_rate_with(t1, t2, Compounding::Simple)?)
+        if self.start_date < curve.reference_date() {
+            return Err(RustyQLibError::invalid_input(
+                "fra",
+                format!(
+                    "the FRA period started {} , before the curve reference {}: the fixing \
+                     is historical and cannot be read off the curve",
+                    self.start_date,
+                    curve.reference_date()
+                ),
+            ));
+        }
+        let df_start = curve.df_date(self.start_date);
+        let df_end = curve.df_date(self.maturity_date);
+        Ok((df_start / df_end - 1.0) / self.accrual())
     }
 }
 
@@ -97,7 +110,7 @@ impl CurveInstrument for Fra {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::curves::{InterpolationMethod, Tenor};
+    use crate::core::curves::{Compounding, InterpolationMethod, Tenor};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -140,7 +153,10 @@ mod tests {
         let reference = d(2026, 1, 15);
         let start = d(2026, 4, 15);
         let end = d(2026, 7, 15);
-        let fra = Fra::new(start, end, 1e6, 0.06, DayCountConvention::Act365).unwrap();
+        // Act/360 FRA on an Act/365 curve: the fair rate must come back
+        // on the FRA's own day count, not the curve's (which would read
+        // ~6% * 365/360 = 6.083% here)
+        let fra = Fra::new(start, end, 1e6, 0.06, DayCountConvention::Act360).unwrap();
         // build a two-pillar curve consistent with df(start)=0.99 and the
         // FRA's own implied maturity df, then read the forward back
         let curve_short = YieldCurve::from_discount_factors(
@@ -164,6 +180,31 @@ mod tests {
         .unwrap();
         let fwd = fra.forward_rate(&curve).unwrap();
         assert!((fwd - 0.06).abs() < 1e-10, "fwd={fwd}");
+    }
+
+    #[test]
+    fn seasoned_fra_cannot_read_its_fixing_off_the_curve() {
+        // the period started before the curve reference: the fixing is
+        // historical, and the df clamp at the reference would silently
+        // deflate the "forward" instead
+        let fra = Fra::new(
+            d(2026, 4, 15),
+            d(2026, 7, 15),
+            1e6,
+            0.06,
+            DayCountConvention::Act360,
+        )
+        .unwrap();
+        let curve = YieldCurve::flat(
+            0.05,
+            d(2026, 5, 20),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+        )
+        .unwrap();
+        let err = fra.forward_rate(&curve);
+        assert!(err.is_err());
+        assert!(format!("{}", err.unwrap_err()).contains("before the curve reference"));
     }
 
     #[test]

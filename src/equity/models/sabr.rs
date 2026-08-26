@@ -601,13 +601,19 @@ impl SabrSurfaceFit {
     /// Total variance at log-moneyness `k`: each slice contributes its
     /// own smile at its own forward, linear in time between slices at
     /// fixed `k` with the later slice floored at the earlier (calendar
-    /// safety); proportional to `t` below the first slice.
+    /// safety); proportional to `t` below the first slice; beyond the
+    /// last slice the smile shape is held and variance keeps accruing at
+    /// the last segment's forward rate, so implied vol tends to a level
+    /// instead of decaying like `1/sqrt(t)`.
     pub fn total_variance(&self, k: f64, t: f64) -> f64 {
         let (a, b, weight) = self.bracket(t);
         let wa = slice_variance(a, k);
         let wb = slice_variance(b, k).max(wa);
         let w = if t <= a.t {
             wa * (t / a.t).min(1.0)
+        } else if a.t == b.t {
+            // beyond the last pillar (the bracket clamps to it)
+            wb + self.last_segment_dwdt(k) * (t - b.t)
         } else {
             wa + (wb - wa) * weight
         };
@@ -647,9 +653,10 @@ impl SabrSurfaceFit {
         <Self as SmoothedSurface>::local_vol_grid(self, levels, times)
     }
 
-    /// Forward variance of the last inter-slice segment at `k`, used to
-    /// extrapolate beyond the final pillar (a single-slice fit accrues
-    /// its variance from zero instead).
+    /// Forward variance of the last inter-slice segment at `k` (floored
+    /// at zero for calendar safety), used to extrapolate beyond the
+    /// final pillar (a single-slice fit accrues its variance from zero
+    /// instead, extending the slice at flat implied vol).
     fn last_segment_dwdt(&self, k: f64) -> f64 {
         let n = self.slices.len();
         if n == 1 {
@@ -657,7 +664,7 @@ impl SabrSurfaceFit {
             return slice_variance(s, k) / s.t;
         }
         let (prev, last) = (&self.slices[n - 2], &self.slices[n - 1]);
-        (slice_variance(last, k) - slice_variance(prev, k)) / (last.t - prev.t)
+        ((slice_variance(last, k) - slice_variance(prev, k)) / (last.t - prev.t)).max(0.0)
     }
 
     /// Sample the fit into the canonical pricing [`VolSurface`]: per
@@ -766,6 +773,44 @@ mod tests {
             rho: -0.4,
             nu: 0.6,
         }
+    }
+
+    #[test]
+    fn variance_keeps_accruing_beyond_the_last_pillar() {
+        let slice = |t: f64| SabrSlice {
+            t,
+            forward: 100.0,
+            params: params(),
+            rmse: 0.0,
+            converged: true,
+            k_range: (-0.5, 0.5),
+            min_g: 0.0,
+        };
+        let fit = SabrSurfaceFit {
+            reference_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            day_count: DayCountConvention::Act365,
+            beta: 1.0,
+            slices: vec![slice(0.5), slice(1.0)],
+            skipped_slices: 0,
+            max_calendar_crossing: 0.0,
+        };
+        for k in [-0.3, 0.0, 0.25] {
+            let (w_half, w_last) = (
+                slice_variance(&fit.slices[0], k),
+                slice_variance(&fit.slices[1], k),
+            );
+            let want = w_last + ((w_last - w_half) / 0.5).max(0.0) * 1.5;
+            assert!((fit.total_variance(k, 2.5) - want).abs() < 1e-12, "k = {k}");
+            // the Dupire derivatives path sees the same extension
+            let d = fit.variance_derivatives(k, 2.5);
+            assert!((d.w - want).abs() < 1e-12, "k = {k}");
+        }
+        // implied vol holds its level instead of decaying like 1/sqrt(t)
+        let (v1, v4) = (fit.vol(100.0, 1.0), fit.vol(100.0, 4.0));
+        assert!(
+            (v4 - v1).abs() < 0.01,
+            "vol decayed beyond the last pillar: {v1} -> {v4}"
+        );
     }
 
     #[test]

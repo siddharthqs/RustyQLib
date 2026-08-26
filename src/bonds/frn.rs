@@ -130,6 +130,19 @@ impl FloatingRateNote {
     /// Simple forward of the index over one accrual period, on the
     /// note's day count.
     fn forward(&self, curve: &YieldCurve, period: &AccrualPeriod) -> Result<f64, RustyQLibError> {
+        // the curve clamps df to 1 before its reference, which would
+        // silently spread the remaining discounting over the full
+        // accrual and understate the rate by ~remaining/full
+        if period.start < curve.reference_date() {
+            return Err(RustyQLibError::invalid_input(
+                "frn",
+                format!(
+                    "cannot project the period starting {} from a curve referenced {}",
+                    period.start,
+                    curve.reference_date()
+                ),
+            ));
+        }
         let tau = self.day_count.year_fraction(period.start, period.end);
         if tau <= 0.0 {
             return Err(RustyQLibError::NumericalError(format!(
@@ -149,7 +162,10 @@ impl FloatingRateNote {
     }
 
     /// The current-period index+margin rate: the supplied fixing, or
-    /// the period's projected forward plus the quoted margin.
+    /// the period's projected forward plus the quoted margin. A period
+    /// that began before the curve's reference date fixed in the past,
+    /// so its rate cannot be read off the curve — `current_coupon` is
+    /// required then.
     fn current_rate(
         &self,
         curve: &YieldCurve,
@@ -157,6 +173,18 @@ impl FloatingRateNote {
     ) -> Result<f64, RustyQLibError> {
         match self.current_coupon {
             Some(rate) => Ok(rate),
+            None if period.start < curve.reference_date() => {
+                Err(RustyQLibError::invalid_input(
+                    "frn",
+                    format!(
+                        "the current period fixed on {} , before the curve reference {}: \
+                         supply current_coupon — a historical fixing cannot be read off \
+                         the curve",
+                        period.start,
+                        curve.reference_date()
+                    ),
+                ))
+            }
             None => Ok(self.forward(curve, period)? + self.quoted_margin),
         }
     }
@@ -362,6 +390,35 @@ mod tests {
         let accrued = fixed.accrued_interest(&curve, settlement).unwrap();
         let expected = 100.0 * 0.07 * (35.0 / 360.0); // Aug 6 -> Sep 10
         assert!((accrued - expected).abs() < 1e-12, "accrued {accrued}");
+    }
+
+    #[test]
+    fn seasoned_projection_requires_the_current_fixing() {
+        // curve referenced mid-period: the current coupon fixed in the
+        // past and cannot be read off the curve — the old df clamp
+        // would have silently projected ~rate * remaining/full instead
+        let frn = two_year_frn(0.0075);
+        let settlement = d(2026, 9, 10);
+        let curve = flat(0.04, settlement); // reference after the Aug 6 period start
+        let err = frn.dirty_price_from_discount_margin(&curve, 0.0075, settlement);
+        assert!(err.is_err());
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("current_coupon"), "{msg}");
+        assert!(frn.accrued_interest(&curve, settlement).is_err());
+
+        // with the fixing supplied, the seasoned note prices and the
+        // discount-margin round trip still holds
+        let mut fixed = frn.clone();
+        fixed.current_coupon = Some(0.04 + 0.0075);
+        for dm in [0.0, 0.0075, 0.02] {
+            let clean = fixed
+                .clean_price_from_discount_margin(&curve, dm, settlement)
+                .unwrap();
+            let recovered = fixed
+                .discount_margin_from_price(clean, &curve, settlement)
+                .unwrap();
+            assert!((recovered - dm).abs() < 1e-10, "dm {dm}: {recovered}");
+        }
     }
 
     #[test]
