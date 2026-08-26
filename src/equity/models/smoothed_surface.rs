@@ -79,8 +79,7 @@ pub struct VarianceDerivatives {
 /// local-vol guard fired there" the *same* statement rather than two
 /// independently drifting ones.
 pub fn butterfly_g(d: &VarianceDerivatives, k: f64) -> f64 {
-    (1.0 - k * d.dk / (2.0 * d.w)).powi(2) - (d.dk * d.dk / 4.0) * (1.0 / d.w + 0.25)
-        + d.dkk / 2.0
+    (1.0 - k * d.dk / (2.0 * d.w)).powi(2) - (d.dk * d.dk / 4.0) * (1.0 / d.w + 0.25) + d.dkk / 2.0
 }
 
 /// Dupire local volatility from total-variance derivatives:

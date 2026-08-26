@@ -128,8 +128,8 @@ impl EquityOption {
                 return Err(RustyQLibError::invalid_input(
                     "exercise_style",
                     format!(
-                        "unknown exercise_style '{other}' (use 'European', 'American' or 'Bermudan')"
-                    ),
+                    "unknown exercise_style '{other}' (use 'European', 'American' or 'Bermudan')"
+                ),
                 ))
             }
         };

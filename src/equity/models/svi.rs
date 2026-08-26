@@ -21,9 +21,12 @@
 //! w(k, t) = theta_t/2 [ 1 + rho phi k + sqrt((phi k + rho)^2 + 1 - rho^2) ]
 //! ```
 //!
-//! Both calibrate by Levenberg-Marquardt
-//! ([`core::optimization`](crate::core::optimization)) in transformed
-//! parameter spaces, the same pattern as
+//! SVI smiles calibrate through the pluggable [`SviCalibration`]
+//! methods — Zeliade's quasi-explicit reduction by default, plain or
+//! polishing Levenberg-Marquardt on request — while SSVI calibrates by
+//! Levenberg-Marquardt
+//! ([`core::optimization`](crate::core::optimization)) in a transformed
+//! parameter space, the same pattern as
 //! [`heston::calibrate`](crate::equity::heston::calibrate). Butterfly
 //! arbitrage is checked through the Gatheral-Jacquier `g(k)` density
 //! condition (SVI) and the power-law sufficient conditions (SSVI), and
@@ -36,7 +39,8 @@ use chrono::NaiveDate;
 use crate::core::curves::Tenor;
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
-use crate::core::optimization::{levenberg_marquardt, OptimConfig};
+use crate::core::optimization::numerics::solve_dense;
+use crate::core::optimization::{levenberg_marquardt, nelder_mead, OptimConfig};
 use crate::core::vols::{VolError, VolSurface};
 use crate::equity::smoothed_surface::{
     interpolate_slices, SmoothedSurface, VarianceDerivatives, MIN_TIME,
@@ -56,6 +60,36 @@ pub struct SviParams {
 
 /// Result of an SVI smile calibration (`rmse` in implied vol).
 pub type SviFit = crate::equity::models::calibration::Fit<SviParams>;
+
+/// The calibration algorithm [`SviParams::calibrate_with`] runs.
+///
+/// - [`QuasiExplicit`](Self::QuasiExplicit) (the default): Zeliade's
+///   quasi-explicit calibration (De Marco & Martini 2009). For fixed
+///   `(m, sigma)` the smile is *linear* in `(a, d, c) = (a, rho b
+///   sigma, b sigma)`, so those three solve exactly as a tiny
+///   constrained least squares and only `(m, sigma)` need a numerical
+///   search — a 2-D landscape mild enough for a grid seed plus
+///   Nelder-Mead. Deterministic and start-point free, and the
+///   constraint box (`a >= 0`, `|d| <= c`, `c + |d| <= 4 sigma / t`)
+///   enforces non-negative variance and Lee's wing bound by
+///   construction — which matters when fits are repeated under bumped
+///   surfaces for Greeks, where basin-hopping between fits shows up as
+///   noise.
+/// - [`QuasiExplicitThenLm`](Self::QuasiExplicitThenLm): the
+///   quasi-explicit stage finds the basin, then Levenberg-Marquardt
+///   polishes all five parameters for the last fraction of residual.
+///   The polish is unconstrained (transformed parameters stay
+///   admissible, but the fit may leave the arbitrage box above).
+/// - [`LevenbergMarquardt`](Self::LevenbergMarquardt): single-start
+///   Levenberg-Marquardt from a heuristic guess — the fastest, but
+///   exposed to local minima on strongly skewed or sparse smiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SviCalibration {
+    #[default]
+    QuasiExplicit,
+    QuasiExplicitThenLm,
+    LevenbergMarquardt,
+}
 
 impl SviParams {
     /// Total variance `w(k)` at log-moneyness `k = ln(K/F)`.
@@ -131,39 +165,123 @@ impl SviParams {
         self.min_butterfly_g() < 0.0
     }
 
-    /// Calibrate to one expiry's quotes `(k, implied vol)` by
-    /// Levenberg-Marquardt on total-variance residuals, with `b` and
-    /// `sigma` in log space and `rho` through `tanh` so every trial is
-    /// admissible.
+    /// Calibrate to one expiry's quotes `(k, implied vol)` with the
+    /// default method ([`SviCalibration::QuasiExplicit`]).
     pub fn calibrate(quotes: &[(f64, f64)], t: f64) -> SviFit {
+        Self::calibrate_with(quotes, t, SviCalibration::default())
+    }
+
+    /// Calibrate to one expiry's quotes `(k, implied vol)` on
+    /// total-variance residuals with the chosen [`SviCalibration`]
+    /// (`rmse` reported in implied vol).
+    pub fn calibrate_with(quotes: &[(f64, f64)], t: f64, method: SviCalibration) -> SviFit {
+        Self::calibrate_weighted(quotes, t, method, &vec![1.0; quotes.len()])
+    }
+
+    /// [`calibrate_with`](Self::calibrate_with) with per-quote weights
+    /// on the total-variance residuals: the objective becomes
+    /// `sum_i weights[i] (w_fit(k_i) - w_i)^2` and `rmse` the
+    /// weight-averaged implied-vol error, so uniform weights reproduce
+    /// `calibrate_with` exactly and a zero weight excludes its quote.
+    /// To weight *implied-vol* errors by `u_i` instead (vega or
+    /// spread weighting), pass `weights[i] = u_i / (2 v_i t)^2` — the
+    /// delta-method conversion between the two residual spaces.
+    /// Weights must be finite and non-negative with a positive sum.
+    pub fn calibrate_weighted(
+        quotes: &[(f64, f64)],
+        t: f64,
+        method: SviCalibration,
+        weights: &[f64],
+    ) -> SviFit {
         assert!(
             quotes.len() >= 5,
             "SVI has five parameters; need at least five quotes"
         );
         assert!(t > 0.0);
+        assert_eq!(
+            weights.len(),
+            quotes.len(),
+            "one weight per quote (got {} weights for {} quotes)",
+            weights.len(),
+            quotes.len()
+        );
+        assert!(
+            weights.iter().all(|w| w.is_finite() && *w >= 0.0),
+            "weights must be finite and non-negative"
+        );
+        assert!(
+            weights.iter().filter(|w| **w > 0.0).count() >= 5,
+            "a zero weight excludes its quote: need at least five with positive weight"
+        );
+        let weight_sum: f64 = weights.iter().sum();
         let w_target: Vec<(f64, f64)> = quotes.iter().map(|&(k, v)| (k, v * v * t)).collect();
-        let (w_min, w_max) = w_target
+        let (params, iterations, converged) = match method {
+            SviCalibration::QuasiExplicit => Self::fit_qe(&w_target, weights, t),
+            SviCalibration::QuasiExplicitThenLm => {
+                let (start, _, _) = Self::fit_qe(&w_target, weights, t);
+                Self::fit_lm(&w_target, weights, Some(start))
+            }
+            SviCalibration::LevenbergMarquardt => Self::fit_lm(&w_target, weights, None),
+        };
+        let rmse = (quotes
             .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(_, w)| {
-                (lo.min(w), hi.max(w))
-            });
-        let k_at_min = w_target
-            .iter()
-            .fold(
-                (0.0, f64::INFINITY),
-                |acc, &(k, w)| if w < acc.1 { (k, w) } else { acc },
-            )
-            .0;
-        let k_span = quotes.iter().map(|q| q.0).fold(f64::NEG_INFINITY, f64::max)
-            - quotes.iter().map(|q| q.0).fold(f64::INFINITY, f64::min);
-        // start: level at the observed floor, gentle wings, no skew
-        let x0 = vec![
-            0.5 * w_min,                                          // a
-            (((w_max - w_min) / k_span.max(0.1)).max(1e-3)).ln(), // ln b
-            0.0,                                                  // atanh rho
-            k_at_min,                                             // m
-            0.2_f64.ln(),                                         // ln sigma
-        ];
+            .zip(weights)
+            .map(|(&(k, v), &wt)| wt * (params.vol(k, t) - v).powi(2))
+            .sum::<f64>()
+            / weight_sum)
+            .sqrt();
+        SviFit {
+            params,
+            rmse,
+            iterations,
+            converged,
+        }
+    }
+
+    /// Levenberg-Marquardt on the total-variance targets (residuals
+    /// scaled by the root of each quote's weight), with `b` and `sigma`
+    /// in log space and `rho` through `tanh` so every trial is
+    /// admissible; `start` seeds the search (heuristic guess when
+    /// absent).
+    fn fit_lm(
+        w_target: &[(f64, f64)],
+        weights: &[f64],
+        start: Option<SviParams>,
+    ) -> (SviParams, usize, bool) {
+        let scale: Vec<f64> = weights.iter().map(|w| w.sqrt()).collect();
+        let x0 = match start {
+            Some(p) => vec![
+                p.a,
+                p.b.max(1e-8).ln(),
+                p.rho.clamp(-1.0 + 1e-9, 1.0 - 1e-9).atanh(),
+                p.m,
+                p.sigma.ln(),
+            ],
+            None => {
+                let (w_min, w_max) = w_target
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(_, w)| {
+                        (lo.min(w), hi.max(w))
+                    });
+                let k_at_min = w_target
+                    .iter()
+                    .fold(
+                        (0.0, f64::INFINITY),
+                        |acc, &(k, w)| if w < acc.1 { (k, w) } else { acc },
+                    )
+                    .0;
+                let k_span = w_target.iter().map(|q| q.0).fold(f64::NEG_INFINITY, f64::max)
+                    - w_target.iter().map(|q| q.0).fold(f64::INFINITY, f64::min);
+                // start: level at the observed floor, gentle wings, no skew
+                vec![
+                    0.5 * w_min,                                          // a
+                    (((w_max - w_min) / k_span.max(0.1)).max(1e-3)).ln(), // ln b
+                    0.0,                                                  // atanh rho
+                    k_at_min,                                             // m
+                    0.2_f64.ln(),                                         // ln sigma
+                ]
+            }
+        };
         let unpack = |u: &[f64]| SviParams {
             a: u[0],
             b: u[1].exp(),
@@ -175,24 +293,201 @@ impl SviParams {
             let p = unpack(u);
             w_target
                 .iter()
-                .map(|&(k, w)| p.total_variance(k) - w)
+                .zip(&scale)
+                .map(|(&(k, w), &s)| s * (p.total_variance(k) - w))
                 .collect()
         };
         let fit = levenberg_marquardt(&OptimConfig::new(1e-14, 200), &residuals, None, &x0);
-        let params = unpack(&fit.x);
-        let rmse = (quotes
+        (unpack(&fit.x), fit.iterations, fit.converged)
+    }
+
+    /// Zeliade's quasi-explicit fit on the total-variance targets: a
+    /// deterministic grid seed then Nelder-Mead over `(m, ln sigma)`,
+    /// with `(a, d, c)` solved exactly per trial by [`qe_inner`].
+    fn fit_qe(w_target: &[(f64, f64)], weights: &[f64], t: f64) -> (SviParams, usize, bool) {
+        let (k_min, k_max) = w_target
             .iter()
-            .map(|&(k, v)| (params.vol(k, t) - v).powi(2))
-            .sum::<f64>()
-            / quotes.len() as f64)
-            .sqrt();
-        SviFit {
-            params,
-            rmse,
-            iterations: fit.iterations,
-            converged: fit.converged,
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(k, _)| {
+                (lo.min(k), hi.max(k))
+            });
+        let span = (k_max - k_min).max(0.1);
+        let objective = |m: f64, sigma: f64| {
+            qe_inner(w_target, weights, m, sigma, 4.0 * sigma / t)
+                .map(|(_, sse)| sse)
+                .unwrap_or(f64::INFINITY)
+        };
+        // seed: m across the quoted span (widened by half a span each
+        // side), sigma log-spaced over the plausible curvature range
+        let mut cells: Vec<(f64, f64, f64)> = Vec::new(); // (sse, m, sigma)
+        for i in 0..=14 {
+            let m = k_min - 0.5 * span + 2.0 * span * i as f64 / 14.0;
+            for j in 0..=9 {
+                let sigma = 0.01 * 200f64.powf(j as f64 / 9.0); // 0.01 .. 2
+                cells.push((objective(m, sigma), m, sigma));
+            }
+        }
+        cells.sort_by(|x, y| x.0.total_cmp(&y.0));
+        // refine from the best grid cells in normalized coordinates:
+        // u = (1, 1) at the seed keeps Nelder-Mead's proportional first
+        // step spanning a real fraction of the cell whatever the seed's
+        // magnitude (an m of 0.0 would otherwise get a ~1e-4 simplex
+        // that cannot travel), and the restart re-inflates a collapsed
+        // simplex
+        let cfg = OptimConfig::new(1e-13, 400);
+        let mut iterations = 0;
+        let mut best: Option<(f64, f64, f64, bool)> = None; // (sse, m, sigma, converged)
+        for &(seed_sse, m0, s0) in cells.iter().take(3) {
+            if !seed_sse.is_finite() {
+                continue;
+            }
+            let obj = |u: &[f64]| {
+                let m = m0 + span * (u[0] - 1.0);
+                let sigma = (s0 * (u[1] - 1.0).exp()).clamp(1e-4, 10.0);
+                objective(m, sigma)
+            };
+            let first = nelder_mead(&cfg, &obj, &[1.0, 1.0]);
+            let nm = nelder_mead(&cfg, &obj, &first.x);
+            iterations += first.iterations + nm.iterations;
+            let m = m0 + span * (nm.x[0] - 1.0);
+            let sigma = (s0 * (nm.x[1] - 1.0).exp()).clamp(1e-4, 10.0);
+            if best.is_none_or(|(sse, ..)| nm.value < sse) {
+                best = Some((nm.value, m, sigma, nm.converged));
+            }
+        }
+        let (_, m, sigma, converged) = best.unwrap_or((cells[0].0, cells[0].1, cells[0].2, false));
+        let ([a, d, c], m, sigma) = qe_inner(w_target, weights, m, sigma, 4.0 * sigma / t)
+            .map(|(x, _)| (x, m, sigma))
+            .or_else(|| {
+                let (_, m0, s0) = cells[0];
+                qe_inner(w_target, weights, m0, s0, 4.0 * s0 / t).map(|(x, _)| (x, m0, s0))
+            })
+            .expect("quasi-explicit inner solve failed on the seed grid");
+        let (b, rho) = if c <= 1e-12 {
+            (0.0, 0.0) // flat slice: the skew direction is undetermined
+        } else {
+            (c / sigma, (d / c).clamp(-1.0 + 1e-6, 1.0 - 1e-6))
+        };
+        (
+            SviParams {
+                a: a.max(0.0),
+                b,
+                rho,
+                m,
+                sigma,
+            },
+            iterations,
+            converged,
+        )
+    }
+}
+
+/// The quasi-explicit inner solve (De Marco & Martini 2009): for fixed
+/// `(m, sigma)` total variance is linear in `x = (a, d, c)` with
+/// `d = rho b sigma`, `c = b sigma`, so the best fit is a tiny convex
+/// least squares (per-quote weights on the squared residuals) over the
+/// no-arbitrage box `a in [0, max w]`, `c >= 0`, `|d| <= c` and
+/// `c + |d| <= slope_cap` (Lee's wing bound, `slope_cap = 4 sigma / t`
+/// on total variance). Solved exactly by active-set enumeration: the
+/// unconstrained normal equations first, otherwise every KKT system
+/// over the seven constraint faces, keeping the feasible candidate with
+/// the smallest sum of squares. Returns `(x, sse)` against the
+/// total-variance targets.
+fn qe_inner(
+    w_target: &[(f64, f64)],
+    weights: &[f64],
+    m: f64,
+    sigma: f64,
+    slope_cap: f64,
+) -> Option<([f64; 3], f64)> {
+    let rows: Vec<[f64; 3]> = w_target
+        .iter()
+        .map(|&(k, _)| {
+            let y = (k - m) / sigma;
+            [1.0, y, (y * y + 1.0).sqrt()]
+        })
+        .collect();
+    // the level box only spans quotes the fit actually sees
+    let w_max = w_target
+        .iter()
+        .zip(weights)
+        .filter(|(_, &wt)| wt > 0.0)
+        .fold(0.0f64, |acc, (&(_, w), _)| acc.max(w));
+    // weighted normal matrix q = G^T W G and right-hand side g = G^T W w
+    let mut q = [[0.0; 3]; 3];
+    let mut g = [0.0; 3];
+    for ((row, &(_, w)), &wt) in rows.iter().zip(w_target).zip(weights) {
+        for i in 0..3 {
+            g[i] += wt * row[i] * w;
+            for j in 0..3 {
+                q[i][j] += wt * row[i] * row[j];
+            }
         }
     }
+    // faces n.x <= h of the constraint box on x = (a, d, c)
+    let faces: [([f64; 3], f64); 7] = [
+        ([-1.0, 0.0, 0.0], 0.0),       // a >= 0
+        ([1.0, 0.0, 0.0], w_max),      // a <= max w
+        ([0.0, 0.0, -1.0], 0.0),       // c >= 0   (b >= 0)
+        ([0.0, 1.0, -1.0], 0.0),       // d <= c   (rho <= 1)
+        ([0.0, -1.0, -1.0], 0.0),      // -d <= c  (rho >= -1)
+        ([0.0, 1.0, 1.0], slope_cap),  // c + d <= cap (Lee, call wing)
+        ([0.0, -1.0, 1.0], slope_cap), // c - d <= cap (Lee, put wing)
+    ];
+    let feasible = |x: &[f64; 3]| {
+        faces
+            .iter()
+            .all(|&(n, h)| n[0] * x[0] + n[1] * x[1] + n[2] * x[2] <= h + 1e-9 * (1.0 + h.abs()))
+    };
+    let sse = |x: &[f64; 3]| -> f64 {
+        rows.iter()
+            .zip(w_target)
+            .zip(weights)
+            .map(|((row, &(_, w)), &wt)| {
+                let e = row[0] * x[0] + row[1] * x[1] + row[2] * x[2] - w;
+                wt * e * e
+            })
+            .sum()
+    };
+    let mut best: Option<([f64; 3], f64)> = None;
+    for mask in 0u32..(1 << faces.len()) {
+        if mask.count_ones() > 3 {
+            continue; // three unknowns: more active faces is redundant
+        }
+        let active: Vec<usize> = (0..faces.len()).filter(|i| mask >> i & 1 == 1).collect();
+        // stationarity on the active faces: [2q N^T; N 0](x, lambda) = (2g, h)
+        let n = 3 + active.len();
+        let mut lhs = vec![vec![0.0; n]; n];
+        let mut rhs = vec![0.0; n];
+        for i in 0..3 {
+            rhs[i] = 2.0 * g[i];
+            for j in 0..3 {
+                lhs[i][j] = 2.0 * q[i][j];
+            }
+        }
+        for (r, &face) in active.iter().enumerate() {
+            let (normal, h) = faces[face];
+            for j in 0..3 {
+                lhs[3 + r][j] = normal[j];
+                lhs[j][3 + r] = normal[j];
+            }
+            rhs[3 + r] = h;
+        }
+        let Some(sol) = solve_dense(&mut lhs, &mut rhs) else {
+            continue;
+        };
+        let x = [sol[0], sol[1], sol[2]];
+        if !(x.iter().all(|v| v.is_finite()) && feasible(&x)) {
+            continue;
+        }
+        let value = sse(&x);
+        if mask == 0 {
+            return Some((x, value)); // interior optimum: global by convexity
+        }
+        if best.is_none_or(|(_, b)| value < b) {
+            best = Some((x, value));
+        }
+    }
+    best
 }
 
 // ── Per-expiry SVI surface fit ──────────────────────────────────────────
@@ -242,17 +537,26 @@ pub struct SviSurfaceFit {
     pub max_calendar_crossing: f64,
 }
 
-
 impl SviSurfaceFit {
     /// Fit one SVI smile per pillar expiry of `surface` (its per-expiry
     /// point smiles, on any coordinate). `forward` maps expiry time to
     /// the underlying's forward, exactly as for
     /// [`VolSurface::diagnostics`](crate::core::vols::VolSurface::diagnostics).
     /// Expiries with fewer than five pillars (SVI has five parameters)
-    /// are skipped and counted.
+    /// are skipped and counted. Slices calibrate with the default
+    /// [`SviCalibration`]; [`fit_with`](Self::fit_with) picks another.
     pub fn fit(
         surface: &VolSurface,
         forward: impl Fn(f64) -> f64,
+    ) -> Result<SviSurfaceFit, RustyQLibError> {
+        Self::fit_with(surface, forward, SviCalibration::default())
+    }
+
+    /// [`fit`](Self::fit) with an explicit per-slice [`SviCalibration`].
+    pub fn fit_with(
+        surface: &VolSurface,
+        forward: impl Fn(f64) -> f64,
+        method: SviCalibration,
     ) -> Result<SviSurfaceFit, RustyQLibError> {
         use crate::core::vols::{SmileCoordinate, VolInput};
         let VolInput::StrikeSmiles {
@@ -290,7 +594,7 @@ impl SviSurfaceFit {
                     (k, vol)
                 })
                 .collect();
-            let fit = SviParams::calibrate(&quotes, t);
+            let fit = SviParams::calibrate_with(&quotes, t, method);
             let (k_lo, k_hi) = quotes
                 .iter()
                 .fold((f64::MAX, f64::MIN), |(lo, hi), &(k, _)| {
@@ -1078,29 +1382,153 @@ mod tests {
     }
 
     #[test]
-    fn svi_calibration_round_trips() {
+    fn svi_calibration_round_trips_with_every_method() {
         let truth = sane();
         let t = 0.75;
         let quotes: Vec<(f64, f64)> = (0..15)
             .map(|i| -0.42 + i as f64 * 0.06)
             .map(|k| (k, truth.vol(k, t)))
             .collect();
-        let fit = SviParams::calibrate(&quotes, t);
-        assert!(
-            fit.rmse < 1e-6,
-            "vol rmse {} params {:?}",
-            fit.rmse,
-            fit.params
-        );
-        assert!(fit.params.validate().is_ok());
-        // the fitted smile matches off the quote grid too
-        for i in 0..=20 {
-            let k = -0.5 + i as f64 * 0.05;
+        for method in [
+            SviCalibration::QuasiExplicit,
+            SviCalibration::QuasiExplicitThenLm,
+            SviCalibration::LevenbergMarquardt,
+        ] {
+            let fit = SviParams::calibrate_with(&quotes, t, method);
             assert!(
-                (fit.params.vol(k, t) - truth.vol(k, t)).abs() < 1e-4,
-                "k = {k}"
+                fit.rmse < 1e-6,
+                "{method:?}: vol rmse {} params {:?}",
+                fit.rmse,
+                fit.params
+            );
+            assert!(fit.params.validate().is_ok(), "{method:?}");
+            // the fitted smile matches off the quote grid too
+            for i in 0..=20 {
+                let k = -0.5 + i as f64 * 0.05;
+                assert!(
+                    (fit.params.vol(k, t) - truth.vol(k, t)).abs() < 1e-4,
+                    "{method:?}: k = {k}"
+                );
+            }
+        }
+        // the default is the quasi-explicit method
+        let default = SviParams::calibrate(&quotes, t);
+        let qe = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit);
+        assert_eq!(default.params, qe.params);
+    }
+
+    #[test]
+    fn quasi_explicit_fit_stays_in_the_arbitrage_box() {
+        // noisy skewed quotes the smile cannot match exactly: the
+        // quasi-explicit constraints must still hold on the fit
+        let truth = SviParams {
+            a: 0.02,
+            b: 0.4,
+            rho: -0.7,
+            m: 0.05,
+            sigma: 0.15,
+        };
+        let t = 2.0;
+        let quotes: Vec<(f64, f64)> = (0..13)
+            .map(|i| -0.6 + i as f64 * 0.1)
+            .map(|k| (k, truth.vol(k, t) + 0.004 * (17.0 * k).sin()))
+            .collect();
+        let fit = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit);
+        let p = fit.params;
+        assert!(p.validate().is_ok(), "{p:?}");
+        assert!(p.a >= 0.0, "a {}", p.a);
+        // Lee's wing bound b (1 + |rho|) <= 4/t, up to mapping tolerance
+        assert!(
+            p.b * (1.0 + p.rho.abs()) <= 4.0 / t + 1e-6,
+            "b(1+|rho|) = {}",
+            p.b * (1.0 + p.rho.abs())
+        );
+        assert!(fit.rmse < 0.01, "vol rmse {}", fit.rmse);
+    }
+
+    #[test]
+    fn uniform_weights_reproduce_the_unweighted_fit() {
+        let truth = sane();
+        let t = 0.75;
+        let quotes: Vec<(f64, f64)> = (0..15)
+            .map(|i| -0.42 + i as f64 * 0.06)
+            .map(|k| (k, truth.vol(k, t) + 0.003 * (11.0 * k).sin()))
+            .collect();
+        for method in [
+            SviCalibration::QuasiExplicit,
+            SviCalibration::LevenbergMarquardt,
+        ] {
+            let plain = SviParams::calibrate_with(&quotes, t, method);
+            let ones = SviParams::calibrate_weighted(&quotes, t, method, &vec![1.0; quotes.len()]);
+            assert_eq!(plain.params, ones.params, "{method:?}");
+            assert_eq!(plain.rmse, ones.rmse, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn zero_weight_excludes_an_outlier_quote() {
+        let truth = sane();
+        let t = 0.75;
+        let mut quotes: Vec<(f64, f64)> = (0..15)
+            .map(|i| -0.42 + i as f64 * 0.06)
+            .map(|k| (k, truth.vol(k, t)))
+            .collect();
+        quotes[7].1 += 0.05; // a bad print near the money
+        let max_clean_err = |p: &SviParams| {
+            quotes
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| i != 7)
+                .map(|(_, &(k, _))| (p.vol(k, t) - truth.vol(k, t)).abs())
+                .fold(0.0, f64::max)
+        };
+        for method in [
+            SviCalibration::QuasiExplicit,
+            SviCalibration::QuasiExplicitThenLm,
+            SviCalibration::LevenbergMarquardt,
+        ] {
+            let polluted = SviParams::calibrate_with(&quotes, t, method);
+            let mut weights = vec![1.0; quotes.len()];
+            weights[7] = 0.0;
+            let cleaned = SviParams::calibrate_weighted(&quotes, t, method, &weights);
+            // the outlier drags the unweighted fit; zero-weighting it
+            // recovers the generating smile on the clean quotes
+            assert!(
+                max_clean_err(&cleaned.params) < 1e-5,
+                "{method:?}: cleaned err {}",
+                max_clean_err(&cleaned.params)
+            );
+            assert!(
+                max_clean_err(&polluted.params) > 1e-3,
+                "{method:?}: polluted err {}",
+                max_clean_err(&polluted.params)
             );
         }
+    }
+
+    #[test]
+    fn lm_polish_never_worsens_the_quasi_explicit_fit() {
+        let truth = sane();
+        let t = 1.5;
+        let quotes: Vec<(f64, f64)> = (0..11)
+            .map(|i| -0.35 + i as f64 * 0.07)
+            .map(|k| (k, truth.vol(k, t) + 0.002 * (23.0 * k).cos()))
+            .collect();
+        let sse_w = |p: &SviParams| -> f64 {
+            quotes
+                .iter()
+                .map(|&(k, v)| (p.total_variance(k) - v * v * t).powi(2))
+                .sum()
+        };
+        let qe = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit);
+        let polished = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicitThenLm);
+        // LM only accepts cost-decreasing steps from the QE start
+        assert!(
+            sse_w(&polished.params) <= sse_w(&qe.params) * (1.0 + 1e-12),
+            "qe {} polished {}",
+            sse_w(&qe.params),
+            sse_w(&polished.params)
+        );
     }
 
     fn surface_from(slices: &[(f64, SviParams, f64)]) -> VolSurface {
@@ -1161,6 +1589,18 @@ mod tests {
         let meta = fit.metadata();
         assert_eq!(meta["slices"].as_array().unwrap().len(), 2);
         assert!(meta["slices"][0]["rmse_vol_bps"].as_f64().unwrap() < 0.5);
+    }
+
+    #[test]
+    fn surface_fit_calibration_method_is_pluggable() {
+        let surface = surface_from(&[(0.5, sane(), 101.0)]);
+        for method in [
+            SviCalibration::QuasiExplicitThenLm,
+            SviCalibration::LevenbergMarquardt,
+        ] {
+            let fit = SviSurfaceFit::fit_with(&surface, |_| 101.0, method).unwrap();
+            assert!(fit.slices[0].rmse < 1e-5, "{method:?}: {}", fit.slices[0].rmse);
+        }
     }
 
     #[test]
@@ -1315,8 +1755,7 @@ mod tests {
                 );
                 // time derivative by central difference inside the segment
                 let h = 1e-6;
-                let dt_num =
-                    (s.total_variance(k, t + h) - s.total_variance(k, t - h)) / (2.0 * h);
+                let dt_num = (s.total_variance(k, t + h) - s.total_variance(k, t - h)) / (2.0 * h);
                 assert!(
                     (d.dt - dt_num).abs() < 1e-5,
                     "w_t at k={k} t={t}: {} vs {dt_num}",
@@ -1410,7 +1849,10 @@ mod tests {
         // the ATM pillars are read off the surface, not fitted, so they
         // must reproduce the generator's ATM variance
         for (&(t, theta), &(_, want)) in fit.ssvi.theta_pillars.iter().zip(&truth.theta_pillars) {
-            assert!((theta - want).abs() < 1e-6, "theta at t={t}: {theta} vs {want}");
+            assert!(
+                (theta - want).abs() < 1e-6,
+                "theta at t={t}: {theta} vs {want}"
+            );
         }
         // local vol is finite, positive and guard-free across the quoted box
         let mut guarded = 0;

@@ -107,7 +107,8 @@ impl<'a> BumpedMarket<'a> {
             .iter()
             .filter(|(date, _)| *date > self.market.valuation_date && *date <= maturity)
             .map(|(date, amount)| {
-                let t = crate::equity::conventions::year_fraction(self.market.valuation_date, *date);
+                let t =
+                    crate::equity::conventions::year_fraction(self.market.valuation_date, *date);
                 amount * self.market.discount_curve.df(t) * (carry * t).exp()
             })
             .sum()

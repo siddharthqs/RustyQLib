@@ -325,9 +325,9 @@ fn trusted_region(surface: &VolSurface, spot: f64) -> TrustedRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validation::martingale::MartingaleConfig;
     use crate::core::daycount::DayCountConvention;
     use crate::equity::local_vol::LocalVol;
+    use crate::validation::martingale::MartingaleConfig;
     use chrono::NaiveDate;
 
     fn asof() -> NaiveDate {

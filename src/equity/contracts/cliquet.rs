@@ -269,7 +269,13 @@ impl Cliquet {
                     }
                 }
             }
-            let units = style_units(&self.style, total, worst, self.global_floor, self.global_cap);
+            let units = style_units(
+                &self.style,
+                total,
+                worst,
+                self.global_floor,
+                self.global_cap,
+            );
             let payoff = self.notional * (-self.r * self.t).exp() * units;
             sum += payoff;
             sum_sq += payoff * payoff;
@@ -438,7 +444,13 @@ impl CliquetPayoff {
             );
             s_prev = s;
         }
-        let units = style_units(&self.style, total, worst, self.global_floor, self.global_cap);
+        let units = style_units(
+            &self.style,
+            total,
+            worst,
+            self.global_floor,
+            self.global_cap,
+        );
         self.notional * units * dfs.last().copied().unwrap_or(1.0)
     }
 }
@@ -897,7 +909,10 @@ mod tests {
         // a local cap at or below the floor is rejected with the field
         match builder_cliquet().cliquet_local_cap(-0.01).build() {
             Err(RustyQLibError::InvalidInput { field, .. }) => assert_eq!(field, "local_cap"),
-            other => panic!("expected local_cap error, got {:?}", other.map(|_| "an option")),
+            other => panic!(
+                "expected local_cap error, got {:?}",
+                other.map(|_| "an option")
+            ),
         }
         // modifiers without .cliquet(...) report the misuse
         match crate::equity::builder::EquityOptionBuilder::new()
@@ -912,8 +927,10 @@ mod tests {
             Err(RustyQLibError::InvalidInput { field, .. }) => {
                 assert_eq!(field, "cliquet_global_cap")
             }
-            other => panic!("expected setter error, got {:?}", other.map(|_| "an option")),
+            other => panic!(
+                "expected setter error, got {:?}",
+                other.map(|_| "an option")
+            ),
         }
     }
 }
-

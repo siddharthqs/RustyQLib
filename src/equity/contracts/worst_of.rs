@@ -230,9 +230,10 @@ impl WorstOfAutocallable {
                 acc
             })
             .collect();
-        let acc = partials
-            .into_iter()
-            .fold(crate::equity::montecarlo::PathAccum::default(), crate::equity::montecarlo::PathAccum::merge);
+        let acc = partials.into_iter().fold(
+            crate::equity::montecarlo::PathAccum::default(),
+            crate::equity::montecarlo::PathAccum::merge,
+        );
         crate::equity::montecarlo::summarize(
             acc,
             self.mc.paths,

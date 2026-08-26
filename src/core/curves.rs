@@ -512,7 +512,9 @@ impl YieldCurve {
     /// dates. Errors if `new_reference` precedes the current reference
     /// or if no pillar survives the roll.
     pub fn rolled(&self, new_reference: NaiveDate) -> Result<YieldCurve, CurveError> {
-        let tau = self.day_count.year_fraction(self.reference_date, new_reference);
+        let tau = self
+            .day_count
+            .year_fraction(self.reference_date, new_reference);
         if tau < 0.0 {
             return Err(CurveError::NonPositiveTime(tau));
         }
@@ -843,9 +845,7 @@ mod tests {
         }
         // rolling to the same date is the identity; rolling backwards errors
         assert!((curve.rolled(asof()).unwrap().df(1.0) - curve.df(1.0)).abs() < 1e-15);
-        assert!(curve
-            .rolled(asof() - chrono::Duration::days(1))
-            .is_err());
+        assert!(curve.rolled(asof() - chrono::Duration::days(1)).is_err());
     }
 
     #[test]

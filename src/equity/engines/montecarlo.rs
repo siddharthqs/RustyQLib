@@ -41,12 +41,11 @@ use crate::core::montecarlo::{path_normals, pseudo_normals, sobol_normals, PathD
 use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::equity::accumulator::AccumulatorPayoff;
-use crate::equity::cliquet::CliquetPayoff;
-use crate::equity::variance_swap::VarianceSwapPayoff;
 use crate::equity::asian::{self, AsianStrikeType, AveragingType};
 use crate::equity::autocallable::AutocallablePayoff;
 use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::bump::BumpedMarket;
+use crate::equity::cliquet::CliquetPayoff;
 use crate::equity::heston::HestonParams;
 use crate::equity::local_vol::LocalVol;
 use crate::equity::processes::{
@@ -56,6 +55,7 @@ use crate::equity::rbergomi::{black_on_forward, RBergomiGenerator, RBergomiParam
 use crate::equity::sabr::SabrParams;
 use crate::equity::utils::Model;
 use crate::equity::vanilla_option::{AsianPayoff, BarrierPayoff, EquityOption, VanillaPayoff};
+use crate::equity::variance_swap::VarianceSwapPayoff;
 
 /// Re-exported from the asset-agnostic process layer, where the schemes
 /// are defined once against any SDE's drift/diffusion coefficients.
@@ -237,7 +237,13 @@ impl PathAccum {
     }
 }
 
-pub(crate) fn summarize(mut acc: PathAccum, n: usize, steps: usize, offset: f64, qmc: bool) -> McStats {
+pub(crate) fn summarize(
+    mut acc: PathAccum,
+    n: usize,
+    steps: usize,
+    offset: f64,
+    qmc: bool,
+) -> McStats {
     acc.flush();
     // the price is the plain mean over every path — identical to the
     // pre-pairing computation to the last bit
@@ -737,7 +743,9 @@ where
             acc
         })
         .collect();
-    partials.into_iter().fold(PathAccum::default(), PathAccum::merge)
+    partials
+        .into_iter()
+        .fold(PathAccum::default(), PathAccum::merge)
 }
 
 // ── European ────────────────────────────────────────────────────────────
@@ -804,7 +812,9 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
                 acc
             })
             .collect();
-        let acc = partials.into_iter().fold(PathAccum::default(), PathAccum::merge);
+        let acc = partials
+            .into_iter()
+            .fold(PathAccum::default(), PathAccum::merge);
         return summarize(acc, cfg.paths, 1, 0.0, is_qmc(cfg));
     }
     let dt = p.t / steps as f64;
@@ -1361,7 +1371,9 @@ where
             acc
         })
         .collect();
-    partials.into_iter().fold(PathAccum::default(), PathAccum::merge)
+    partials
+        .into_iter()
+        .fold(PathAccum::default(), PathAccum::merge)
 }
 
 // ── SABR stochastic volatility paths ────────────────────────────────────
@@ -1453,7 +1465,9 @@ where
             acc
         })
         .collect();
-    partials.into_iter().fold(PathAccum::default(), PathAccum::merge)
+    partials
+        .into_iter()
+        .fold(PathAccum::default(), PathAccum::merge)
 }
 
 // ── Rough Bergomi stochastic volatility paths ───────────────────────────
@@ -1564,7 +1578,9 @@ fn rbergomi_vanilla_mixed(
             acc
         })
         .collect();
-    let acc = partials.into_iter().fold(PathAccum::default(), PathAccum::merge);
+    let acc = partials
+        .into_iter()
+        .fold(PathAccum::default(), PathAccum::merge);
     summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
@@ -1631,7 +1647,9 @@ where
             acc
         })
         .collect();
-    partials.into_iter().fold(PathAccum::default(), PathAccum::merge)
+    partials
+        .into_iter()
+        .fold(PathAccum::default(), PathAccum::merge)
 }
 
 // ── American: two-pass Longstaff-Schwartz ───────────────────────────────
@@ -1787,7 +1805,9 @@ fn lsmc_two_pass<const K: usize, S: Send>(
             acc
         })
         .collect();
-    let acc = partials.into_iter().fold(PathAccum::default(), PathAccum::merge);
+    let acc = partials
+        .into_iter()
+        .fold(PathAccum::default(), PathAccum::merge);
     // LSMC always simulates on pseudo-random per-path streams
     summarize(acc, cfg.paths, steps, 0.0, false)
 }

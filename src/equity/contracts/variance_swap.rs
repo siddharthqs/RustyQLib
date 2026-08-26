@@ -92,8 +92,7 @@ fn replication_integral(
 pub fn fair_variance_strike(forward: f64, t: f64, smile: impl Fn(f64) -> f64) -> f64 {
     assert!(forward > 0.0 && t > 0.0);
     let width = replication_width(forward, t, &smile);
-    let integral =
-        replication_integral(forward, t, -width, width, |u| (-u).exp(), smile) / forward;
+    let integral = replication_integral(forward, t, -width, width, |u| (-u).exp(), smile) / forward;
     2.0 / t * integral
 }
 
@@ -156,8 +155,7 @@ pub fn fair_corridor_variance_strike(
     if u_hi <= u_lo {
         return 0.0;
     }
-    let integral =
-        replication_integral(forward, t, u_lo, u_hi, |u| (-u).exp(), smile) / forward;
+    let integral = replication_integral(forward, t, u_lo, u_hi, |u| (-u).exp(), smile) / forward;
     2.0 / t * integral
 }
 
@@ -826,11 +824,7 @@ mod tests {
             strike_variance: 0.22 * 0.22,
             t_remaining: 1.0,
             r: 0.03,
-            fair_remaining_variance: fair_variance_strike(
-                100.0 * (0.03_f64).exp(),
-                1.0,
-                |_| 0.25,
-            ),
+            fair_remaining_variance: fair_variance_strike(100.0 * (0.03_f64).exp(), 1.0, |_| 0.25),
             accrued: None,
         }
         .mtm();
@@ -892,7 +886,10 @@ mod tests {
             .expect("heston variance swap must build")
             .npv();
         // struck at the model's own expectation the swap is ~worthless
-        assert!(pv.abs() < 0.15, "heston var swap at model-fair strike: {pv}");
+        assert!(
+            pv.abs() < 0.15,
+            "heston var swap at model-fair strike: {pv}"
+        );
     }
 
     #[test]
@@ -1000,7 +997,10 @@ mod tests {
         // corridor bounds must be ordered
         match builder_vswap(0.2).corridor(115.0, 90.0).build() {
             Err(RustyQLibError::InvalidInput { field, .. }) => assert_eq!(field, "corridor"),
-            other => panic!("expected corridor error, got {:?}", other.map(|_| "an option")),
+            other => panic!(
+                "expected corridor error, got {:?}",
+                other.map(|_| "an option")
+            ),
         }
         // modifiers without .variance_swap(...) report the misuse
         match crate::equity::builder::EquityOptionBuilder::new()
@@ -1013,8 +1013,10 @@ mod tests {
             .build()
         {
             Err(RustyQLibError::InvalidInput { field, .. }) => assert_eq!(field, "gamma_swap"),
-            other => panic!("expected setter error, got {:?}", other.map(|_| "an option")),
+            other => panic!(
+                "expected setter error, got {:?}",
+                other.map(|_| "an option")
+            ),
         }
     }
 }
-

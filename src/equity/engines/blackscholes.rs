@@ -1309,7 +1309,6 @@ pub fn implied_vol_from_price(
     Ok(root.x)
 }
 
-
 #[cfg(test)]
 #[path = "blackscholes_tests.rs"]
 mod tests;

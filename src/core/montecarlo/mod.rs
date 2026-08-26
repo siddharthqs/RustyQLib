@@ -42,8 +42,9 @@ pub mod variance_reduction;
 
 pub use brownian_bridge::BrownianBridge;
 pub use halton::QmcSequence;
-pub use paths::{LowDiscrepancy, 
-    sample_paths, sample_paths_1d, MultiPaths, PathDraws, Paths, SampleConfig, Sampler,
+pub use paths::{
+    sample_paths, sample_paths_1d, LowDiscrepancy, MultiPaths, PathDraws, Paths, SampleConfig,
+    Sampler,
 };
 pub use process::{DiscretizationScheme, StochasticProcess, StochasticProcess1D};
 pub use rng::{path_normals, path_rng, pseudo_normal_matrix, pseudo_normals, splitmix64};

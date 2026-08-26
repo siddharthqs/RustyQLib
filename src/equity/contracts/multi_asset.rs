@@ -38,17 +38,17 @@ use crate::core::montecarlo::paths::{FactorScratch, MultiDraws};
 use crate::core::montecarlo::process::StochasticProcess;
 use crate::core::quotes::Quote;
 use crate::core::results::PricingResult;
+use crate::core::trade::PutOrCall;
 use crate::core::traits::Instrument;
 use crate::core::vols::VolSurface;
-use crate::core::trade::PutOrCall;
 use crate::equity::autocallable::AutocallablePayoff;
-use crate::equity::rainbow::{
-    basket_moment_match_price, kirk_price, margrabe_price, RainbowPayoff, RainbowType,
-};
 use crate::equity::montecarlo::{
     summarize, McStats, MonteCarloConfig, PathAccum, Sampler, PATH_DEPENDENT_MIN_STEPS,
 };
 use crate::equity::processes::MultiAssetGbmProcess;
+use crate::equity::rainbow::{
+    basket_moment_match_price, kirk_price, margrabe_price, RainbowPayoff, RainbowType,
+};
 use crate::equity::utils::{Engine, Model, Payoff, PricingEngine};
 
 /// One underlying's market binding: everything that moves with the
@@ -143,7 +143,10 @@ impl MultiAssetEquityOption {
     }
 
     pub fn time_to_maturity(&self) -> f64 {
-        crate::equity::conventions::year_fraction(self.market.valuation_date, self.base.maturity_date)
+        crate::equity::conventions::year_fraction(
+            self.market.valuation_date,
+            self.base.maturity_date,
+        )
     }
 
     /// Rebind **every** leg to a typed market snapshot: per-symbol spot
@@ -239,9 +242,7 @@ impl MultiAssetEquityOption {
             RainbowType::WorstOf => {
                 b.worst_of(put_or_call, data.strike_price.expect("checked above"))
             }
-            RainbowType::Spread => {
-                b.spread(put_or_call, data.strike_price.expect("checked above"))
-            }
+            RainbowType::Spread => b.spread(put_or_call, data.strike_price.expect("checked above")),
             RainbowType::Basket => {
                 b = b.basket(put_or_call, data.strike_price.expect("checked above"));
                 if let Some(w) = &data.weights {
@@ -416,7 +417,12 @@ impl MultiAssetEquityOption {
                 steps: 0,
             };
         }
-        if self.payoff.as_any().downcast_ref::<RainbowPayoff>().is_some() {
+        if self
+            .payoff
+            .as_any()
+            .downcast_ref::<RainbowPayoff>()
+            .is_some()
+        {
             let mut stats = self.rainbow_terminal_stats(std::slice::from_ref(p));
             return stats.pop().expect("one scenario in, one result out");
         }
@@ -432,7 +438,12 @@ impl MultiAssetEquityOption {
             .as_any()
             .downcast_ref::<RainbowPayoff>()
             .expect("the analytic engine is gated to rainbow payoffs");
-        let dividends: Vec<f64> = self.market.assets.iter().map(|a| a.dividend_yield).collect();
+        let dividends: Vec<f64> = self
+            .market
+            .assets
+            .iter()
+            .map(|a| a.dividend_yield)
+            .collect();
         let r = self
             .market
             .discount_curve
@@ -491,7 +502,12 @@ impl MultiAssetEquityOption {
             .expect("terminal route reached with a non-rainbow payoff");
         let n = self.market.assets.len();
         let cfg = self.mc_cfg();
-        let dividends: Vec<f64> = self.market.assets.iter().map(|a| a.dividend_yield).collect();
+        let dividends: Vec<f64> = self
+            .market
+            .assets
+            .iter()
+            .map(|a| a.dividend_yield)
+            .collect();
         // per-scenario precomputation: drifts, diffusion loadings, discount
         struct Scenario {
             spots: Vec<f64>,
@@ -591,11 +607,7 @@ impl MultiAssetEquityOption {
         let cfg = self.mc_cfg();
         let n_obs = auto.observations.max(1);
         // every observation lands exactly on a simulation step
-        let steps = cfg
-            .time_steps
-            .max(PATH_DEPENDENT_MIN_STEPS)
-            .div_ceil(n_obs)
-            * n_obs;
+        let steps = cfg.time_steps.max(PATH_DEPENDENT_MIN_STEPS).div_ceil(n_obs) * n_obs;
         let dt = t / steps as f64;
         let (obs_idx, dfs) = self.observation_grid(t, p.dr, steps);
         let r = self
@@ -682,9 +694,7 @@ impl MultiAssetEquityOption {
     /// **effective** spread, so tiny-vol legs are not overstated).
     pub fn vegas(&self) -> Vec<f64> {
         let mut rep = MultiRepricer::new(self);
-        (0..self.market.assets.len())
-            .map(|i| rep.vega(i))
-            .collect()
+        (0..self.market.assets.len()).map(|i| rep.vega(i)).collect()
     }
 
     pub fn theta(&self) -> f64 {
@@ -704,7 +714,11 @@ impl MultiAssetEquityOption {
     /// its way around.
     pub fn pricing_result(&self) -> Result<PricingResult, RustyQLibError> {
         self.check_engine_support()?;
-        if self.payoff.as_any().downcast_ref::<RainbowPayoff>().is_some()
+        if self
+            .payoff
+            .as_any()
+            .downcast_ref::<RainbowPayoff>()
+            .is_some()
             && matches!(self.engine, PricingEngine::MonteCarlo(_))
         {
             return self.rainbow_pricing_result();
@@ -713,7 +727,12 @@ impl MultiAssetEquityOption {
         let mut rep = MultiRepricer::new(self);
         let stats = rep.base_stats();
         let asset_greeks = crate::core::results::PerAssetGreeks {
-            symbols: self.market.assets.iter().map(|a| a.symbol.clone()).collect(),
+            symbols: self
+                .market
+                .assets
+                .iter()
+                .map(|a| a.symbol.clone())
+                .collect(),
             deltas: (0..n).map(|i| rep.delta(i)).collect(),
             gammas: (0..n).map(|i| rep.gamma(i)).collect(),
             vegas: (0..n).map(|i| rep.vega(i)).collect(),
@@ -760,8 +779,7 @@ impl MultiAssetEquityOption {
             let mut up = base.clone();
             up.vols[i] += vol_h;
             let mut dn = base.clone();
-            dn.vols[i] =
-                (dn.vols[i] - vol_h).max(crate::equity::conventions::MIN_BUMPED_VOL);
+            dn.vols[i] = (dn.vols[i] - vol_h).max(crate::equity::conventions::MIN_BUMPED_VOL);
             vol_spreads.push(up.vols[i] - dn.vols[i]);
             scenarios.push(up);
             scenarios.push(dn);
@@ -808,7 +826,12 @@ impl MultiAssetEquityOption {
             },
             std_err: base_stats.std_err,
             asset_greeks: Some(crate::core::results::PerAssetGreeks {
-                symbols: self.market.assets.iter().map(|a| a.symbol.clone()).collect(),
+                symbols: self
+                    .market
+                    .assets
+                    .iter()
+                    .map(|a| a.symbol.clone())
+                    .collect(),
                 deltas,
                 gammas,
                 vegas,
@@ -1070,9 +1093,8 @@ impl MultiAssetEquityOptionBuilder {
     }
 
     pub fn years_to_maturity(mut self, years: f64) -> Self {
-        self.maturity_date = Some(
-            self.valuation_date + chrono::Duration::days((years * 365.0).round() as i64),
-        );
+        self.maturity_date =
+            Some(self.valuation_date + chrono::Duration::days((years * 365.0).round() as i64));
         self
     }
 
@@ -1100,7 +1122,12 @@ impl MultiAssetEquityOptionBuilder {
         self
     }
 
-    fn rainbow(mut self, rainbow_type: RainbowType, put_or_call: PutOrCall, strike: Option<f64>) -> Self {
+    fn rainbow(
+        mut self,
+        rainbow_type: RainbowType,
+        put_or_call: PutOrCall,
+        strike: Option<f64>,
+    ) -> Self {
         self.payoff = Some(MaPayoffSpec::Rainbow {
             rainbow_type,
             put_or_call,
@@ -1206,8 +1233,7 @@ impl MultiAssetEquityOptionBuilder {
         if n < 2 {
             return invalid(
                 "assets",
-                "multi-asset options need at least two legs; add them with .asset(...)"
-                    .to_string(),
+                "multi-asset options need at least two legs; add them with .asset(...)".to_string(),
             );
         }
         for leg in &self.assets {
@@ -1229,7 +1255,10 @@ impl MultiAssetEquityOptionBuilder {
                     ),
                 );
             }
-            crate::equity::conventions::check_vol_band(&format!("vol({})", leg.symbol), leg.flat_vol)?;
+            crate::equity::conventions::check_vol_band(
+                &format!("vol({})", leg.symbol),
+                leg.flat_vol,
+            )?;
             if !leg.dividend_yield.is_finite() {
                 return invalid(
                     "assets",
@@ -1330,14 +1359,14 @@ impl MultiAssetEquityOptionBuilder {
                 if !(spec.coupon.is_finite() && spec.coupon >= 0.0) {
                     return invalid(
                         "coupon",
-                        format!("coupon must be non-negative and finite, got {}", spec.coupon),
+                        format!(
+                            "coupon must be non-negative and finite, got {}",
+                            spec.coupon
+                        ),
                     );
                 }
                 if spec.observations < 1 {
-                    return invalid(
-                        "observations",
-                        "need at least one observation".to_string(),
-                    );
+                    return invalid("observations", "need at least one observation".to_string());
                 }
                 Box::new(AutocallablePayoff {
                     exercise_style: crate::core::utils::ContractStyle::European,
@@ -1358,8 +1387,7 @@ impl MultiAssetEquityOptionBuilder {
                 strike,
                 weights,
             } => {
-                if matches!(rainbow_type, RainbowType::Spread | RainbowType::Exchange) && n != 2
-                {
+                if matches!(rainbow_type, RainbowType::Spread | RainbowType::Exchange) && n != 2 {
                     return invalid(
                         "assets",
                         "spread and exchange options take exactly two assets".to_string(),
@@ -1374,9 +1402,7 @@ impl MultiAssetEquityOptionBuilder {
                             format!("strike must be positive and finite, got {k}"),
                         )
                     }
-                    (_, None) => {
-                        return invalid("strike", "strike is required".to_string())
-                    }
+                    (_, None) => return invalid("strike", "strike is required".to_string()),
                 };
                 let weights = match weights {
                     Some(w) => {
@@ -1387,10 +1413,7 @@ impl MultiAssetEquityOptionBuilder {
                             );
                         }
                         if w.iter().any(|x| !x.is_finite()) {
-                            return invalid(
-                                "basket_weights",
-                                "weights must be finite".to_string(),
-                            );
+                            return invalid("basket_weights", "weights must be finite".to_string());
                         }
                         // the basket moment match takes ln of the weighted
                         // forward sum; a non-positive first moment would
@@ -1559,9 +1582,7 @@ mod tests {
         let base_pv = note.npv();
 
         // a typed market snapshot with the second leg crashed 30%
-        let surf = |v: f64| {
-            Arc::new(VolSurface::flat(v, val, DayCountConvention::Act365).unwrap())
-        };
+        let surf = |v: f64| Arc::new(VolSurface::flat(v, val, DayCountConvention::Act365).unwrap());
         let market = Market::new(val)
             .with(Spot("AAA".into()), Quote::new(100.0))
             .with(Spot("BBB".into()), Quote::new(70.0))
@@ -1615,7 +1636,10 @@ mod tests {
         use crate::core::errors::RustyQLibError;
         let field = |r: Result<MultiAssetEquityOption, RustyQLibError>| match r {
             Err(RustyQLibError::InvalidInput { field, .. }) => field,
-            other => panic!("expected InvalidInput, got {:?}", other.map(|_| "an option")),
+            other => panic!(
+                "expected InvalidInput, got {:?}",
+                other.map(|_| "an option")
+            ),
         };
         // fewer than two legs
         let (val, mat) = dates();
@@ -1701,9 +1725,11 @@ mod tests {
         // the effective spread for the tiny-vol leg is (0.015 - floor),
         // not 0.02: reproduce the stencil by hand through the cache-free
         // path to pin the convention
-        let up_dn_spread =
-            (0.005 + 0.01) - crate::equity::conventions::MIN_BUMPED_VOL;
-        assert!(up_dn_spread < 0.02, "the test premise: spread {up_dn_spread}");
+        let up_dn_spread = (0.005 + 0.01) - crate::equity::conventions::MIN_BUMPED_VOL;
+        assert!(
+            up_dn_spread < 0.02,
+            "the test premise: spread {up_dn_spread}"
+        );
     }
 
     #[test]
@@ -1795,9 +1821,12 @@ mod tests {
         // the single path-generation pass must reproduce the
         // per-scenario CRN simulations exactly: same draws per path,
         // same terminal arithmetic per scenario
-        let option =
-            MultiAssetEquityOption::try_from_rainbow_json(&rainbow_data("worst_of", Some(100.0), "MC"))
-                .unwrap();
+        let option = MultiAssetEquityOption::try_from_rainbow_json(&rainbow_data(
+            "worst_of",
+            Some(100.0),
+            "MC",
+        ))
+        .unwrap();
         let result = option.pricing_result().expect("batched result");
         let ag = result.asset_greeks.as_ref().expect("per-asset greeks");
         assert_eq!(ag.deltas, option.deltas());
@@ -1873,7 +1902,10 @@ mod tests {
             .build();
         match three {
             Err(RustyQLibError::InvalidInput { field, .. }) => assert_eq!(field, "assets"),
-            other => panic!("expected assets error, got {:?}", other.map(|_| "an option")),
+            other => panic!(
+                "expected assets error, got {:?}",
+                other.map(|_| "an option")
+            ),
         }
         // basket_weights must follow .basket(...)
         let misuse = two()

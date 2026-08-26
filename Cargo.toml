@@ -69,7 +69,6 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 strum = "0.25"
 thiserror = "1"
 strum_macros = "0.25"
-ndarray = "0.15"
 rayon = "1.5.1"
 log = "0.4"
 

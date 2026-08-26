@@ -121,7 +121,10 @@ impl Gradients {
     /// with unrelated nodes and return a silently wrong number.
     pub fn wrt(&self, v: super::var::Var<'_>) -> f64 {
         assert!(
-            std::ptr::eq(v.tape as *const Tape as *const (), self.tape_id as *const ()),
+            std::ptr::eq(
+                v.tape as *const Tape as *const (),
+                self.tape_id as *const ()
+            ),
             "Gradients::wrt called with a Var from a different tape"
         );
         self.adjoints[v.idx]

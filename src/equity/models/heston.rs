@@ -130,7 +130,6 @@ impl HestonParams {
             ..*self
         }
     }
-
 }
 
 /// `ln` for the positive parameters and `atanh` for the correlation,

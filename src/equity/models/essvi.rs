@@ -403,8 +403,8 @@ impl EssviSurfaceFit {
             );
             let min_g = (0..=200)
                 .map(|i| {
-                    let k = pillar.k_range.0
-                        + (pillar.k_range.1 - pillar.k_range.0) * i as f64 / 200.0;
+                    let k =
+                        pillar.k_range.0 + (pillar.k_range.1 - pillar.k_range.0) * i as f64 / 200.0;
                     fit.0.butterfly_g(k)
                 })
                 .fold(f64::INFINITY, f64::min);
@@ -428,8 +428,7 @@ impl EssviSurfaceFit {
             );
             for i in 0..=CALENDAR_GRID {
                 let k = lo + (hi - lo) * i as f64 / CALENDAR_GRID as f64;
-                let crossing =
-                    pair[0].params.total_variance(k) - pair[1].params.total_variance(k);
+                let crossing = pair[0].params.total_variance(k) - pair[1].params.total_variance(k);
                 max_crossing = max_crossing.max(crossing);
             }
         }
@@ -646,10 +645,7 @@ fn fit_slice(
     };
     let residuals = |u: &[f64]| -> Vec<f64> {
         let p = unpack(u);
-        let mut out: Vec<f64> = quotes
-            .iter()
-            .map(|&(k, vol)| p.vol(k, t) - vol)
-            .collect();
+        let mut out: Vec<f64> = quotes.iter().map(|&(k, vol)| p.vol(k, t) - vol).collect();
         // Gatheral-Jacquier butterfly bounds, as one-sided penalties
         let one_rho = 1.0 + p.rho.abs();
         out.push(config.butterfly_penalty * (p.psi * one_rho - 4.0).max(0.0));
@@ -923,7 +919,11 @@ mod tests {
         // the twist survived the fit: the front slice is more negatively
         // skewed than the back one
         assert!(fit.slices[0].params.rho < fit.slices[1].params.rho - 0.2);
-        assert!(fit.max_calendar_crossing <= 1e-10, "{}", fit.max_calendar_crossing);
+        assert!(
+            fit.max_calendar_crossing <= 1e-10,
+            "{}",
+            fit.max_calendar_crossing
+        );
         fit.validate().unwrap();
     }
 
@@ -948,8 +948,8 @@ mod tests {
             for t in [0.7, 1.0, 1.3] {
                 let d = fit.variance_derivatives(k, t);
                 let h = 1e-6;
-                let dt_num = (fit.total_variance(k, t + h) - fit.total_variance(k, t - h))
-                    / (2.0 * h);
+                let dt_num =
+                    (fit.total_variance(k, t + h) - fit.total_variance(k, t - h)) / (2.0 * h);
                 assert!(
                     (d.dt - dt_num).abs() < 1e-5,
                     "dw/dt at k={k} t={t}: {} vs {dt_num}",
@@ -973,7 +973,10 @@ mod tests {
             psi: 1e-8,
             rho: -0.3,
         };
-        let surface = surface_from(&[(0.5, slice(0.5)), (1.0, slice(1.0)), (2.0, slice(2.0))], 100.0);
+        let surface = surface_from(
+            &[(0.5, slice(0.5)), (1.0, slice(1.0)), (2.0, slice(2.0))],
+            100.0,
+        );
         let fit = EssviSurfaceFit::fit(&surface, |_| 100.0).unwrap();
         for level in [80.0, 100.0, 125.0] {
             for t in [0.1, 0.5, 0.75, 1.0, 2.0, 2.5] {
@@ -1038,7 +1041,19 @@ mod tests {
             psi: 1e-4,
             rho: -0.05,
         };
-        let surface = surface_from(&[(0.25, flat), (0.75, EssviParams { theta: 0.06, ..flat })], 100.0);
+        let surface = surface_from(
+            &[
+                (0.25, flat),
+                (
+                    0.75,
+                    EssviParams {
+                        theta: 0.06,
+                        ..flat
+                    },
+                ),
+            ],
+            100.0,
+        );
         let fit = EssviSurfaceFit::fit(&surface, |_| 100.0).unwrap();
         for slice in &fit.slices {
             assert!(

@@ -67,11 +67,7 @@ fn test_option(put_or_call: PutOrCall, curve: YieldCurve) -> EquityOption {
     )
 }
 
-fn binary_option_of(
-    put_or_call: PutOrCall,
-    binary_type: BinaryType,
-    cash: f64,
-) -> EquityOption {
+fn binary_option_of(put_or_call: PutOrCall, binary_type: BinaryType, cash: f64) -> EquityOption {
     test_option_with(
         Box::new(BinaryPayoff {
             put_or_call,
@@ -393,8 +389,7 @@ fn finite_difference_matches_analytic_vanilla() {
     for pc in [PutOrCall::Call, PutOrCall::Put] {
         let mut option = test_option(pc, flat_5pct());
         let analytic = option.npv();
-        option.engine =
-            crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         let fd = option.npv();
         assert!(
             (fd - analytic).abs() < 0.01,
@@ -408,8 +403,7 @@ fn finite_difference_matches_analytic_binary() {
     for pc in [PutOrCall::Call, PutOrCall::Put] {
         let mut option = binary_option(pc);
         let analytic = option.npv();
-        option.engine =
-            crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         let fd = option.npv();
         assert!(
             (fd - analytic).abs() < 0.002,
@@ -593,13 +587,9 @@ fn implied_vol_round_trips_across_strikes_and_vols() {
 #[test]
 fn implied_vol_rejects_arbitrage_violating_prices() {
     // below intrinsic
-    assert!(
-        implied_vol_from_price(100.0, 80.0, 0.05, 0.0, 1.0, 10.0, PutOrCall::Call).is_err()
-    );
+    assert!(implied_vol_from_price(100.0, 80.0, 0.05, 0.0, 1.0, 10.0, PutOrCall::Call).is_err());
     // above the underlying
-    assert!(
-        implied_vol_from_price(100.0, 100.0, 0.05, 0.0, 1.0, 101.0, PutOrCall::Call).is_err()
-    );
+    assert!(implied_vol_from_price(100.0, 100.0, 0.05, 0.0, 1.0, 101.0, PutOrCall::Call).is_err());
 }
 
 // ── Implied surface construction + Dupire local vol round trip ──────
@@ -689,8 +679,7 @@ fn local_vol_prices_back_vanilla_from_calibrated_surface() {
 fn local_vol_flat_surface_reproduces_black_scholes() {
     let valuation = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
     let surface =
-        crate::core::vols::VolSurface::flat(0.3, valuation, DayCountConvention::Act365)
-            .unwrap();
+        crate::core::vols::VolSurface::flat(0.3, valuation, DayCountConvention::Act365).unwrap();
     let expected = 14.2312547860; // flat-30% golden
     let lv_price = local_vol_option(surface, 100.0).npv();
     assert!(
@@ -1288,8 +1277,7 @@ fn fd_barrier_matches_reiner_rubinstein() {
     ] {
         let analytic = barrier_option(pc, direction, knock, h).npv();
         let mut option = barrier_option(pc, direction, knock, h);
-        option.engine =
-            crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
+        option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
         let fd = option.npv();
         assert!(
             (fd - analytic).abs() < 0.02,
@@ -1354,7 +1342,9 @@ fn mc_stats_reports_consistent_standard_error() {
     option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
     option.mc_cfg_mut().sampler = crate::equity::montecarlo::Sampler::PseudoRandom;
     let stats = crate::equity::montecarlo::stats(&option, None);
-    let se = stats.std_err.expect("pseudo sampler reports a standard error");
+    let se = stats
+        .std_err
+        .expect("pseudo sampler reports a standard error");
     assert!(se > 0.0 && se < 1.0);
     assert!(stats.paths == 100_000 && stats.steps == 1);
     // antithetic pseudo draws: the analytic value must sit within a
@@ -1646,8 +1636,7 @@ fn sabr_binary_mc_matches_the_smile_corrected_analytic() {
     let s = option.effective_spot();
     let t = option.time_to_maturity();
     let (r, q) = (option.risk_free_rate(), option.carry_yield());
-    let d2 =
-        ((s / 100.0_f64).ln() + (r - q - 0.5 * sigma_k * sigma_k) * t) / (sigma_k * t.sqrt());
+    let d2 = ((s / 100.0_f64).ln() + (r - q - 0.5 * sigma_k * sigma_k) * t) / (sigma_k * t.sqrt());
     let plain = (-r * t).exp() * norm_cdf(d2);
     assert!(analytic > plain, "corrected={analytic} plain={plain}");
 }
@@ -1744,8 +1733,7 @@ fn put_call_parity_with_dividends_and_borrow() {
     let mut put = dividend_paying_option(PutOrCall::Put);
     call.market.borrow_cost = 0.02;
     put.market.borrow_cost = 0.02;
-    let parity =
-        call.effective_spot() * (-call.carry_yield()).exp() - 100.0 * (-0.05_f64).exp();
+    let parity = call.effective_spot() * (-call.carry_yield()).exp() - 100.0 * (-0.05_f64).exp();
     assert_approx_eq!(call.npv() - put.npv(), parity, 1e-10);
 }
 
@@ -2120,7 +2108,9 @@ fn autocall_that_always_calls_pays_coupon_at_first_observation() {
     let expected = 105.0 * (-0.05 * 0.25_f64).exp();
     assert_approx_eq!(stats.pv, expected, 1e-9);
     // identical path values: stderr is pure floating-point cancellation
-    let se = stats.std_err.expect("pseudo sampler reports a standard error");
+    let se = stats
+        .std_err
+        .expect("pseudo sampler reports a standard error");
     assert!(se < 1e-6, "deterministic payoff: stderr {se}");
 }
 
@@ -2193,8 +2183,8 @@ fn adjoint_greeks_cover_the_approximate_schemes() {
         mc.mc_cfg_mut().scheme = scheme;
         mc.mc_cfg_mut().time_steps = 252;
         mc.mc_cfg_mut().paths = 100_000;
-        let g = crate::equity::montecarlo::aad_greeks(&mc)
-            .expect("AAD must cover approximate schemes");
+        let g =
+            crate::equity::montecarlo::aad_greeks(&mc).expect("AAD must cover approximate schemes");
         assert!(
             (g.delta - analytic.delta()).abs() < 0.01,
             "{scheme:?}: delta {} vs {}",

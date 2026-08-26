@@ -126,7 +126,10 @@ impl LocalVolGridCache {
         build: impl FnOnce() -> crate::equity::local_vol::LocalVolGrid,
     ) -> Arc<crate::equity::local_vol::LocalVolGrid> {
         let mut grids = self.0.lock().expect("local-vol grid cache poisoned");
-        grids.entry(key).or_insert_with(|| Arc::new(build())).clone()
+        grids
+            .entry(key)
+            .or_insert_with(|| Arc::new(build()))
+            .clone()
     }
 }
 
@@ -243,7 +246,10 @@ impl EquityOptionBase {
 // date), so they live on the pairing — the option — not on either half.
 impl EquityOption {
     pub fn time_to_maturity(&self) -> f64 {
-        crate::equity::conventions::year_fraction(self.market.valuation_date, self.base.maturity_date)
+        crate::equity::conventions::year_fraction(
+            self.market.valuation_date,
+            self.base.maturity_date,
+        )
     }
     /// Discount factor from the valuation date to maturity, off the curve.
     pub fn maturity_discount_factor(&self) -> f64 {
@@ -283,7 +289,8 @@ impl EquityOption {
                 *date > self.market.valuation_date && *date <= self.base.maturity_date
             })
             .map(|(date, amount)| {
-                let t = crate::equity::conventions::year_fraction(self.market.valuation_date, *date);
+                let t =
+                    crate::equity::conventions::year_fraction(self.market.valuation_date, *date);
                 // df(t) = e^{-r t}; multiplying by e^{carry t} discounts at
                 // the net carry (r - carry), generalizing to any curve shape.
                 amount * self.market.discount_curve.df(t) * (carry * t).exp()

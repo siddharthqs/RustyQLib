@@ -30,7 +30,8 @@ use crate::equity::finite_difference::FdConfig;
 use crate::equity::montecarlo::MonteCarloConfig;
 use crate::equity::utils::{Payoff, PricingEngine};
 use crate::equity::vanilla_option::{
-    AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityOption, LookbackPayoff, LookbackType, VanillaPayoff,
+    AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityOption, LookbackPayoff,
+    LookbackType, VanillaPayoff,
 };
 
 /// True when the error is the user backing out (Esc / Ctrl-C) rather

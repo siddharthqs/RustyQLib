@@ -155,8 +155,7 @@ pub(crate) fn margrabe_price(
         PutOrCall::Call => (0, 1),
         PutOrCall::Put => (1, 0),
     };
-    let sigma =
-        (vols[i] * vols[i] + vols[j] * vols[j] - 2.0 * rho * vols[i] * vols[j]).sqrt();
+    let sigma = (vols[i] * vols[i] + vols[j] * vols[j] - 2.0 * rho * vols[i] * vols[j]).sqrt();
     let (q_i, q_j) = (dividends[i], dividends[j]);
     let st = sigma * t.sqrt();
     if st < 1e-12 {
@@ -185,9 +184,8 @@ pub(crate) fn kirk_price(
     let f2 = spots[1] * exp((r - dividends[1]) * t);
     let k = strike;
     let w = f2 / (f2 + k);
-    let sigma = (vols[0] * vols[0] - 2.0 * rho * vols[0] * vols[1] * w
-        + vols[1] * vols[1] * w * w)
-        .sqrt();
+    let sigma =
+        (vols[0] * vols[0] - 2.0 * rho * vols[0] * vols[1] * w + vols[1] * vols[1] * w * w).sqrt();
     let st = sigma * t.sqrt();
     let d1 = ((f1 / (f2 + k)).ln() + 0.5 * sigma * sigma * t) / st;
     let d2 = d1 - st;
@@ -444,7 +442,10 @@ impl RainbowOption {
         // non-unit diagonal is a data error and still rejected
         let chol = crate::core::linalg::cholesky_with_repair(&data.correlations)?;
         for (i, a) in data.assets.iter().enumerate() {
-            crate::equity::conventions::check_vol_band(&format!("assets[{i}].volatility"), a.volatility)?;
+            crate::equity::conventions::check_vol_band(
+                &format!("assets[{i}].volatility"),
+                a.volatility,
+            )?;
         }
         if let Some(r) = data.risk_free_rate {
             crate::equity::conventions::check_rate_band("risk_free_rate", r)?;
@@ -735,9 +736,10 @@ impl RainbowOption {
                 acc
             })
             .collect();
-        let acc = partials
-            .into_iter()
-            .fold(crate::equity::montecarlo::PathAccum::default(), crate::equity::montecarlo::PathAccum::merge);
+        let acc = partials.into_iter().fold(
+            crate::equity::montecarlo::PathAccum::default(),
+            crate::equity::montecarlo::PathAccum::merge,
+        );
         crate::equity::montecarlo::summarize(acc, cfg.paths, 1, 0.0, qmc.is_some())
     }
 }
@@ -976,7 +978,9 @@ mod tests {
             cfg.sampler = Sampler::PseudoRandom;
         }
         let stats = option.npv_with_stats().unwrap();
-        let se = stats.std_err.expect("pseudo sampler reports a standard error");
+        let se = stats
+            .std_err
+            .expect("pseudo sampler reports a standard error");
         assert!(se > 0.0 && se < 0.5);
     }
 

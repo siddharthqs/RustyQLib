@@ -33,8 +33,7 @@ pub fn thomas_algorithm(a: &[f64], b: &[f64], c: &[f64], d: &[f64]) -> Vec<f64> 
         c_[i] *= id;
         d_[i] = (d_[i] - a[i - 1] * d_[i - 1]) * id;
     }
-    d_[n - 1] = (d_[n - 1] - a[n - 2] * d_[n - 2])
-        / check(b[n - 1] - a[n - 2] * c_[n - 2], n - 1);
+    d_[n - 1] = (d_[n - 1] - a[n - 2] * d_[n - 2]) / check(b[n - 1] - a[n - 2] * c_[n - 2], n - 1);
 
     x[n - 1] = d_[n - 1];
     for i in (0..n - 1).rev() {

@@ -243,10 +243,8 @@ impl LocalVolGrid {
     pub fn vol_checked(&self, level: f64, t: f64) -> (f64, bool) {
         let (i0, i1, _) = bracket(&self.levels, level);
         let (j0, j1, _) = bracket(&self.times, t);
-        let guarded = !(self.valid[i0][j0]
-            && self.valid[i0][j1]
-            && self.valid[i1][j0]
-            && self.valid[i1][j1]);
+        let guarded =
+            !(self.valid[i0][j0] && self.valid[i0][j1] && self.valid[i1][j0] && self.valid[i1][j1]);
         (self.vol(level, t), guarded)
     }
 
@@ -410,7 +408,11 @@ mod tests {
         let pchip = surface(crate::core::vols::TimeInterpolation::Pchip);
         // linear: sqrt(0.085) -> sqrt(~0.0778), a ~1.3 vol point step
         assert!(jump(&linear) > 5e-3, "linear jump {}", jump(&linear));
-        assert!(jump(&pchip) < jump(&linear) / 3.0, "pchip jump {}", jump(&pchip));
+        assert!(
+            jump(&pchip) < jump(&linear) / 3.0,
+            "pchip jump {}",
+            jump(&pchip)
+        );
     }
 
     #[test]

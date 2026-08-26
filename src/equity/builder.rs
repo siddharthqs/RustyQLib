@@ -32,11 +32,10 @@ use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::core::vols::VolSurface;
 use crate::equity::accumulator::{AccumulatorPayoff, AccumulatorSide};
-use crate::equity::cliquet::{CliquetPayoff, CliquetStyle};
-use crate::equity::variance_swap::{VarianceSwapKind, VarianceSwapPayoff};
 use crate::equity::asian::{AsianStrikeType, AveragingType};
 use crate::equity::autocallable::AutocallablePayoff;
 use crate::equity::barrier::{BarrierDirection, KnockType};
+use crate::equity::cliquet::{CliquetPayoff, CliquetStyle};
 use crate::equity::finite_difference::FdConfig;
 use crate::equity::forward_start_option::ForwardStartPayoff;
 use crate::equity::heston::HestonParams;
@@ -48,6 +47,7 @@ use crate::equity::vanilla_option::{
     AsianPayoff, BarrierPayoff, BinaryPayoff, BinaryType, EquityOption, EquityOptionBase,
     VanillaPayoff,
 };
+use crate::equity::variance_swap::{VarianceSwapKind, VarianceSwapPayoff};
 
 /// What to price, recorded as data and materialized into a [`Payoff`] at
 /// [`EquityOptionBuilder::build`] time — so setter order never matters:
@@ -167,7 +167,10 @@ fn date_list_to_times(
             ));
         }
         prev = *date;
-        times.push(crate::equity::conventions::year_fraction(valuation_date, *date));
+        times.push(crate::equity::conventions::year_fraction(
+            valuation_date,
+            *date,
+        ));
     }
     Ok(times)
 }
@@ -458,10 +461,7 @@ impl PayoffSpec {
                 if let CliquetStyle::Reverse { coupon } | CliquetStyle::Napoleon { coupon } = style
                 {
                     if !coupon.is_finite() {
-                        return invalid(
-                            "coupon",
-                            format!("coupon must be finite, got {coupon}"),
-                        );
+                        return invalid("coupon", format!("coupon must be finite, got {coupon}"));
                     }
                 }
                 Ok(())

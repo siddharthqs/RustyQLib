@@ -49,9 +49,9 @@ pub mod validation;
 
 pub use crate::bonds::{
     bootstrap_credit_curve, bootstrap_curve, conversion_factor, g_spread, BillQuote, BondFuture,
-    BondOptionality, BondQuote, CallOption, ConvertibleBond, ConvertibleMarket, CreditCurve,
-    CurveInstrument, DeliverableBond, Deposit, FactorRounding, FixedRateBond, FloatingRateNote,
-    Fra, Frequency, MakeWholeCall, PutOption, TreasuryBill,
+    BondOptionality, BondQuote, CallOption, ConvertibleBond, ConvertibleMarket,
+    ConvertiblePreferred, CreditCurve, CurveInstrument, DeliverableBond, Deposit, FactorRounding,
+    FixedRateBond, FloatingRateNote, Fra, Frequency, MakeWholeCall, PutOption, TreasuryBill,
 };
 pub use crate::cmdty::{
     AveragePriceOption, ClewlowStrickland, ClewlowStricklandFit, CommodityBasisSwap,

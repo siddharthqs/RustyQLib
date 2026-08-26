@@ -305,7 +305,9 @@ impl VolSurface {
     /// the new reference drop out. Errors if `new_reference` precedes
     /// the current reference or if no pillar survives.
     pub fn rolled(&self, new_reference: NaiveDate) -> Result<VolSurface, VolError> {
-        let tau = self.day_count.year_fraction(self.reference_date, new_reference);
+        let tau = self
+            .day_count
+            .year_fraction(self.reference_date, new_reference);
         if tau < 0.0 {
             return Err(VolError::NonPositiveTime(tau));
         }
@@ -1023,7 +1025,11 @@ mod tests {
     #[test]
     fn pchip_equals_linear_on_flat_vols() {
         let flat = VolSurface::from_strike_grid(
-            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0), Tenor::YearFraction(2.0)],
+            &[
+                Tenor::YearFraction(0.5),
+                Tenor::YearFraction(1.0),
+                Tenor::YearFraction(2.0),
+            ],
             &[90.0, 100.0, 110.0],
             &[vec![0.2; 3], vec![0.2; 3], vec![0.2; 3]],
             asof(),
@@ -1049,7 +1055,11 @@ mod tests {
     fn pchip_forward_variance_is_continuous_at_pillars() {
         let surface = |interp: TimeInterpolation| {
             VolSurface::from_strike_grid(
-                &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0), Tenor::YearFraction(1.5)],
+                &[
+                    Tenor::YearFraction(0.5),
+                    Tenor::YearFraction(1.0),
+                    Tenor::YearFraction(1.5),
+                ],
                 &[100.0],
                 &[vec![0.20], vec![0.25], vec![0.26]],
                 asof(),
@@ -1078,7 +1088,11 @@ mod tests {
     #[test]
     fn pchip_preserves_monotone_total_variance() {
         let s = VolSurface::from_strike_grid(
-            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0), Tenor::YearFraction(1.1)],
+            &[
+                Tenor::YearFraction(0.5),
+                Tenor::YearFraction(1.0),
+                Tenor::YearFraction(1.1),
+            ],
             &[100.0],
             // w = 0.02, 0.0625, 0.0630 — slope 0.085 then 0.005
             &[vec![0.2], vec![0.25], vec![(0.0630_f64 / 1.1).sqrt()]],
