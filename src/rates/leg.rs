@@ -62,7 +62,8 @@ pub fn accrual_periods(
     Ok(periods)
 }
 
-/// PV of a fixed leg: `sum rate * tau_i * df(pay_i)` on unit notional.
+/// PV of a fixed leg: `sum rate * tau_i * df(pay_i)` on unit notional
+/// over the unsettled periods (see [`annuity`]).
 pub fn fixed_leg_pv(
     periods: &[AccrualPeriod],
     rate: f64,
@@ -74,14 +75,19 @@ pub fn fixed_leg_pv(
 
 /// The fixed-leg annuity `sum tau_i * df(pay_i)` on unit notional — the
 /// PV of 1 unit of rate, and the sensitivity of the swap to its fixed
-/// rate.
+/// rate. Periods already settled — payment on or before the discount
+/// curve's reference date — contribute nothing, so a seasoned swap
+/// prices only its remaining cashflows (the curve would otherwise clamp
+/// their discount factors to 1 and sum past coupons at face).
 pub fn annuity(
     periods: &[AccrualPeriod],
     day_count: DayCountConvention,
     discount: &YieldCurve,
 ) -> f64 {
+    let valuation = discount.reference_date();
     periods
         .iter()
+        .filter(|p| p.payment > valuation)
         .map(|p| day_count.year_fraction(p.start, p.end) * discount.df_date(p.payment))
         .sum()
 }
@@ -90,6 +96,11 @@ pub fn annuity(
 /// floating accrual is forecast from the curve ratio
 /// `df(start)/df(end) - 1` (the simple forward, and equally the
 /// compounded overnight accrual); the spread accrues on `day_count`.
+/// Periods already settled (payment on or before the discount curve's
+/// reference date) contribute nothing; a period that began before the
+/// forecast curve's reference date fixed in the past and is an error
+/// here — supply its realized rate through
+/// [`float_leg_pv_with_fixing`].
 pub fn float_leg_pv(
     periods: &[AccrualPeriod],
     spread: f64,
@@ -97,11 +108,73 @@ pub fn float_leg_pv(
     discount: &YieldCurve,
     forecast: &YieldCurve,
 ) -> Result<f64, RustyQLibError> {
+    float_leg_pv_with_fixing(periods, spread, day_count, discount, forecast, None)
+}
+
+/// [`float_leg_pv`] for a seasoned leg. `realized_rate` is the
+/// annualized simple rate (on `day_count`) realized from the current
+/// period's start through the forecast curve's reference date — for a
+/// compounded overnight leg, the simple-rate equivalent of the
+/// compounding realized so far. The period in progress then accrues
+/// `(1 + realized_rate * tau_elapsed) / df(end) - 1` — the realized
+/// stub grown at the curve — and every other period prices as usual.
+///
+/// A period that is fully elapsed on the forecast curve but pays after
+/// the valuation date (a payment lag straddling the reference) cannot
+/// be represented by the single stub rate and is rejected.
+pub fn float_leg_pv_with_fixing(
+    periods: &[AccrualPeriod],
+    spread: f64,
+    day_count: DayCountConvention,
+    discount: &YieldCurve,
+    forecast: &YieldCurve,
+    realized_rate: Option<f64>,
+) -> Result<f64, RustyQLibError> {
+    if let Some(rate) = realized_rate {
+        if !rate.is_finite() {
+            return Err(RustyQLibError::invalid_input(
+                "realized_rate",
+                format!("must be finite, got {rate}"),
+            ));
+        }
+    }
+    let valuation = discount.reference_date();
+    let fixing_horizon = forecast.reference_date();
     let mut pv = 0.0;
     for p in periods {
-        let ratio = checked_df(forecast, p.start)? / checked_df(forecast, p.end)?;
+        if p.payment <= valuation {
+            continue; // settled
+        }
         let tau = day_count.year_fraction(p.start, p.end);
-        pv += (ratio - 1.0 + spread * tau) * discount.df_date(p.payment);
+        let accrual = if p.start >= fixing_horizon {
+            checked_df(forecast, p.start)? / checked_df(forecast, p.end)? - 1.0
+        } else if p.end > fixing_horizon {
+            // the period in progress: realized stub, grown at the curve
+            let Some(rate) = realized_rate else {
+                return Err(RustyQLibError::invalid_input(
+                    "swap leg",
+                    format!(
+                        "the period starting {} began before the forecast curve reference \
+                         {}: supply the realized rate — a historical fixing cannot be \
+                         read off the curve",
+                        p.start, fixing_horizon
+                    ),
+                ));
+            };
+            let realized = 1.0 + rate * day_count.year_fraction(p.start, fixing_horizon);
+            realized / checked_df(forecast, p.end)? - 1.0
+        } else {
+            // fully elapsed, but paying after the valuation date
+            return Err(RustyQLibError::invalid_input(
+                "swap leg",
+                format!(
+                    "the period ending {} is fully elapsed on the forecast curve reference \
+                     {} but pays {} — its realized accrual cannot be read off the curve",
+                    p.end, fixing_horizon, p.payment
+                ),
+            ));
+        };
+        pv += (accrual + spread * tau) * discount.df_date(p.payment);
     }
     Ok(pv)
 }
@@ -209,6 +282,91 @@ mod tests {
         let pv1 = fixed_leg_pv(&periods, 0.04, dc, &curve);
         let pv2 = fixed_leg_pv(&periods, 0.05, dc, &curve);
         assert!(((pv2 - pv1) - 0.01 * a).abs() < 1e-15);
+    }
+
+    #[test]
+    fn seasoned_legs_drop_settled_periods_and_need_the_current_fixing() {
+        // 2y quarterly leg effective 2026-08-06, priced mid-life on
+        // 2027-01-15: two periods settled, one in progress, the rest ahead
+        let periods = accrual_periods(
+            d(2026, 8, 6),
+            d(2028, 8, 6),
+            Frequency::Quarterly,
+            &Calendar::WeekendsOnly,
+            BusinessDayConvention::Unadjusted,
+            0,
+        )
+        .unwrap();
+        let reference = d(2027, 1, 15);
+        let curve = flat(0.04, reference);
+        let dc = DayCountConvention::Act360;
+        assert!(
+            periods.iter().any(|p| p.payment <= reference),
+            "the test needs settled periods"
+        );
+
+        // annuity: only periods paying after the reference remain (the
+        // old behavior summed past coupons at df = 1)
+        let a = annuity(&periods, dc, &curve);
+        let manual: f64 = periods
+            .iter()
+            .filter(|p| p.payment > reference)
+            .map(|p| dc.year_fraction(p.start, p.end) * curve.df_date(p.payment))
+            .sum();
+        assert!((a - manual).abs() < 1e-15, "{a} vs {manual}");
+
+        // the float leg refuses to project the period fixed in the past...
+        let err = float_leg_pv(&periods, 0.0, dc, &curve, &curve);
+        assert!(format!("{}", err.unwrap_err()).contains("realized rate"));
+
+        // ...and with the realized rate supplied, prices settled-free with
+        // the realized stub grown at the curve
+        let realized = 0.05;
+        let pv =
+            float_leg_pv_with_fixing(&periods, 0.0, dc, &curve, &curve, Some(realized)).unwrap();
+        let mut manual_pv = 0.0;
+        for p in &periods {
+            if p.payment <= reference {
+                continue;
+            }
+            let accrual = if p.start >= reference {
+                curve.df_date(p.start) / curve.df_date(p.end) - 1.0
+            } else {
+                (1.0 + realized * dc.year_fraction(p.start, reference)) / curve.df_date(p.end)
+                    - 1.0
+            };
+            manual_pv += accrual * curve.df_date(p.payment);
+        }
+        assert!((pv - manual_pv).abs() < 1e-15, "{pv} vs {manual_pv}");
+    }
+
+    #[test]
+    fn elapsed_but_unpaid_periods_are_rejected() {
+        // T+5 payment lag and a reference between a period's end and its
+        // payment: the single stub rate cannot represent that period's
+        // fully historical accrual
+        let periods = accrual_periods(
+            d(2026, 8, 6),
+            d(2027, 8, 6),
+            Frequency::Quarterly,
+            &Calendar::WeekendsOnly,
+            BusinessDayConvention::Following,
+            5,
+        )
+        .unwrap();
+        // first period ends Fri 2026-11-06 and pays five business days on
+        let reference = d(2026, 11, 9);
+        assert!(periods[0].end < reference && reference < periods[0].payment);
+        let curve = flat(0.04, reference);
+        let err = float_leg_pv_with_fixing(
+            &periods,
+            0.0,
+            DayCountConvention::Act360,
+            &curve,
+            &curve,
+            Some(0.04),
+        );
+        assert!(format!("{}", err.unwrap_err()).contains("fully elapsed"));
     }
 
     #[test]

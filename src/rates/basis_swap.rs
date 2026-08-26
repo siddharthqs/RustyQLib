@@ -12,7 +12,9 @@ use crate::core::calendar::{BusinessDayConvention, Calendar, Frequency};
 use crate::core::curves::YieldCurve;
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
-use crate::rates::leg::{accrual_periods, annuity, float_leg_pv, AccrualPeriod};
+use crate::rates::leg::{
+    accrual_periods, annuity, float_leg_pv, float_leg_pv_with_fixing, AccrualPeriod,
+};
 
 /// One floating leg's conventions.
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +121,37 @@ impl BasisSwap {
         Ok(self.notional * (receive - pay))
     }
 
+    /// [`pv`](Self::pv) for a seasoned swap, with each leg's realized
+    /// current-period rate supplied (`None` for a leg whose current
+    /// period starts on or after its forecast curve's reference date).
+    /// Settled periods contribute nothing.
+    pub fn pv_with_fixings(
+        &self,
+        discount: &YieldCurve,
+        forecast_a: &YieldCurve,
+        forecast_b: &YieldCurve,
+        realized_a: Option<f64>,
+        realized_b: Option<f64>,
+    ) -> Result<f64, RustyQLibError> {
+        let receive = float_leg_pv_with_fixing(
+            &self.periods(&self.leg_a)?,
+            self.spread,
+            self.leg_a.day_count,
+            discount,
+            forecast_a,
+            realized_a,
+        )?;
+        let pay = float_leg_pv_with_fixing(
+            &self.periods(&self.leg_b)?,
+            0.0,
+            self.leg_b.day_count,
+            discount,
+            forecast_b,
+            realized_b,
+        )?;
+        Ok(self.notional * (receive - pay))
+    }
+
     /// The fair spread on leg A: the spread that makes the PV zero.
     pub fn fair_spread(
         &self,
@@ -185,6 +218,20 @@ mod tests {
         assert!(swap.pv(&curve, &curve, &curve).unwrap().abs() < 1e-10);
         let fair = swap.fair_spread(&curve, &curve, &curve).unwrap();
         assert!(fair.abs() < 1e-14, "fair spread {fair}");
+    }
+
+    #[test]
+    fn seasoned_identical_legs_still_cancel_exactly() {
+        // priced mid-life: projecting the live periods errors, and with
+        // the (shared) realized rate supplied, identical legs at zero
+        // spread cancel to the cent
+        let swap = two_year_basis(0.0, quarterly_leg());
+        let curve = flat(0.04, d(2027, 1, 15));
+        assert!(swap.pv(&curve, &curve, &curve).is_err());
+        let pv = swap
+            .pv_with_fixings(&curve, &curve, &curve, Some(0.045), Some(0.045))
+            .unwrap();
+        assert!(pv.abs() < 1e-10, "{pv}");
     }
 
     #[test]

@@ -50,6 +50,18 @@ pub fn simple_forward(
             format!("the period must be at least one day, got {days}"),
         ));
     }
+    // the curve clamps df to 1 before its reference, which would return
+    // exactly 0% for elapsed days instead of their realized fixings
+    if day < curve.reference_date() {
+        return Err(RustyQLibError::invalid_input(
+            "simple_forward",
+            format!(
+                "{day} is before the curve reference {}: past overnight rates are \
+                 fixings, not forwards",
+                curve.reference_date()
+            ),
+        ));
+    }
     let df0 = curve.df_date(day);
     let df1 = curve.df_date(day + Duration::days(days));
     if !df0.is_finite() || df0 <= 0.0 || !df1.is_finite() || df1 <= 0.0 {
@@ -108,5 +120,19 @@ mod tests {
             simple_forward(&curve, day, 1).unwrap()
         );
         assert!(simple_forward(&curve, day, 0).is_err());
+    }
+
+    #[test]
+    fn past_days_are_fixings_not_forwards() {
+        let curve = YieldCurve::flat(
+            0.04,
+            d(2026, 8, 6),
+            DayCountConvention::Act365,
+            Compounding::Continuous,
+        )
+        .unwrap();
+        // the old df clamp returned exactly 0% here
+        assert!(simple_forward(&curve, d(2026, 8, 5), 1).is_err());
+        assert!(simple_forward(&curve, d(2026, 8, 6), 1).is_ok());
     }
 }

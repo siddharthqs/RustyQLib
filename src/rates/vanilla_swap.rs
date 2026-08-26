@@ -6,7 +6,9 @@ use crate::core::calendar::{BusinessDayConvention, Calendar, Frequency};
 use crate::core::curves::YieldCurve;
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
-use crate::rates::leg::{accrual_periods, annuity, fixed_leg_pv, float_leg_pv, AccrualPeriod};
+use crate::rates::leg::{
+    accrual_periods, annuity, fixed_leg_pv, float_leg_pv, float_leg_pv_with_fixing, AccrualPeriod,
+};
 use crate::rates::PayerReceiver;
 
 /// A vanilla interest rate swap: a periodic fixed leg against a
@@ -153,6 +155,27 @@ impl VanillaSwap {
             )?)
     }
 
+    /// PV of a seasoned floating leg: `realized_rate` is the annualized
+    /// simple rate realized from the current period's start through the
+    /// forecast curve's reference date (see
+    /// [`float_leg_pv_with_fixing`]).
+    pub fn float_leg_pv_with_fixing(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        realized_rate: f64,
+    ) -> Result<f64, RustyQLibError> {
+        Ok(self.notional
+            * float_leg_pv_with_fixing(
+                &self.float_periods()?,
+                0.0,
+                self.float_day_count,
+                discount,
+                forecast,
+                Some(realized_rate),
+            )?)
+    }
+
     /// Swap PV under dual curves: `sign * (float - fixed)`.
     pub fn pv_with(
         &self,
@@ -161,6 +184,20 @@ impl VanillaSwap {
     ) -> Result<f64, RustyQLibError> {
         Ok(self.payer_receiver.sign()
             * (self.float_leg_pv(discount, forecast)? - self.fixed_leg_pv(discount)?))
+    }
+
+    /// [`pv_with`](Self::pv_with) for a seasoned swap, with the current
+    /// float period's realized rate supplied. Settled periods on both
+    /// legs contribute nothing.
+    pub fn pv_with_fixing(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        realized_rate: f64,
+    ) -> Result<f64, RustyQLibError> {
+        Ok(self.payer_receiver.sign()
+            * (self.float_leg_pv_with_fixing(discount, forecast, realized_rate)?
+                - self.fixed_leg_pv(discount)?))
     }
 
     /// Single-curve PV: forecast and discount on the same curve.
@@ -302,6 +339,22 @@ mod tests {
         let dv01 = swap.dv01(&curve, &curve).unwrap();
         // payer gains when rates rise; ~2y annuity on 1mm is ~190 per bp
         assert!(dv01 > 100.0 && dv01 < 300.0, "dv01 {dv01}");
+    }
+
+    #[test]
+    fn seasoned_swap_needs_and_uses_the_current_fixing() {
+        // swap effective Aug 2026, priced mid-life in Jan 2027: the old
+        // code summed past fixed coupons at face and dropped past float
+        // periods, silently
+        let swap = two_year_payer(0.04);
+        let curve = flat(0.05, d(2027, 1, 15));
+        // projecting the live float period now errors instead
+        assert!(swap.pv(&curve).is_err());
+        // with the current fixing supplied, paying 4% fixed against ~5%
+        // rates leaves the payer in the money, at remaining-leg scale
+        let pv = swap.pv_with_fixing(&curve, &curve, 0.05).unwrap();
+        assert!(pv > 0.0, "{pv}");
+        assert!(pv < 50_000.0, "{pv}");
     }
 
     #[test]

@@ -13,7 +13,9 @@ use crate::core::calendar::{BusinessDayConvention, Calendar, Frequency};
 use crate::core::curves::YieldCurve;
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
-use crate::rates::leg::{accrual_periods, annuity, float_leg_pv, AccrualPeriod};
+use crate::rates::leg::{
+    accrual_periods, annuity, float_leg_pv, float_leg_pv_with_fixing, AccrualPeriod,
+};
 use crate::rates::PayerReceiver;
 
 #[derive(Debug, Clone)]
@@ -127,6 +129,29 @@ impl OvernightIndexSwap {
         Ok(self.payer_receiver.sign() * self.notional * (float - fixed))
     }
 
+    /// [`pv_with`](Self::pv_with) for a seasoned swap: `realized_rate`
+    /// is the annualized simple-rate equivalent of the compounding
+    /// realized from the current period's start through the forecast
+    /// curve's reference date. Settled periods contribute nothing.
+    pub fn pv_with_fixing(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        realized_rate: f64,
+    ) -> Result<f64, RustyQLibError> {
+        let periods = self.periods()?;
+        let float = float_leg_pv_with_fixing(
+            &periods,
+            0.0,
+            self.day_count,
+            discount,
+            forecast,
+            Some(realized_rate),
+        )?;
+        let fixed = self.fixed_rate * annuity(&periods, self.day_count, discount);
+        Ok(self.payer_receiver.sign() * self.notional * (float - fixed))
+    }
+
     /// Single-curve PV (the usual OIS setup: discount and forecast are
     /// the same overnight curve).
     pub fn pv(&self, curve: &YieldCurve) -> Result<f64, RustyQLibError> {
@@ -209,6 +234,19 @@ mod tests {
         assert!(pv_lagged < pv_spot, "{pv_lagged} vs {pv_spot}");
         // but only slightly
         assert!((pv_lagged - pv_spot).abs() / pv_spot.abs() < 1e-3);
+    }
+
+    #[test]
+    fn seasoned_ois_prices_with_the_realized_rate() {
+        // priced mid first annual period: the realized compounding since
+        // Aug 2026 cannot be read off a Jan 2027 curve
+        let ois = two_year_sofr(0.04);
+        let curve = flat(0.05, d(2027, 1, 15));
+        assert!(ois.pv(&curve).is_err());
+        // with it supplied, paying 4% fixed against ~5% is in the money
+        let pv = ois.pv_with_fixing(&curve, &curve, 0.05).unwrap();
+        assert!(pv > 0.0, "{pv}");
+        assert!(pv < 50_000.0, "{pv}");
     }
 
     #[test]
