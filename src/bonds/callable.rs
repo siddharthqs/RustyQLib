@@ -156,6 +156,26 @@ impl FixedRateBond {
         };
         let t_settlement = year_fraction(settlement).max(0.0);
 
+        // an exercise scheduled on a coupon date must land on that
+        // coupon's (possibly business-day-rolled) payment event: only a
+        // merged event runs the exercise before the coupon is added, so
+        // the earned coupon stays out of both sides of the comparison.
+        // A separate event a few days earlier would leave the coupon in
+        // the continuation but not the strike — understating the strike
+        // by a full coupon.
+        let exercise_times: Vec<(NaiveDate, f64)> = self
+            .cashflows()
+            .iter()
+            .map(|cf| (cf.accrual_end, year_fraction(cf.payment_date).max(t_settlement)))
+            .collect();
+        let event_time = |date: NaiveDate| {
+            exercise_times
+                .iter()
+                .find(|&&(accrual_end, _)| accrual_end == date)
+                .map(|&(_, time)| time)
+                .unwrap_or_else(|| year_fraction(date).max(t_settlement))
+        };
+
         // events: remaining cash flows, merged with exercise decisions
         let mut events: Vec<Event> = self
             .cashflows()
@@ -194,7 +214,7 @@ impl FixedRateBond {
             let outstanding = self.outstanding_face(call.call_date);
             let strike = outstanding * call.call_price / 100.0
                 + outstanding * self.accrued_interest(call.call_date)? / 100.0;
-            upsert(year_fraction(call.call_date), &mut |event| {
+            upsert(event_time(call.call_date), &mut |event| {
                 event.call_strike = Some(strike);
             });
         }
@@ -211,7 +231,7 @@ impl FixedRateBond {
             let outstanding = self.outstanding_face(put.put_date);
             let strike = outstanding * put.put_price / 100.0
                 + outstanding * self.accrued_interest(put.put_date)? / 100.0;
-            upsert(year_fraction(put.put_date), &mut |event| {
+            upsert(event_time(put.put_date), &mut |event| {
                 event.put_strike = Some(strike);
             });
         }
@@ -232,7 +252,7 @@ impl FixedRateBond {
                 }
                 let outstanding = self.outstanding_face(cf.accrual_end);
                 let accrued = outstanding * self.accrued_interest(cf.accrual_end)? / 100.0;
-                upsert(year_fraction(cf.accrual_end), &mut |event| {
+                upsert(event_time(cf.accrual_end), &mut |event| {
                     event.make_whole = Some((make_whole.spread, outstanding, accrued));
                 });
             }
@@ -666,6 +686,47 @@ mod tests {
             }
         }
         expected += 100.0 * curve.df(yf(first_call.call_date));
+        expected /= curve.df(yf(settlement));
+        assert!(
+            (callable - expected).abs() < 0.05,
+            "{callable} vs {expected}"
+        );
+    }
+
+    #[test]
+    fn call_on_a_rolled_coupon_date_still_pays_the_coupon() {
+        // Nov 15 2026 is a Sunday, so the coupon pays Mon Nov 16. A call
+        // scheduled on the coupon date must merge with the rolled payment
+        // event — the old event split left the earned coupon inside the
+        // continuation but out of the strike, understating the strike by
+        // a full coupon (~4.5 per 100 here)
+        let bond = corporate(0.09);
+        let model = HullWhite::new(0.05, 1e-4, curve(0.04)).unwrap();
+        let settlement = d(2026, 8, 14);
+        let call = CallOption {
+            call_date: d(2026, 11, 15),
+            call_price: 100.0,
+        };
+        let callable = bond
+            .callable_dirty_price_hw(&model, &[call], 0.0, settlement)
+            .unwrap();
+        // deep in the money at negligible vol: called with certainty, so
+        // the bond is the earned Nov coupon plus the strike, both paid on
+        // the rolled date
+        let curve = model.curve();
+        let dc = curve.day_count();
+        let yf = |date: NaiveDate| dc.year_fraction(curve.reference_date(), date);
+        let mut expected = 0.0;
+        for cf in bond.cashflows() {
+            if cf.accrual_end > settlement && cf.accrual_end <= call.call_date {
+                assert!(
+                    cf.payment_date > cf.accrual_end,
+                    "the test needs a rolled coupon"
+                );
+                expected += cf.amount * curve.df(yf(cf.payment_date));
+            }
+        }
+        expected += 100.0 * curve.df(yf(d(2026, 11, 16)));
         expected /= curve.df(yf(settlement));
         assert!(
             (callable - expected).abs() < 0.05,
