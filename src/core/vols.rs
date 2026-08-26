@@ -111,6 +111,7 @@ pub enum VolError {
     NonIncreasingTimes,
     NonIncreasingAxis,
     DeltaOutOfRange(f64),
+    NonPositiveStrike(f64),
 }
 
 impl fmt::Display for VolError {
@@ -128,6 +129,9 @@ impl fmt::Display for VolError {
             }
             VolError::DeltaOutOfRange(d) => {
                 write!(f, "forward call delta must be in (0,1), got {d}")
+            }
+            VolError::NonPositiveStrike(x) => {
+                write!(f, "strike/moneyness must be > 0 and finite, got {x}")
             }
         }
     }
@@ -355,7 +359,7 @@ impl VolSurface {
         reference_date: NaiveDate,
         day_count: DayCountConvention,
     ) -> Result<Self, VolError> {
-        if vol <= 0.0 {
+        if !(vol.is_finite() && vol > 0.0) {
             return Err(VolError::NonPositiveVol(vol));
         }
         Ok(VolSurface {
@@ -486,9 +490,16 @@ impl VolSurface {
             if smile.is_empty() {
                 return Err(VolError::Empty);
             }
-            for &(_, v) in smile {
-                if v <= 0.0 {
+            for &(x, v) in smile {
+                if !(v.is_finite() && v > 0.0) {
                     return Err(VolError::NonPositiveVol(v));
+                }
+                // coordinates must be finite, and positive when they
+                // quote an absolute strike or a forward moneyness
+                if !x.is_finite()
+                    || (!matches!(coordinate, SmileCoordinate::LogMoneyness) && x <= 0.0)
+                {
+                    return Err(VolError::NonPositiveStrike(x));
                 }
             }
             if smile.windows(2).any(|w| w[1].0 <= w[0].0) {
@@ -690,6 +701,10 @@ impl VolSurface {
     /// variance at the fixed smile coordinate per
     /// [`Self::time_interpolation`], flat vol before the first and after
     /// the last expiry pillar.
+    ///
+    /// Degenerate queries (NaN `t`, or a non-positive strike/forward on a
+    /// moneyness or log-moneyness surface) return NaN rather than
+    /// panicking in the pillar bracketing.
     pub fn vol(&self, strike: f64, forward: f64, t: f64) -> f64 {
         match &self.data {
             SurfaceData::Flat(v) => *v,
@@ -698,6 +713,9 @@ impl VolSurface {
                 smiles,
                 coord,
             } => {
+                if t.is_nan() {
+                    return f64::NAN;
+                }
                 let x = match coord {
                     SmileCoordinate::Strike => strike,
                     SmileCoordinate::Moneyness => strike / forward,
@@ -820,6 +838,14 @@ impl VolSurface {
     ) -> Result<Self, VolError> {
         let times = Self::resolve_expiries(expiries, reference_date, day_count)?;
         Self::validate_grid(&times, axis, vols)?;
+        // coordinates must be finite, and positive when they quote an
+        // absolute strike or a forward moneyness (a NaN would also slip
+        // past the monotonicity check below, every comparison being false)
+        for &x in axis {
+            if !x.is_finite() || (!matches!(coord, SmileCoordinate::LogMoneyness) && x <= 0.0) {
+                return Err(VolError::NonPositiveStrike(x));
+            }
+        }
         if axis.windows(2).any(|w| w[1] <= w[0]) {
             return Err(VolError::NonIncreasingAxis);
         }
@@ -857,7 +883,10 @@ impl VolSurface {
             })
             .collect();
         for &t in &times {
-            if t <= 0.0 {
+            // written so NaN fails too: `t <= 0.0` is false for NaN and
+            // would let it construct a surface whose queries panic in the
+            // pillar bracketing
+            if !(t.is_finite() && t > 0.0) {
                 return Err(VolError::NonPositiveTime(t));
             }
         }
@@ -885,7 +914,7 @@ impl VolSurface {
                 });
             }
             for &v in row {
-                if v <= 0.0 {
+                if !(v.is_finite() && v > 0.0) {
                     return Err(VolError::NonPositiveVol(v));
                 }
             }
@@ -1208,6 +1237,105 @@ mod tests {
         )
         .unwrap();
         assert!(VolSurface::from_input(&delta, asof()).is_ok());
+    }
+
+    #[test]
+    fn non_finite_inputs_are_rejected_and_degenerate_queries_poison() {
+        let dc = DayCountConvention::Act365;
+        // NaN vols, expiries and strikes all failed the old
+        // `<= 0.0`-style checks (every comparison against NaN is false)
+        assert!(matches!(
+            VolSurface::flat(f64::NAN, asof(), dc),
+            Err(VolError::NonPositiveVol(_))
+        ));
+        assert!(matches!(
+            VolSurface::from_strike_grid(
+                &[Tenor::YearFraction(1.0)],
+                &[100.0],
+                &[vec![f64::NAN]],
+                asof(),
+                dc
+            ),
+            Err(VolError::NonPositiveVol(_))
+        ));
+        assert!(matches!(
+            VolSurface::from_strike_grid(
+                &[Tenor::YearFraction(f64::NAN)],
+                &[100.0],
+                &[vec![0.2]],
+                asof(),
+                dc
+            ),
+            Err(VolError::NonPositiveTime(_))
+        ));
+        assert!(matches!(
+            VolSurface::from_strike_grid(
+                &[Tenor::YearFraction(1.0)],
+                &[100.0, f64::NAN],
+                &[vec![0.2, 0.2]],
+                asof(),
+                dc
+            ),
+            Err(VolError::NonPositiveStrike(_))
+        ));
+        // quoted strikes and moneyness must be positive: a zero strike
+        // used to make the diagnostics' Black call NaN silently
+        assert!(matches!(
+            VolSurface::from_strike_grid(
+                &[Tenor::YearFraction(1.0)],
+                &[0.0, 100.0],
+                &[vec![0.2, 0.2]],
+                asof(),
+                dc
+            ),
+            Err(VolError::NonPositiveStrike(_))
+        ));
+        assert!(matches!(
+            VolSurface::from_strike_smiles(
+                &[Tenor::YearFraction(1.0)],
+                &[vec![(-5.0, 0.2), (100.0, 0.2)]],
+                asof(),
+                dc
+            ),
+            Err(VolError::NonPositiveStrike(_))
+        ));
+        // log-moneyness coordinates may be negative, but not NaN
+        assert!(VolSurface::from_smiles(
+            &[Tenor::YearFraction(1.0)],
+            &[vec![(-0.5, 0.2), (0.5, 0.2)]],
+            SmileCoordinate::LogMoneyness,
+            asof(),
+            dc
+        )
+        .is_ok());
+        assert!(matches!(
+            VolSurface::from_smiles(
+                &[Tenor::YearFraction(1.0)],
+                &[vec![(f64::NAN, 0.2), (0.5, 0.2)]],
+                SmileCoordinate::LogMoneyness,
+                asof(),
+                dc
+            ),
+            Err(VolError::NonPositiveStrike(_))
+        ));
+
+        // degenerate queries on a log-moneyness surface return NaN
+        // instead of panicking with an index underflow (a negative
+        // forward is reachable through a large absolute spot shock)
+        let smile = vec![(-0.5, 0.22), (0.0, 0.2), (0.5, 0.21)];
+        let s = VolSurface::from_smiles(
+            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.5)],
+            &[smile.clone(), smile],
+            SmileCoordinate::LogMoneyness,
+            asof(),
+            dc,
+        )
+        .unwrap();
+        assert!(s.vol(-50.0, 100.0, 1.0).is_nan());
+        assert!(s.vol(100.0, -100.0, 1.0).is_nan());
+        assert!(s.vol(100.0, 100.0, f64::NAN).is_nan());
+        // and a sane query is untouched
+        assert!((s.vol(100.0, 100.0, 1.0) - 0.2).abs() < 1e-12);
     }
 
     #[test]

@@ -9,10 +9,16 @@ pub fn lerp(a: f64, b: f64, w: f64) -> f64 {
 /// Bracket `x` in the sorted pillar grid `xs`: returns `(idx, w)` where
 /// `xs[idx - 1] <= x <= xs[idx]` and `w` is the weight of the upper
 /// pillar. `x` is clamped to the grid, so `idx` is always in
-/// `[1, xs.len() - 1]` and `w` in `[0, 1]`.
+/// `[1, xs.len() - 1]` and `w` in `[0, 1]`. A NaN query returns a NaN
+/// weight (which poisons the interpolated value) rather than panicking —
+/// every comparison against NaN is false, so `partition_point` would
+/// otherwise send `idx - 1` out of bounds.
 pub fn bracket(xs: &[f64], x: f64) -> (usize, f64) {
     assert!(xs.len() >= 2, "need at least two pillars");
     let n = xs.len();
+    if x.is_nan() {
+        return (1, f64::NAN);
+    }
     if x <= xs[0] {
         return (1, 0.0);
     }
@@ -33,10 +39,13 @@ pub fn linear_interp(xs: &[f64], ys: &[f64], x: f64) -> f64 {
 }
 
 /// [`linear_interp`] over `(x, y)` pairs sorted by `x` — the smile
-/// storage shape.
+/// storage shape. A NaN query returns NaN rather than panicking.
 pub fn interp_pairs(points: &[(f64, f64)], x: f64) -> f64 {
     assert!(points.len() >= 2, "need at least two points");
     let n = points.len();
+    if x.is_nan() {
+        return f64::NAN;
+    }
     if x <= points[0].0 {
         return points[0].1;
     }
@@ -72,5 +81,21 @@ mod tests {
         let (idx, w) = bracket(&xs, 2.0);
         assert_eq!(idx, 2);
         assert!((w - 0.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn nan_queries_poison_instead_of_panicking() {
+        // partition_point returns 0 for NaN (every comparison is false),
+        // so the old code underflowed idx - 1 out of bounds
+        let xs = [0.0, 1.0, 3.0];
+        let ys = [10.0, 20.0, 40.0];
+        let (idx, w) = bracket(&xs, f64::NAN);
+        assert_eq!(idx, 1);
+        assert!(w.is_nan());
+        assert!(linear_interp(&xs, &ys, f64::NAN).is_nan());
+        assert!(interp_pairs(&[(1.0, 10.0), (2.0, 20.0)], f64::NAN).is_nan());
+        // infinities clamp to the wings as before
+        assert_eq!(linear_interp(&xs, &ys, f64::INFINITY), 40.0);
+        assert_eq!(linear_interp(&xs, &ys, f64::NEG_INFINITY), 10.0);
     }
 }

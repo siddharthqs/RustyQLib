@@ -664,7 +664,7 @@ impl YieldCurve {
             });
         }
         for &t in tenors {
-            if t <= 0.0 {
+            if !(t.is_finite() && t > 0.0) {
                 return Err(CurveError::NonPositiveTime(t));
             }
         }
@@ -734,13 +734,17 @@ impl YieldCurve {
         mut dates: Vec<Option<NaiveDate>>,
     ) -> Result<Self, CurveError> {
         for &t in &times {
-            if t <= 0.0 {
+            // written so NaN fails: `t <= 0.0` is false for NaN and would
+            // let it construct a curve whose every query returns NaN (or
+            // panics in the pillar bracketing)
+            if !(t.is_finite() && t > 0.0) {
                 return Err(CurveError::NonPositiveTime(t));
             }
         }
         for &df in &dfs {
-            // dfs > 1 are allowed (negative rates); dfs <= 0 are not
-            if df <= 0.0 {
+            // dfs > 1 are allowed (negative rates); dfs <= 0, NaN and
+            // +inf (e.g. simple compounding with z*t = -1) are not
+            if !(df.is_finite() && df > 0.0) {
                 return Err(CurveError::NonPositiveDf(df));
             }
         }
@@ -809,6 +813,64 @@ mod tests {
             Compounding::Continuous,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn non_finite_pillars_are_rejected_and_nan_queries_poison() {
+        let dc = DayCountConvention::Act365;
+        let comp = Compounding::Continuous;
+        let interp = InterpolationMethod::LogLinearDf;
+        // NaN discount factors, rates and pillar times all failed the
+        // old `<= 0.0`-style checks "the safe way" (every comparison
+        // against NaN is false) — they must be rejected loudly
+        assert!(matches!(
+            YieldCurve::from_discount_factors(
+                &[Tenor::YearFraction(1.0)],
+                &[f64::NAN],
+                asof(),
+                dc,
+                comp,
+                interp
+            ),
+            Err(CurveError::NonPositiveDf(_))
+        ));
+        assert!(matches!(
+            YieldCurve::from_zero_rates(
+                &[Tenor::YearFraction(1.0)],
+                &[f64::NAN],
+                asof(),
+                dc,
+                comp,
+                interp
+            ),
+            Err(CurveError::NonPositiveDf(_))
+        ));
+        assert!(matches!(
+            YieldCurve::from_discount_factors(
+                &[Tenor::YearFraction(f64::NAN)],
+                &[0.99],
+                asof(),
+                dc,
+                comp,
+                interp
+            ),
+            Err(CurveError::NonPositiveTime(_))
+        ));
+        // simple compounding at z*t = -1 gives df = 1/0 = +inf, which
+        // the old `df <= 0.0` check accepted
+        assert!(matches!(
+            YieldCurve::from_zero_rates(
+                &[Tenor::YearFraction(0.5)],
+                &[-2.0],
+                asof(),
+                dc,
+                Compounding::Simple,
+                interp
+            ),
+            Err(CurveError::NonPositiveDf(_))
+        ));
+        // a NaN query returns NaN instead of panicking in the bracketing
+        assert!(flat_5pct().df(f64::NAN).is_nan());
     }
 
     #[test]
