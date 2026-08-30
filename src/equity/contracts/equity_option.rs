@@ -466,6 +466,16 @@ impl EquityOption {
                     }
                 }
             }
+            if matches!(self.engine, PricingEngine::BlackScholes) {
+                if let Some(barrier) = self.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+                    if barrier.barrier2.is_some() && barrier.rebate != 0.0 {
+                        return unsupported(
+                            "the analytic double-barrier closed form has no rebate term; \
+                             use the MonteCarlo engine (rebate paid at expiry)",
+                        );
+                    }
+                }
+            }
         }
         // ── the model × engine table ────────────────────────────────────
         // One exhaustive match over every (Model, PricingEngine) pair —

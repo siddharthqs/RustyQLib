@@ -176,15 +176,22 @@ impl SviParams {
     }
 
     /// Calibrate to one expiry's quotes `(k, implied vol)` with the
-    /// default method ([`SviCalibration::QuasiExplicit`]).
-    pub fn calibrate(quotes: &[(f64, f64)], t: f64) -> SviFit {
+    /// default method ([`SviCalibration::QuasiExplicit`]). Invalid
+    /// input (fewer than five quotes, non-finite quotes, non-positive
+    /// expiry) is a returned [`invalid_input`](RustyQLibError::invalid_input)
+    /// error.
+    pub fn calibrate(quotes: &[(f64, f64)], t: f64) -> Result<SviFit, RustyQLibError> {
         Self::calibrate_with(quotes, t, SviCalibration::default())
     }
 
     /// Calibrate to one expiry's quotes `(k, implied vol)` on
     /// total-variance residuals with the chosen [`SviCalibration`]
     /// (`rmse` reported in implied vol).
-    pub fn calibrate_with(quotes: &[(f64, f64)], t: f64, method: SviCalibration) -> SviFit {
+    pub fn calibrate_with(
+        quotes: &[(f64, f64)],
+        t: f64,
+        method: SviCalibration,
+    ) -> Result<SviFit, RustyQLibError> {
         Self::calibrate_weighted(quotes, t, method, &vec![1.0; quotes.len()])
     }
 
@@ -196,33 +203,58 @@ impl SviParams {
     /// To weight *implied-vol* errors by `u_i` instead (vega or
     /// spread weighting), pass `weights[i] = u_i / (2 v_i t)^2` — the
     /// delta-method conversion between the two residual spaces.
-    /// Weights must be finite and non-negative with a positive sum.
+    /// Weights must be finite and non-negative with at least five
+    /// positive entries; violations are returned as
+    /// [`invalid_input`](RustyQLibError::invalid_input) errors.
     pub fn calibrate_weighted(
         quotes: &[(f64, f64)],
         t: f64,
         method: SviCalibration,
         weights: &[f64],
-    ) -> SviFit {
-        assert!(
-            quotes.len() >= 5,
-            "SVI has five parameters; need at least five quotes"
-        );
-        assert!(t > 0.0);
-        assert_eq!(
-            weights.len(),
-            quotes.len(),
-            "one weight per quote (got {} weights for {} quotes)",
-            weights.len(),
-            quotes.len()
-        );
-        assert!(
-            weights.iter().all(|w| w.is_finite() && *w >= 0.0),
-            "weights must be finite and non-negative"
-        );
-        assert!(
-            weights.iter().filter(|w| **w > 0.0).count() >= 5,
-            "a zero weight excludes its quote: need at least five with positive weight"
-        );
+    ) -> Result<SviFit, RustyQLibError> {
+        if quotes.len() < 5 {
+            return Err(RustyQLibError::invalid_input(
+                "svi calibration",
+                format!(
+                    "SVI has five parameters; need at least five quotes (got {})",
+                    quotes.len()
+                ),
+            ));
+        }
+        if quotes.iter().any(|&(k, v)| !k.is_finite() || !v.is_finite()) {
+            return Err(RustyQLibError::invalid_input(
+                "svi calibration",
+                "quotes must be finite in log-moneyness and implied vol",
+            ));
+        }
+        if !t.is_finite() || t <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "svi calibration",
+                format!("expiry time must be positive and finite (got {t})"),
+            ));
+        }
+        if weights.len() != quotes.len() {
+            return Err(RustyQLibError::invalid_input(
+                "svi calibration",
+                format!(
+                    "one weight per quote (got {} weights for {} quotes)",
+                    weights.len(),
+                    quotes.len()
+                ),
+            ));
+        }
+        if weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
+            return Err(RustyQLibError::invalid_input(
+                "svi calibration",
+                "weights must be finite and non-negative",
+            ));
+        }
+        if weights.iter().filter(|w| **w > 0.0).count() < 5 {
+            return Err(RustyQLibError::invalid_input(
+                "svi calibration",
+                "a zero weight excludes its quote: need at least five with positive weight",
+            ));
+        }
         let weight_sum: f64 = weights.iter().sum();
         let w_target: Vec<(f64, f64)> = quotes.iter().map(|&(k, v)| (k, v * v * t)).collect();
         let (params, iterations, converged) = match method {
@@ -240,12 +272,12 @@ impl SviParams {
             .sum::<f64>()
             / weight_sum)
             .sqrt();
-        SviFit {
+        Ok(SviFit {
             params,
             rmse,
             iterations,
             converged,
-        }
+        })
     }
 
     /// Levenberg-Marquardt on the total-variance targets (residuals
@@ -604,7 +636,7 @@ impl SviSurfaceFit {
                     (k, vol)
                 })
                 .collect();
-            let fit = SviParams::calibrate_with(&quotes, t, method);
+            let fit = SviParams::calibrate_with(&quotes, t, method)?;
             let (k_lo, k_hi) = quotes
                 .iter()
                 .fold((f64::MAX, f64::MIN), |(lo, hi), &(k, _)| {
@@ -1058,16 +1090,47 @@ impl Ssvi {
     /// Calibrate `(rho, eta, gamma)` to surface quotes `(t, k, vol)`
     /// given the ATM total-variance pillars, by Levenberg-Marquardt on
     /// total-variance residuals (`tanh` / `exp` / logistic transforms
-    /// keep every trial admissible).
+    /// keep every trial admissible). Invalid input — fewer than three
+    /// quotes, non-finite quotes, no or degenerate theta pillars — is a
+    /// returned [`invalid_input`](RustyQLibError::invalid_input) error.
     pub fn calibrate(
         quotes: &[(f64, f64, f64)],
         theta_pillars: &[(f64, f64)],
         start: (f64, f64, f64),
-    ) -> SsviFit {
-        assert!(
-            quotes.len() >= 3,
-            "need at least three quotes for three parameters"
-        );
+    ) -> Result<SsviFit, RustyQLibError> {
+        if quotes.len() < 3 {
+            return Err(RustyQLibError::invalid_input(
+                "ssvi calibration",
+                format!(
+                    "need at least three quotes for three parameters (got {})",
+                    quotes.len()
+                ),
+            ));
+        }
+        if quotes
+            .iter()
+            .any(|&(t, k, v)| !t.is_finite() || t <= 0.0 || !k.is_finite() || !v.is_finite())
+        {
+            return Err(RustyQLibError::invalid_input(
+                "ssvi calibration",
+                "quotes must have positive finite expiry times and finite log-moneyness and vol",
+            ));
+        }
+        if theta_pillars.is_empty() {
+            return Err(RustyQLibError::invalid_input(
+                "ssvi calibration",
+                "need at least one theta pillar",
+            ));
+        }
+        if theta_pillars
+            .iter()
+            .any(|&(t, w)| !t.is_finite() || t <= 0.0 || !w.is_finite())
+        {
+            return Err(RustyQLibError::invalid_input(
+                "ssvi calibration",
+                "theta pillars must have positive finite times and finite variances",
+            ));
+        }
         let make = |u: &[f64]| Ssvi {
             rho: u[0].tanh(),
             eta: u[1].exp(),
@@ -1095,12 +1158,12 @@ impl Ssvi {
             .sum::<f64>()
             / quotes.len() as f64)
             .sqrt();
-        SsviFit {
+        Ok(SsviFit {
             surface,
             rmse,
             iterations: fit.iterations,
             converged: fit.converged,
-        }
+        })
     }
 
     /// Sample the SSVI surface into the canonical pricing
@@ -1241,7 +1304,7 @@ impl SsviSurfaceFit {
                 pillars[i].1 = pillars[i - 1].1;
             }
         }
-        let fit = Ssvi::calibrate(&quotes, &pillars, (-0.5, 0.5, 0.5));
+        let fit = Ssvi::calibrate(&quotes, &pillars, (-0.5, 0.5, 0.5))?;
         Ok(SsviSurfaceFit {
             reference_date: surface.reference_date(),
             day_count: surface.day_count(),
@@ -1413,7 +1476,7 @@ mod tests {
             SviCalibration::QuasiExplicitThenLm,
             SviCalibration::LevenbergMarquardt,
         ] {
-            let fit = SviParams::calibrate_with(&quotes, t, method);
+            let fit = SviParams::calibrate_with(&quotes, t, method).unwrap();
             assert!(
                 fit.rmse < 1e-6,
                 "{method:?}: vol rmse {} params {:?}",
@@ -1431,9 +1494,48 @@ mod tests {
             }
         }
         // the default is the quasi-explicit method
-        let default = SviParams::calibrate(&quotes, t);
-        let qe = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit);
+        let default = SviParams::calibrate(&quotes, t).unwrap();
+        let qe = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit).unwrap();
         assert_eq!(default.params, qe.params);
+    }
+
+    #[test]
+    fn svi_calibration_rejects_bad_input_instead_of_panicking() {
+        let truth = sane();
+        let quotes: Vec<(f64, f64)> = (0..8)
+            .map(|i| -0.3 + i as f64 * 0.09)
+            .map(|k| (k, truth.vol(k, 1.0)))
+            .collect();
+        // too few quotes (five parameters)
+        assert!(SviParams::calibrate(&quotes[..4], 1.0).is_err());
+        assert!(SviParams::calibrate(&[], 1.0).is_err());
+        // non-positive or non-finite expiry
+        assert!(SviParams::calibrate(&quotes, 0.0).is_err());
+        assert!(SviParams::calibrate(&quotes, -0.5).is_err());
+        assert!(SviParams::calibrate(&quotes, f64::NAN).is_err());
+        // non-finite quotes
+        let mut bad = quotes.clone();
+        bad[2].1 = f64::NAN;
+        assert!(SviParams::calibrate(&bad, 1.0).is_err());
+        bad[2].1 = 0.2;
+        bad[3].0 = f64::INFINITY;
+        assert!(SviParams::calibrate(&bad, 1.0).is_err());
+        // bad weights: mismatched length, negative, non-finite, and
+        // fewer than five positive entries
+        let m = SviCalibration::QuasiExplicit;
+        assert!(SviParams::calibrate_weighted(&quotes, 1.0, m, &[1.0; 3]).is_err());
+        let mut w = vec![1.0; quotes.len()];
+        w[1] = -0.5;
+        assert!(SviParams::calibrate_weighted(&quotes, 1.0, m, &w).is_err());
+        w[1] = f64::NAN;
+        assert!(SviParams::calibrate_weighted(&quotes, 1.0, m, &w).is_err());
+        let mut sparse = vec![0.0; quotes.len()];
+        for wi in sparse.iter_mut().take(4) {
+            *wi = 1.0;
+        }
+        assert!(SviParams::calibrate_weighted(&quotes, 1.0, m, &sparse).is_err());
+        // and the untouched quote set still calibrates
+        assert!(SviParams::calibrate(&quotes, 1.0).is_ok());
     }
 
     #[test]
@@ -1452,7 +1554,7 @@ mod tests {
             .map(|i| -0.6 + i as f64 * 0.1)
             .map(|k| (k, truth.vol(k, t) + 0.004 * (17.0 * k).sin()))
             .collect();
-        let fit = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit);
+        let fit = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit).unwrap();
         let p = fit.params;
         assert!(p.validate().is_ok(), "{p:?}");
         assert!(p.a >= 0.0, "a {}", p.a);
@@ -1477,8 +1579,9 @@ mod tests {
             SviCalibration::QuasiExplicit,
             SviCalibration::LevenbergMarquardt,
         ] {
-            let plain = SviParams::calibrate_with(&quotes, t, method);
-            let ones = SviParams::calibrate_weighted(&quotes, t, method, &vec![1.0; quotes.len()]);
+            let plain = SviParams::calibrate_with(&quotes, t, method).unwrap();
+            let ones = SviParams::calibrate_weighted(&quotes, t, method, &vec![1.0; quotes.len()])
+                .unwrap();
             assert_eq!(plain.params, ones.params, "{method:?}");
             assert_eq!(plain.rmse, ones.rmse, "{method:?}");
         }
@@ -1506,10 +1609,10 @@ mod tests {
             SviCalibration::QuasiExplicitThenLm,
             SviCalibration::LevenbergMarquardt,
         ] {
-            let polluted = SviParams::calibrate_with(&quotes, t, method);
+            let polluted = SviParams::calibrate_with(&quotes, t, method).unwrap();
             let mut weights = vec![1.0; quotes.len()];
             weights[7] = 0.0;
-            let cleaned = SviParams::calibrate_weighted(&quotes, t, method, &weights);
+            let cleaned = SviParams::calibrate_weighted(&quotes, t, method, &weights).unwrap();
             // the outlier drags the unweighted fit; zero-weighting it
             // recovers the generating smile on the clean quotes
             assert!(
@@ -1539,8 +1642,9 @@ mod tests {
                 .map(|&(k, v)| (p.total_variance(k) - v * v * t).powi(2))
                 .sum()
         };
-        let qe = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit);
-        let polished = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicitThenLm);
+        let qe = SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicit).unwrap();
+        let polished =
+            SviParams::calibrate_with(&quotes, t, SviCalibration::QuasiExplicitThenLm).unwrap();
         // LM only accepts cost-decreasing steps from the QE start
         assert!(
             sse_w(&polished.params) <= sse_w(&qe.params) * (1.0 + 1e-12),
@@ -1731,7 +1835,7 @@ mod tests {
                 quotes.push((t, k, (truth.total_variance(k, t) / t).sqrt()));
             }
         }
-        let fit = Ssvi::calibrate(&quotes, &truth.theta_pillars, (-0.2, 0.5, 0.5));
+        let fit = Ssvi::calibrate(&quotes, &truth.theta_pillars, (-0.2, 0.5, 0.5)).unwrap();
         assert!(fit.rmse < 1e-8, "vol rmse {}", fit.rmse);
         assert!(
             (fit.surface.rho - truth.rho).abs() < 1e-4,
@@ -1744,6 +1848,38 @@ mod tests {
             fit.surface.eta
         );
         assert!(fit.surface.validate().is_ok());
+    }
+
+    #[test]
+    fn ssvi_calibration_rejects_bad_input_instead_of_panicking() {
+        let truth = ssvi();
+        let mut quotes = Vec::new();
+        for &(t, _) in &truth.theta_pillars {
+            for i in 0..5 {
+                let k = -0.2 + i as f64 * 0.1;
+                quotes.push((t, k, (truth.total_variance(k, t) / t).sqrt()));
+            }
+        }
+        let start = (-0.2, 0.5, 0.5);
+        // too few quotes (three parameters)
+        assert!(Ssvi::calibrate(&quotes[..2], &truth.theta_pillars, start).is_err());
+        // non-finite or non-positive quote entries
+        let mut bad = quotes.clone();
+        bad[0].0 = 0.0; // expiry
+        assert!(Ssvi::calibrate(&bad, &truth.theta_pillars, start).is_err());
+        bad[0].0 = 0.25;
+        bad[1].1 = f64::NAN; // log-moneyness
+        assert!(Ssvi::calibrate(&bad, &truth.theta_pillars, start).is_err());
+        bad[1].1 = 0.0;
+        bad[2].2 = f64::INFINITY; // vol
+        assert!(Ssvi::calibrate(&bad, &truth.theta_pillars, start).is_err());
+        // missing or degenerate theta pillars (an empty list used to
+        // panic on the first pillar lookup)
+        assert!(Ssvi::calibrate(&quotes, &[], start).is_err());
+        assert!(Ssvi::calibrate(&quotes, &[(0.0, 0.02)], start).is_err());
+        assert!(Ssvi::calibrate(&quotes, &[(1.0, f64::NAN)], start).is_err());
+        // and the untouched inputs still calibrate
+        assert!(Ssvi::calibrate(&quotes, &truth.theta_pillars, start).is_ok());
     }
 
     // ── SSVI derivatives and local volatility ───────────────────────────

@@ -1589,6 +1589,27 @@ impl EquityOptionBuilder {
             model: self.model,
             lv_grids: Default::default(),
         };
+        // "builds => prices" also means no pricing-time panics: two
+        // configurations the engine-support table admits would only fail
+        // via an assert deep inside the pricers, so refuse them here with
+        // the offending field named.
+        //
+        // The escrow model prices every payoff off S - PV(cash dividends):
+        // dividends whose escrow value swallows the whole spot leave no
+        // positive effective spot to price (`effective_spot` asserts).
+        // `BumpedMarket::base` reads the market bit for bit, so this is
+        // exactly the escrow value pricing will use.
+        let escrowed = crate::equity::bump::BumpedMarket::base(&option.market)
+            .pv_cash_dividends(maturity_date);
+        if spot - escrowed <= 0.0 {
+            return invalid(
+                "cash_dividends",
+                format!(
+                    "the escrowed value of the cash dividends ({escrowed:.4}) must stay below \
+                     the spot ({spot}): the effective (escrowed) spot would not be positive"
+                ),
+            );
+        }
         // "builds => prices": refuse engine/model/payoff combinations here
         // rather than at pricing time
         option.check_engine_support()?;
@@ -1883,6 +1904,107 @@ mod tests {
             matches!(result, Err(RustyQLibError::UnsupportedEngine(_))),
             "at-hit rebate on Monte Carlo must be refused at build()"
         );
+    }
+
+    #[test]
+    fn rebated_double_barrier_is_refused_on_the_analytic_engine_at_build() {
+        use crate::core::errors::RustyQLibError;
+        let refused = |r: Result<EquityOption, RustyQLibError>| match r {
+            Err(RustyQLibError::UnsupportedEngine(msg)) => msg,
+            other => panic!(
+                "expected UnsupportedEngine, got {:?}",
+                other.map(|_| "an option")
+            ),
+        };
+        let base = || {
+            EquityOptionBuilder::new()
+                .spot(100.0)
+                .strike(100.0)
+                .flat_vol(0.2)
+                .flat_rate(0.05)
+                .years_to_maturity(1.0)
+                .double_barrier(PutOrCall::Call, KnockType::Out, 80.0, 120.0)
+        };
+        // formerly built fine and panicked inside the analytic barrier
+        // pricer at npv()/price() time (the closed form has no rebate term)
+        assert!(refused(
+            base()
+                .barrier_rebate(2.0, false)
+                .engine(Engine::BlackScholes)
+                .build()
+        )
+        .contains("rebate term"));
+        // the custom-payoff escape hatch reaches the same check
+        assert!(refused(
+            EquityOptionBuilder::new()
+                .spot(100.0)
+                .strike(100.0)
+                .flat_vol(0.2)
+                .flat_rate(0.05)
+                .years_to_maturity(1.0)
+                .payoff(Box::new(BarrierPayoff {
+                    put_or_call: PutOrCall::Call,
+                    exercise_style: ContractStyle::European,
+                    direction: BarrierDirection::Down,
+                    knock: KnockType::Out,
+                    barrier: 80.0,
+                    barrier2: Some(120.0),
+                    rebate: 2.0,
+                    rebate_at_hit: false,
+                }))
+                .engine(Engine::BlackScholes)
+                .build()
+        )
+        .contains("rebate term"));
+        // the same contract prices on Monte Carlo (at-expiry rebate)
+        base()
+            .barrier_rebate(2.0, false)
+            .engine(Engine::MonteCarlo)
+            .build()
+            .expect("rebated double barrier must build on MonteCarlo");
+        // and without the rebate the analytic closed form still prices
+        let plain = base()
+            .engine(Engine::BlackScholes)
+            .build()
+            .expect("zero-rebate double barrier must build analytically");
+        assert!(plain.npv().is_finite());
+    }
+
+    #[test]
+    fn cash_dividends_exceeding_the_spot_are_refused_at_build() {
+        use crate::core::errors::RustyQLibError;
+        let date = |y: i32, m: u32, d: u32| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let build = |div_date: NaiveDate, amount: f64| {
+            EquityOptionBuilder::new()
+                .spot(100.0)
+                .strike(100.0)
+                .flat_vol(0.2)
+                .flat_rate(0.05)
+                .valuation_date(date(2026, 1, 1))
+                .maturity_date(date(2027, 1, 1))
+                .cash_dividend(div_date, amount)
+                .vanilla(PutOrCall::Put)
+                .build()
+        };
+        let field = |r: Result<EquityOption, RustyQLibError>| match r {
+            Err(RustyQLibError::InvalidInput { field, .. }) => field,
+            other => panic!(
+                "expected InvalidInput, got {:?}",
+                other.map(|_| "an option")
+            ),
+        };
+        // formerly built fine and panicked at pricing time via the
+        // effective-spot assert
+        assert_eq!(field(build(date(2026, 7, 1), 150.0)), "cash_dividends");
+        // the boundary is the *escrow* value: 103 paid mid-year discounts
+        // to ~100.5 > spot, so it is refused too
+        assert_eq!(field(build(date(2026, 7, 1), 103.0)), "cash_dividends");
+        // a large but survivable dividend still builds and prices
+        let ok = build(date(2026, 7, 1), 95.0).expect("escrowed spot stays positive");
+        assert!(ok.npv().is_finite());
+        // dividends outside the option's life carry no escrow: same
+        // filter pricing applies (valuation < date <= maturity)
+        build(date(2027, 6, 1), 150.0).expect("a dividend after maturity is not escrowed");
     }
 
     #[test]

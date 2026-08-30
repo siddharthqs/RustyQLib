@@ -111,7 +111,7 @@ fn main() {
             (k, sp.vol(forward, k, t) + noise)
         })
         .collect();
-    let fit = SabrParams::calibrate(&quotes, forward, t, 1.0);
+    let fit = SabrParams::calibrate(&quotes, forward, t, 1.0).expect("SABR calibration failed");
     println!(
         "  truth:  alpha={:.4} rho={:.3} nu={:.3}",
         sp.alpha, sp.rho, sp.nu

@@ -21,6 +21,7 @@
 //! market ([`EquityOption::price_bumped`]), so `unexplained` is a true
 //! residual — third-order terms and any cross terms not in the expansion.
 
+use crate::core::errors::RustyQLibError;
 use crate::core::traits::Instrument;
 use crate::equity::bump::{Bump, BumpedMarket};
 use crate::equity::vanilla_option::EquityOption;
@@ -84,18 +85,27 @@ impl EquityPortfolio {
 
     /// Add `quantity` contracts of `option` (negative = short). All
     /// positions must share one underlying; the first position pins the
-    /// symbol and a mismatch panics — this book aggregates risk against a
-    /// single spot.
-    pub fn add(&mut self, option: EquityOption, quantity: f64) -> &mut Self {
+    /// symbol and a mismatch is an error — this book aggregates risk
+    /// against a single spot. Returns the book for chaining, e.g.
+    /// `book.add(a, 1.0)?.add(b, -1.0)?`.
+    pub fn add(
+        &mut self,
+        option: EquityOption,
+        quantity: f64,
+    ) -> Result<&mut Self, RustyQLibError> {
         if let Some(first) = self.positions.first() {
-            assert_eq!(
-                first.option.base.symbol, option.base.symbol,
-                "EquityPortfolio aggregates one underlying: book is '{}', position is '{}'",
-                first.option.base.symbol, option.base.symbol
-            );
+            if first.option.base.symbol != option.base.symbol {
+                return Err(RustyQLibError::invalid_input(
+                    "symbol",
+                    format!(
+                        "EquityPortfolio aggregates one underlying: book is '{}', position is '{}'",
+                        first.option.base.symbol, option.base.symbol
+                    ),
+                ));
+            }
         }
         self.positions.push(Position { option, quantity });
-        self
+        Ok(self)
     }
 
     pub fn len(&self) -> usize {
@@ -205,10 +215,13 @@ mod tests {
     fn aggregation_is_quantity_weighted() {
         // 1 + 1 of the same option equals 2 of it
         let mut two_singles = EquityPortfolio::new();
-        two_singles.add(option(PutOrCall::Call, 100.0), 1.0);
-        two_singles.add(option(PutOrCall::Call, 100.0), 1.0);
+        two_singles
+            .add(option(PutOrCall::Call, 100.0), 1.0)
+            .unwrap()
+            .add(option(PutOrCall::Call, 100.0), 1.0)
+            .unwrap();
         let mut one_double = EquityPortfolio::new();
-        one_double.add(option(PutOrCall::Call, 100.0), 2.0);
+        one_double.add(option(PutOrCall::Call, 100.0), 2.0).unwrap();
         let (a, b) = (two_singles.greeks(), one_double.greeks());
         assert!((a.npv - b.npv).abs() < 1e-12);
         assert!((a.delta - b.delta).abs() < 1e-12);
@@ -216,8 +229,8 @@ mod tests {
 
         // long + short cancels exactly
         let mut flat = EquityPortfolio::new();
-        flat.add(option(PutOrCall::Call, 100.0), 5.0);
-        flat.add(option(PutOrCall::Call, 100.0), -5.0);
+        flat.add(option(PutOrCall::Call, 100.0), 5.0).unwrap();
+        flat.add(option(PutOrCall::Call, 100.0), -5.0).unwrap();
         let g = flat.greeks();
         for v in [
             g.npv, g.delta, g.gamma, g.vega, g.theta, g.rho, g.vanna, g.volga,
@@ -229,8 +242,8 @@ mod tests {
     #[test]
     fn straddle_greeks_have_the_expected_shape() {
         let mut straddle = EquityPortfolio::new();
-        straddle.add(option(PutOrCall::Call, 100.0), 1.0);
-        straddle.add(option(PutOrCall::Put, 100.0), 1.0);
+        straddle.add(option(PutOrCall::Call, 100.0), 1.0).unwrap();
+        straddle.add(option(PutOrCall::Put, 100.0), 1.0).unwrap();
         let g = straddle.greeks();
         // near-ATM straddle: small residual delta, long gamma and vega
         assert!(g.delta.abs() < 0.25);
@@ -240,7 +253,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "one underlying")]
     fn mixed_underlyings_are_rejected() {
         let other = EquityOptionBuilder::new()
             .symbol("OTHER")
@@ -255,16 +267,26 @@ mod tests {
             .build()
             .expect("option must build");
         let mut book = EquityPortfolio::new();
-        book.add(option(PutOrCall::Call, 100.0), 1.0);
-        book.add(other, 1.0);
+        book.add(option(PutOrCall::Call, 100.0), 1.0).unwrap();
+        let err = match book.add(other, 1.0) {
+            Ok(_) => panic!("a mismatched symbol must be rejected"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("one underlying") && msg.contains("'ACME'") && msg.contains("'OTHER'"),
+            "error should name both symbols: {msg}"
+        );
+        // the rejected position was not added
+        assert_eq!(book.len(), 1);
     }
 
     #[test]
     fn attribution_explains_small_moves() {
         let mut book = EquityPortfolio::new();
-        book.add(option(PutOrCall::Call, 100.0), 10.0);
-        book.add(option(PutOrCall::Call, 110.0), -15.0);
-        book.add(option(PutOrCall::Put, 95.0), 5.0);
+        book.add(option(PutOrCall::Call, 100.0), 10.0).unwrap();
+        book.add(option(PutOrCall::Call, 110.0), -15.0).unwrap();
+        book.add(option(PutOrCall::Put, 95.0), 5.0).unwrap();
 
         let m = MarketMove {
             d_spot: 1.0,
@@ -299,7 +321,7 @@ mod tests {
     #[test]
     fn pure_time_move_is_theta() {
         let mut book = EquityPortfolio::new();
-        book.add(option(PutOrCall::Call, 100.0), 10.0);
+        book.add(option(PutOrCall::Call, 100.0), 10.0).unwrap();
         let m = MarketMove {
             d_time: 1.0 / 365.0,
             ..Default::default()
@@ -323,13 +345,13 @@ mod tests {
         };
 
         let mut analytic = EquityPortfolio::new();
-        analytic.add(option(PutOrCall::Call, 100.0), 10.0);
+        analytic.add(option(PutOrCall::Call, 100.0), 10.0).unwrap();
         let a = analytic.pnl_attribution(&m);
 
         let mut fd_book = EquityPortfolio::new();
         let mut fd = option(PutOrCall::Call, 100.0);
         fd.engine = crate::equity::utils::PricingEngine::from_kind(Engine::FiniteDifference);
-        fd_book.add(fd, 10.0);
+        fd_book.add(fd, 10.0).unwrap();
         let f = fd_book.pnl_attribution(&m);
 
         assert!(

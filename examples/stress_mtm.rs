@@ -36,9 +36,12 @@ fn main() {
     common::title("STRESS MtM — TOML scenarios, trade-level and aggregated");
 
     let mut book = EquityPortfolio::new();
-    book.add(option(PutOrCall::Call, 100.0, 11), 100.0);
-    book.add(option(PutOrCall::Call, 110.0, 5), -150.0);
-    book.add(option(PutOrCall::Put, 90.0, 3), 80.0);
+    book.add(option(PutOrCall::Call, 100.0, 11), 100.0)
+        .expect("single-underlying book");
+    book.add(option(PutOrCall::Call, 110.0, 5), -150.0)
+        .expect("single-underlying book");
+    book.add(option(PutOrCall::Put, 90.0, 3), 80.0)
+        .expect("single-underlying book");
 
     let config = StressConfig::from_toml_file("src/examples/stress_config.toml")
         .expect("loading stress config");

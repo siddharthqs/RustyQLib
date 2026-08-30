@@ -718,9 +718,15 @@ impl BlackScholesPricer {
         let pc = *bsd_option.payoff.put_or_call();
         match payoff.barrier2 {
             Some(b2) => {
+                // Unreachable backstop: `check_engine_support` refuses a
+                // rebated double barrier on the Analytical engine before
+                // pricing (the closed form below has no rebate term), so
+                // neither the builder nor the JSON path can reach this. It
+                // stays a hard assert for options assembled around those
+                // boundaries — silently dropping the rebate would misprice.
                 assert!(
                     payoff.rebate == 0.0,
-                    "double-barrier rebates are not supported analytically; use MonteCarlo                      (rebate at expiry)"
+                    "double-barrier rebates are not supported analytically; use MonteCarlo (rebate at expiry)"
                 );
                 let (lo, hi) = (payoff.barrier.min(b2), payoff.barrier.max(b2));
                 barrier::double_barrier_price(s, k, lo, hi, r, q, sigma, t, payoff.knock, pc)

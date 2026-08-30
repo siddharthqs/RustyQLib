@@ -71,9 +71,12 @@ fn main() {
     // a realistic single-name book: long 1y ATM calls, short 6m upside
     // calls (call spread financing), long 3m downside puts (crash hedge)
     let mut book = EquityPortfolio::new();
-    book.add(option(PutOrCall::Call, 100.0, 12), 100.0);
-    book.add(option(PutOrCall::Call, 110.0, 6), -150.0);
-    book.add(option(PutOrCall::Put, 90.0, 3), 80.0);
+    book.add(option(PutOrCall::Call, 100.0, 12), 100.0)
+        .expect("single-underlying book");
+    book.add(option(PutOrCall::Call, 110.0, 6), -150.0)
+        .expect("single-underlying book");
+    book.add(option(PutOrCall::Put, 90.0, 3), 80.0)
+        .expect("single-underlying book");
 
     common::section("Positions");
     println!(

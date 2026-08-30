@@ -95,7 +95,8 @@ pub fn build_curve(
         "EQ" => {
             log::info!("building implied volatility surface");
             let contracts: Vec<Box<EquityOption>> =
-                build_eq_contracts_from_json(list_contracts.contracts);
+                build_eq_contracts_from_json(list_contracts.contracts)
+                    .context("failed to build the equity contracts")?;
             let vol_surface = crate::equity::vol_surface::build_implied_vol_surface(&contracts)
                 .context("failed to build implied vol surface")?;
             log::debug!("implied vol surface:\n{}", vol_surface);
@@ -874,7 +875,8 @@ pub fn build_portfolio(contents: &str) -> Result<EquityPortfolio> {
             }
         }
         let quantity = data.base.long_short.unwrap_or(1) as f64;
-        book.add(option, quantity);
+        book.add(option, quantity)
+            .with_context(|| format!("contract {index} failed to join the book"))?;
     }
     Ok(book)
 }

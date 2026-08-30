@@ -409,9 +409,12 @@ mod tests {
         // EquityPortfolio books are single-underlying; multi-underlying
         // repricing is exercised option-by-option against one Market
         let mut book = EquityPortfolio::new();
-        book.add(option("ACME", 95.0, Engine::BlackScholes), 10.0);
-        book.add(option("ACME", 105.0, Engine::Binomial), -5.0);
-        book.add(option("ACME", 100.0, Engine::FiniteDifference), 3.0);
+        book.add(option("ACME", 95.0, Engine::BlackScholes), 10.0)
+            .unwrap();
+        book.add(option("ACME", 105.0, Engine::Binomial), -5.0)
+            .unwrap();
+        book.add(option("ACME", 100.0, Engine::FiniteDifference), 3.0)
+            .unwrap();
         let market = book.snapshot_market();
         assert!(market.contains(&Spot("ACME".to_string())));
         assert!(market.contains(&Vol("ACME".to_string())));

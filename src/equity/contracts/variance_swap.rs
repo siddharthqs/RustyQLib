@@ -218,7 +218,9 @@ pub struct VarianceSwapData {
     /// Strike quoted in **volatility** units (0.20 = 20 vol);
     /// `K_var = strike_vol^2`.
     pub strike_vol: f64,
-    /// Variance notional (payout per unit of annualized variance).
+    /// Variance notional (payout per unit of annualized variance). The
+    /// MtM is linear in it, so a negative notional is a short-variance
+    /// position; it must be finite.
     pub notional: f64,
     /// Maturity date, `YYYY-MM-DD`.
     pub maturity: String,
@@ -302,8 +304,42 @@ impl VarianceSwap {
         crate::equity::conventions::check_vol_band("volatility", data.volatility)?;
         crate::equity::conventions::check_vol_band("strike_vol", data.strike_vol)?;
         crate::equity::conventions::check_rate_band("risk_free_rate", data.risk_free_rate)?;
+        if !data.underlying_price.is_finite() || data.underlying_price <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "underlying_price",
+                format!(
+                    "underlying_price = {} must be a positive finite number",
+                    data.underlying_price
+                ),
+            ));
+        }
+        if !data.notional.is_finite() {
+            return Err(RustyQLibError::invalid_input(
+                "notional",
+                format!(
+                    "notional = {} must be finite (a negative notional is a short \
+                     variance position)",
+                    data.notional
+                ),
+            ));
+        }
         let q = data.dividend.unwrap_or(0.0);
+        if !q.is_finite() {
+            return Err(RustyQLibError::invalid_input(
+                "dividend",
+                format!("dividend = {q} must be a finite number"),
+            ));
+        }
         let forward = data.underlying_price * ((data.risk_free_rate - q) * t).exp();
+        if !forward.is_finite() || forward <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "forward",
+                format!(
+                    "forward {forward} implied by underlying_price, risk_free_rate and \
+                     dividend is not a positive finite number"
+                ),
+            ));
+        }
         let surface = data
             .vol_surface
             .as_ref()
@@ -317,13 +353,26 @@ impl VarianceSwap {
         let fair = match data.swap_type.as_deref().map(str::trim) {
             None | Some("variance") => fair_variance_strike(forward, t, smile),
             Some("gamma") => fair_gamma_swap_strike(data.underlying_price, forward, t, smile),
-            Some("corridor") => fair_corridor_variance_strike(
-                forward,
-                t,
-                data.corridor_low.unwrap_or(0.0),
-                data.corridor_high.unwrap_or(f64::INFINITY),
-                smile,
-            ),
+            Some("corridor") => {
+                let low = data.corridor_low.unwrap_or(0.0);
+                let high = data.corridor_high.unwrap_or(f64::INFINITY);
+                if low.is_nan() || low < 0.0 || low.is_infinite() {
+                    return Err(RustyQLibError::invalid_input(
+                        "corridor_low",
+                        format!("corridor_low = {low} must be a non-negative finite number"),
+                    ));
+                }
+                if high.is_nan() || high <= low {
+                    return Err(RustyQLibError::invalid_input(
+                        "corridor",
+                        format!(
+                            "corridor bounds [{low}, {high}] are inverted or empty \
+                             (corridor_high must exceed corridor_low)"
+                        ),
+                    ));
+                }
+                fair_corridor_variance_strike(forward, t, low, high, smile)
+            }
             Some(other) => {
                 return Err(RustyQLibError::invalid_input(
                     "swap_type",
@@ -792,6 +841,88 @@ mod tests {
             "{}",
             c_swap.fair_remaining_variance
         );
+    }
+
+    fn base_vswap_data() -> VarianceSwapData {
+        serde_json::from_str(
+            r#"{
+                "symbol": "VSWAP", "underlying_price": 100.0,
+                "strike_vol": 0.22, "notional": 1000000.0,
+                "maturity": "2030-01-01", "risk_free_rate": 0.03,
+                "volatility": 0.25
+            }"#,
+        )
+        .unwrap()
+    }
+
+    fn expect_invalid(data: &VarianceSwapData, field: &str) {
+        match VarianceSwap::try_from_json(data) {
+            Err(RustyQLibError::InvalidInput { field: f, .. }) => assert_eq!(f, field),
+            other => panic!(
+                "expected InvalidInput on {field}, got {:?}",
+                other.map(|_| "a swap")
+            ),
+        }
+    }
+
+    #[test]
+    fn try_from_json_rejects_bad_underlying_price_instead_of_panicking() {
+        // previously these reached the assert in fair_variance_strike
+        for bad in [0.0, -100.0, f64::NAN, f64::INFINITY] {
+            let mut data = base_vswap_data();
+            data.underlying_price = bad;
+            expect_invalid(&data, "underlying_price");
+        }
+        // a non-finite dividend would poison the forward before the assert
+        let mut data = base_vswap_data();
+        data.dividend = Some(f64::NAN);
+        expect_invalid(&data, "dividend");
+        // and inputs that individually pass the bands but blow up the
+        // forward are caught rather than fed to the replication
+        let mut data = base_vswap_data();
+        data.risk_free_rate = f64::NAN; // slips through check_rate_band
+        expect_invalid(&data, "forward");
+    }
+
+    #[test]
+    fn try_from_json_rejects_bad_corridor_bounds_instead_of_panicking() {
+        let corridor = |low: Option<f64>, high: Option<f64>| {
+            let mut data = base_vswap_data();
+            data.swap_type = Some("corridor".to_string());
+            data.corridor_low = low;
+            data.corridor_high = high;
+            data
+        };
+        // inverted and empty corridors previously hit the high > low assert
+        expect_invalid(&corridor(Some(115.0), Some(90.0)), "corridor");
+        expect_invalid(&corridor(Some(90.0), Some(90.0)), "corridor");
+        expect_invalid(&corridor(None, Some(f64::NAN)), "corridor");
+        // a negative or non-finite lower bound previously hit low >= 0.0
+        expect_invalid(&corridor(Some(-10.0), Some(90.0)), "corridor_low");
+        expect_invalid(&corridor(Some(f64::NAN), None), "corridor_low");
+        expect_invalid(&corridor(Some(f64::INFINITY), None), "corridor_low");
+        // the valid one-sided defaults still build
+        let full = VarianceSwap::try_from_json(&corridor(None, None)).unwrap();
+        assert!(full.fair_remaining_variance > 0.0);
+    }
+
+    #[test]
+    fn notional_must_be_finite_and_negative_means_short_variance() {
+        // non-finite notionals are rejected at parse time
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut data = base_vswap_data();
+            data.notional = bad;
+            expect_invalid(&data, "notional");
+        }
+        // the MtM is linear in notional, so a negative notional is the
+        // coherent short position: it negates the long swap exactly
+        let long = VarianceSwap::try_from_json(&base_vswap_data()).unwrap();
+        let mut short_data = base_vswap_data();
+        short_data.notional = -1_000_000.0;
+        let short = VarianceSwap::try_from_json(&short_data).unwrap();
+        assert!((long.mtm() + short.mtm()).abs() < 1e-9);
+        // fair variance 0.0625 > strike 0.0484: long gains, short loses
+        assert!(long.mtm() > 0.0 && short.mtm() < 0.0);
     }
 
     // ── the mainline VarianceSwapPayoff (Market-bound spine) ───────────

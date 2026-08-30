@@ -122,6 +122,10 @@ impl<'a> BumpedMarket<'a> {
     pub fn effective_spot(&self, maturity: NaiveDate) -> f64 {
         let base = self.market.spot.value();
         let s = base - self.pv_cash_dividends(maturity);
+        // Unreachable backstop: `EquityOptionBuilder::build` refuses cash
+        // dividends whose escrow value reaches the spot, so a
+        // builder-constructed option can never reach this. It stays a hard
+        // assert for markets assembled directly (or mutated after build).
         assert!(s > 0.0, "cash dividends exceed the spot price");
         (s + self.bump.d_spot).max(base * crate::equity::conventions::MIN_BUMPED_SPOT_FRAC)
     }
@@ -214,5 +218,27 @@ mod tests {
         assert!(pv.is_finite(), "stress must value, got {pv}");
         // an ATM put on a near-zero spot is worth ~ the discounted strike
         assert!(pv > 90.0, "deep-crash put must be near max value: {pv}");
+    }
+
+    #[test]
+    #[should_panic(expected = "cash dividends exceed the spot price")]
+    fn effective_spot_backstop_still_guards_directly_assembled_markets() {
+        // EquityOptionBuilder::build refuses cash dividends whose escrow
+        // value reaches the spot, so the only way to this assert is a
+        // market assembled directly or mutated after build — which is
+        // exactly what the backstop must keep catching
+        let mut divd = EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.3)
+            .flat_rate(0.03)
+            .valuation_date(date(2026, 1, 1))
+            .maturity_date(date(2027, 1, 1))
+            .cash_dividend(date(2026, 7, 1), 5.0)
+            .vanilla(PutOrCall::Put)
+            .build()
+            .expect("dividend option must build");
+        divd.market.cash_dividends[0].1 = 500.0;
+        BumpedMarket::base(&divd.market).effective_spot(divd.base.maturity_date);
     }
 }

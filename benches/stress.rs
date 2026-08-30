@@ -53,7 +53,8 @@ fn book() -> EquityPortfolio {
             .engine(Engine::BlackScholes)
             .build()
             .expect("bench option must build");
-        book.add(option, if j % 3 == 0 { -50.0 } else { 100.0 });
+        book.add(option, if j % 3 == 0 { -50.0 } else { 100.0 })
+            .expect("bench book is single-underlying");
     }
     book
 }

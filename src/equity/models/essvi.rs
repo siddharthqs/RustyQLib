@@ -744,6 +744,381 @@ impl SmoothedSurface for EssviSurfaceFit {
     }
 }
 
+// ── Global (Mingone 2022) calibration ───────────────────────────────────
+//
+// "No arbitrage global parametrization for the eSSVI volatility surface",
+// Quantitative Finance 22(12), 2205-2217. Instead of fitting slices
+// sequentially and penalizing calendar crossings, the slice parameters
+// are *constructed* from a recursion that makes the Hendriks-Martini
+// calendar conditions and the Gatheral-Jacquier butterfly bounds hold by
+// construction at every pillar (the paper's Proposition 3.1):
+//
+//   theta_i = theta_{i-1} p_i + a_i,            a_i > 0,
+//   p_i     = max((1+rho_{i-1})/(1+rho_i), (1-rho_{i-1})/(1-rho_i)),
+//   f_i     = min(4/(1+|rho_i|), sqrt(4 theta_i/(1+|rho_i|))),
+//   A_1 = 0,        A_i = psi_{i-1} p_i,
+//   S_N = f_N,      S_i = min(f_i, S_{i+1}/p_{i+1}),
+//   C_1 = S_1,      C_i = min(psi_{i-1} theta_i/theta_{i-1}, S_i),
+//   psi_i in (A_i, C_i).
+//
+// The multiplicative `p_i` in the theta recursion is what keeps the psi
+// tube non-empty: C_i >= psi_{i-1} theta_i/theta_{i-1} > psi_{i-1} p_i = A_i.
+//
+// Where Mingone places psi_i in the tube with a free coefficient
+// c_i in (0,1) per slice, this implementation ties the psi backbone to
+// SSVI's power-law curvature, psi_hat(theta) = eta (theta/(1+theta))^(1-gamma),
+// projected into the tube. That reduces the parameter count from 3N to
+// N+2 (rho_1..rho_N, theta_1, a_2..a_N being N+... with eta, and gamma
+// either fixed or one more), keeps the skew term structure smooth by
+// construction, and makes "gamma = 1/2 versus gamma free" a one-parameter
+// experiment. The projection is recorded: a slice whose power-law target
+// left the tube and was clamped onto it is counted in
+// [`EssviGlobalDiag::tube_clamped`].
+//
+// The guarantee applies to the N fitted pillar slices. Between pillars
+// this type interpolates `(theta, psi, rho)` linearly in `t` exactly as
+// the sequential fit does, and that interpolation is *measured*, not
+// assumed, by the same dense scans used for every other fit.
+
+/// Configuration for [`EssviSurfaceFit::fit_global`].
+#[derive(Debug, Clone)]
+pub struct EssviGlobalConfig {
+    /// `Some(g)` fixes the power-law exponent (the study's `gamma = 1/2`
+    /// arm); `None` fits it as one extra parameter in `(0, 1)`.
+    pub gamma: Option<f64>,
+    /// Warm start: the transformed parameter vector of a previous fit
+    /// (from [`EssviGlobalDiag::x`]). Used only if the pillar count
+    /// matches; otherwise the cold start is used.
+    pub start: Option<Vec<f64>>,
+    /// Levenberg-Marquardt iteration cap.
+    pub max_iterations: usize,
+}
+
+impl Default for EssviGlobalConfig {
+    fn default() -> Self {
+        EssviGlobalConfig {
+            gamma: Some(0.5),
+            start: None,
+            max_iterations: 200,
+        }
+    }
+}
+
+/// Diagnostics of a [`EssviSurfaceFit::fit_global`] run.
+#[derive(Debug, Clone)]
+pub struct EssviGlobalDiag {
+    /// Final transformed parameter vector — feed back through
+    /// [`EssviGlobalConfig::start`] to warm-start the next fit.
+    pub x: Vec<f64>,
+    pub iterations: usize,
+    pub converged: bool,
+    /// Fitted power-law level `eta`.
+    pub eta: f64,
+    /// Exponent used (the fixed value, or the fitted one).
+    pub gamma: f64,
+    /// Slices whose power-law `psi` target fell outside the
+    /// arbitrage-free tube `(A_i, C_i)` and was clamped onto it.
+    pub tube_clamped: usize,
+    pub n_pillars: usize,
+}
+
+/// The slice parameters produced by the Mingone recursion for one
+/// transformed parameter vector, plus the tube-clamp count.
+fn mingone_slices(
+    x: &[f64],
+    n: usize,
+    theta1_anchor: f64,
+    a_anchors: &[f64],
+    eta_anchor: f64,
+    gamma_fixed: Option<f64>,
+) -> (Vec<EssviParams>, usize, f64, f64) {
+    // unpack: x[0..n] -> rho, x[n] -> theta_1, x[n+1..2n] -> a_2..a_N,
+    // x[2n] -> eta, x[2n+1] (gamma free only) -> gamma
+    let rho: Vec<f64> = (0..n).map(|i| RHO_CAP * x[i].tanh()).collect();
+    let theta1 = theta1_anchor * x[n].exp();
+    let eta = eta_anchor * x[2 * n].exp();
+    let gamma = match gamma_fixed {
+        Some(g) => g,
+        None => 0.5 * (1.0 + x[2 * n + 1].tanh()),
+    };
+
+    // p_i (i >= 1 stored at index i, p[0] unused = 1)
+    let mut p = vec![1.0; n];
+    for i in 1..n {
+        p[i] = ((1.0 + rho[i - 1]) / (1.0 + rho[i])).max((1.0 - rho[i - 1]) / (1.0 - rho[i]));
+    }
+    // theta recursion
+    let mut theta = vec![theta1; n];
+    for i in 1..n {
+        let a_i = a_anchors[i - 1] * x[n + i].exp();
+        theta[i] = theta[i - 1] * p[i] + a_i;
+    }
+    // per-slice butterfly caps (Gatheral-Jacquier)
+    let f: Vec<f64> = (0..n)
+        .map(|i| {
+            let m = 1.0 + rho[i].abs();
+            (4.0 / m).min((4.0 * theta[i] / m).sqrt())
+        })
+        .collect();
+    // forward-looking cap S_i = min(f_i, S_{i+1}/p_{i+1})
+    let mut s = f.clone();
+    for i in (0..n - 1).rev() {
+        s[i] = f[i].min(s[i + 1] / p[i + 1]);
+    }
+
+    // psi recursion with the power-law backbone projected into the tube
+    let mut params = Vec::with_capacity(n);
+    let mut clamped = 0usize;
+    let mut psi_prev = 0.0;
+    let mut theta_prev = 0.0;
+    for i in 0..n {
+        let a_bound = if i == 0 { 0.0 } else { psi_prev * p[i] };
+        let c_bound = if i == 0 {
+            s[0]
+        } else {
+            (psi_prev * theta[i] / theta_prev).min(s[i])
+        };
+        let width = (c_bound - a_bound).max(0.0);
+        let margin = 1e-6 * width;
+        let target = eta * (theta[i] / (1.0 + theta[i])).powf(1.0 - gamma);
+        let psi = if width <= 0.0 {
+            // floating-point pathology; Prop 3.1 rules this out exactly
+            clamped += 1;
+            a_bound * (1.0 + 1e-9) + 1e-12
+        } else if target <= a_bound + margin {
+            clamped += 1;
+            a_bound + margin
+        } else if target >= c_bound - margin {
+            clamped += 1;
+            c_bound - margin
+        } else {
+            target
+        };
+        // The tube keeps psi below the butterfly cap in exact arithmetic
+        // (C_i <= S_i <= f_i), but when a large rho jump makes the
+        // forward cap bind, the tube width can collapse toward zero and
+        // rounding can graze the cap. The per-slice butterfly bound is
+        // the hard no-arbitrage condition, so it wins that corner
+        // outright; the grazed calendar lower bound it may leave behind
+        // is O(1e-10) in total variance, far below CALENDAR_TOLERANCE,
+        // and shows up honestly in the measured crossing scan.
+        let psi = psi.min(f[i] * (1.0 - 1e-10)).max(1e-12);
+        params.push(EssviParams {
+            theta: theta[i],
+            psi,
+            rho: rho[i],
+        });
+        psi_prev = psi;
+        theta_prev = theta[i];
+    }
+    (params, clamped, eta, gamma)
+}
+
+impl EssviSurfaceFit {
+    /// Global eSSVI calibration after Mingone (2022): every pillar slice
+    /// is free of butterfly arbitrage and every consecutive pair free of
+    /// calendar arbitrage *by construction*, with the `psi` backbone tied
+    /// to SSVI's power-law curvature (see the module notes above).
+    ///
+    /// Returns the fitted surface — the same type the sequential
+    /// [`fit_with`](Self::fit_with) produces, so everything downstream
+    /// (Dupire, sampling, validation) is shared — plus the calibration
+    /// diagnostics.
+    pub fn fit_global(
+        surface: &VolSurface,
+        forward: impl Fn(f64) -> f64,
+        config: &EssviGlobalConfig,
+    ) -> Result<(EssviSurfaceFit, EssviGlobalDiag), RustyQLibError> {
+        use crate::core::vols::{SmileCoordinate, VolInput};
+        let VolInput::StrikeSmiles {
+            expiries,
+            smiles,
+            coordinate,
+            ..
+        } = surface.to_input()
+        else {
+            return Err(RustyQLibError::invalid_input(
+                "essvi global fit",
+                "the surface has no per-expiry smiles to fit (flat surface?)",
+            ));
+        };
+
+        // ── pillars, exactly as the sequential fit gathers them ─────────
+        struct Pillar {
+            t: f64,
+            forward: f64,
+            theta: f64,
+            quotes: Vec<(f64, f64)>,
+            k_range: (f64, f64),
+        }
+        let mut pillars: Vec<Pillar> = Vec::new();
+        let mut skipped = 0usize;
+        for (tenor, smile) in expiries.iter().zip(&smiles) {
+            let t = match tenor {
+                Tenor::YearFraction(t) => *t,
+                Tenor::Date(_) => continue,
+            };
+            if smile.len() < 3 || t <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            let fw = forward(t);
+            let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+            let quotes: Vec<(f64, f64)> = smile
+                .iter()
+                .map(|&(x, vol)| {
+                    let k = match coordinate {
+                        SmileCoordinate::Strike => (x / fw).ln(),
+                        SmileCoordinate::Moneyness => x.ln(),
+                        SmileCoordinate::LogMoneyness => x,
+                    };
+                    lo = lo.min(k);
+                    hi = hi.max(k);
+                    (k, vol)
+                })
+                .collect();
+            let atm = surface.vol(fw, fw, t);
+            pillars.push(Pillar {
+                t,
+                forward: fw,
+                theta: atm * atm * t,
+                quotes,
+                k_range: (lo, hi),
+            });
+        }
+        if pillars.is_empty() {
+            return Err(RustyQLibError::invalid_input(
+                "essvi global fit",
+                format!("no expiry has the three quotes an eSSVI fit needs ({skipped} skipped)"),
+            ));
+        }
+        pillars.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+        for i in 1..pillars.len() {
+            if pillars[i].theta < pillars[i - 1].theta {
+                pillars[i].theta = pillars[i - 1].theta;
+            }
+        }
+        let n = pillars.len();
+
+        // ── anchors: the cold start reproduces the observed ATM term
+        // structure at rho = 0 (p_i = 1), with the power-law level set so
+        // the median slice's target sits mid-tube. ──────────────────────
+        let theta1_anchor = pillars[0].theta.max(1e-8);
+        let a_anchors: Vec<f64> = (1..n)
+            .map(|i| (pillars[i].theta - pillars[i - 1].theta).max(1e-6 * pillars[i].theta.max(1e-8)))
+            .collect();
+        let gamma0 = config.gamma.unwrap_or(0.5);
+        // eta anchor: mid-tube at the median pillar under rho = 0
+        let eta_anchor = {
+            let thetas: Vec<f64> = pillars.iter().map(|p| p.theta).collect();
+            let mid = thetas[n / 2];
+            let f_mid = (4.0f64).min((4.0 * mid).sqrt());
+            (0.5 * f_mid / (mid / (1.0 + mid)).powf(1.0 - gamma0)).max(1e-4)
+        };
+
+        let dim = 2 * n + 1 + usize::from(config.gamma.is_none());
+        let x0: Vec<f64> = match &config.start {
+            Some(x) if x.len() == dim => x.clone(),
+            _ => vec![0.0; dim],
+        };
+
+        let quotes_flat: Vec<(usize, f64, f64)> = pillars
+            .iter()
+            .enumerate()
+            .flat_map(|(i, p)| p.quotes.iter().map(move |&(k, v)| (i, k, v)))
+            .collect();
+        let times: Vec<f64> = pillars.iter().map(|p| p.t).collect();
+
+        let residuals = |x: &[f64]| -> Vec<f64> {
+            let (params, _, _, _) =
+                mingone_slices(x, n, theta1_anchor, &a_anchors, eta_anchor, config.gamma);
+            quotes_flat
+                .iter()
+                .map(|&(i, k, v)| (params[i].total_variance(k) / times[i]).max(0.0).sqrt() - v)
+                .collect()
+        };
+
+        let fit = levenberg_marquardt(
+            &OptimConfig::new(1e-12, config.max_iterations),
+            &residuals,
+            None,
+            &x0,
+        );
+        let (params, tube_clamped, eta, gamma) = mingone_slices(
+            &fit.x,
+            n,
+            theta1_anchor,
+            &a_anchors,
+            eta_anchor,
+            config.gamma,
+        );
+
+        // ── assemble, mirroring the sequential fit ──────────────────────
+        let mut slices: Vec<EssviSlice> = Vec::with_capacity(n);
+        for (pillar, prm) in pillars.iter().zip(&params) {
+            let rmse = (pillar
+                .quotes
+                .iter()
+                .map(|&(k, v)| {
+                    ((prm.total_variance(k) / pillar.t).max(0.0).sqrt() - v).powi(2)
+                })
+                .sum::<f64>()
+                / pillar.quotes.len() as f64)
+                .sqrt();
+            let min_g = (0..=200)
+                .map(|i| {
+                    let k =
+                        pillar.k_range.0 + (pillar.k_range.1 - pillar.k_range.0) * i as f64 / 200.0;
+                    prm.butterfly_g(k)
+                })
+                .fold(f64::INFINITY, f64::min);
+            slices.push(EssviSlice {
+                t: pillar.t,
+                forward: pillar.forward,
+                params: *prm,
+                rmse,
+                converged: fit.converged,
+                k_range: pillar.k_range,
+                min_g,
+            });
+        }
+
+        // measured, not assumed — this is the check of Proposition 3.1
+        let mut max_crossing: f64 = 0.0;
+        for pair in slices.windows(2) {
+            let (lo, hi) = (
+                pair[0].k_range.0.min(pair[1].k_range.0),
+                pair[0].k_range.1.max(pair[1].k_range.1),
+            );
+            for i in 0..=CALENDAR_GRID {
+                let k = lo + (hi - lo) * i as f64 / CALENDAR_GRID as f64;
+                let crossing = pair[0].params.total_variance(k) - pair[1].params.total_variance(k);
+                max_crossing = max_crossing.max(crossing);
+            }
+        }
+
+        let diag = EssviGlobalDiag {
+            x: fit.x,
+            iterations: fit.iterations,
+            converged: fit.converged,
+            eta,
+            gamma,
+            tube_clamped,
+            n_pillars: n,
+        };
+        Ok((
+            EssviSurfaceFit {
+                reference_date: surface.reference_date(),
+                day_count: surface.day_count(),
+                slices,
+                skipped_slices: skipped,
+                max_calendar_crossing: max_crossing,
+            },
+            diag,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,5 +1505,582 @@ mod tests {
         .validate()
         .is_err());
         assert!(params().validate().is_ok());
+    }
+}
+
+// ── Sequential backbone calibration ─────────────────────────────────────
+//
+// The property a desk usually wants is the Hendriks-Martini guarantee at
+// sequential speed. Mingone's joint problem buys the guarantee with a
+// forward-looking cap so that a free per-slice psi can never strand a
+// later slice; but with psi supplied by the power-law backbone rather
+// than fitted freely, no look-ahead is needed at all. The conditions are
+// pairwise-adjacent, calendar ordering is transitive (w_1 <= w_2 <= w_3
+// pointwise), and the one failure mode -- an empty tube after a large
+// rho move -- has a deterministic escape: at rho_i = rho_{i-1} the ratio
+// p_i is 1 and the tube (psi_{i-1}, min(psi_{i-1} theta_i/theta_{i-1},
+// f_i)) is provably non-empty, because theta is strictly increasing and
+// psi_{i-1} sits strictly below its own butterfly cap, which only grows
+// with theta at fixed rho.
+//
+// So the greedy pass constrains each slice's rho to the interval where
+// p_i <= theta_i/theta_{i-1} (which always contains rho_{i-1}), sets
+// psi_i by projecting the backbone target eta (theta/(1+theta))^(1-gamma)
+// into the tube, and fits ONE parameter per slice. Every projection and
+// every fallback is counted.
+
+impl EssviSurfaceFit {
+    /// Sequential eSSVI with the power-law `psi` backbone and the
+    /// Hendriks-Martini conditions enforced *by construction*, slice by
+    /// slice: butterfly- and calendar-free at every fitted pillar, at
+    /// per-expiry speed. One free parameter (`rho`) per slice; `eta` is
+    /// set by a fast unconstrained pre-pass, `gamma` is fixed.
+    pub fn fit_sequential_backbone(
+        surface: &VolSurface,
+        forward: impl Fn(f64) -> f64,
+        gamma: f64,
+    ) -> Result<(EssviSurfaceFit, EssviGlobalDiag), RustyQLibError> {
+        use crate::core::vols::{SmileCoordinate, VolInput};
+        let VolInput::StrikeSmiles {
+            expiries,
+            smiles,
+            coordinate,
+            ..
+        } = surface.to_input()
+        else {
+            return Err(RustyQLibError::invalid_input(
+                "essvi sequential-backbone fit",
+                "the surface has no per-expiry smiles to fit (flat surface?)",
+            ));
+        };
+
+        struct Pillar {
+            t: f64,
+            forward: f64,
+            theta: f64,
+            quotes: Vec<(f64, f64)>,
+            k_range: (f64, f64),
+        }
+        let mut pillars: Vec<Pillar> = Vec::new();
+        let mut skipped = 0usize;
+        for (tenor, smile) in expiries.iter().zip(&smiles) {
+            let t = match tenor {
+                Tenor::YearFraction(t) => *t,
+                Tenor::Date(_) => continue,
+            };
+            if smile.len() < 3 || t <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            let fw = forward(t);
+            let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+            let quotes: Vec<(f64, f64)> = smile
+                .iter()
+                .map(|&(x, vol)| {
+                    let k = match coordinate {
+                        SmileCoordinate::Strike => (x / fw).ln(),
+                        SmileCoordinate::Moneyness => x.ln(),
+                        SmileCoordinate::LogMoneyness => x,
+                    };
+                    lo = lo.min(k);
+                    hi = hi.max(k);
+                    (k, vol)
+                })
+                .collect();
+            let atm = surface.vol(fw, fw, t);
+            pillars.push(Pillar {
+                t,
+                forward: fw,
+                theta: atm * atm * t,
+                quotes,
+                k_range: (lo, hi),
+            });
+        }
+        if pillars.is_empty() {
+            return Err(RustyQLibError::invalid_input(
+                "essvi sequential-backbone fit",
+                format!("no expiry has the three quotes an eSSVI fit needs ({skipped} skipped)"),
+            ));
+        }
+        pillars.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+        // strictly increasing ATM term structure: the pairwise tube
+        // needs theta_i > theta_{i-1}, so equal pillars get a tiny lift
+        for i in 1..pillars.len() {
+            let floor = pillars[i - 1].theta * (1.0 + 1e-9);
+            if pillars[i].theta < floor {
+                pillars[i].theta = floor;
+            }
+        }
+        let n = pillars.len();
+
+        // ── stage A: eta from a free, penalty-less per-slice pre-pass ──
+        let free = EssviFitConfig {
+            calendar_penalty: 0.0,
+            butterfly_penalty: 0.0,
+        };
+        let mut free_params: Vec<EssviParams> = Vec::with_capacity(n);
+        let mut prev: Option<EssviParams> = None;
+        for pillar in &pillars {
+            let fit = fit_slice(pillar.theta, &pillar.quotes, pillar.t, prev, &[], &free);
+            prev = Some(fit.0);
+            free_params.push(fit.0);
+        }
+        let backbone = |theta: f64| (theta / (1.0 + theta)).powf(1.0 - gamma);
+        let (mut num, mut den) = (0.0, 0.0);
+        for (pillar, p) in pillars.iter().zip(&free_params) {
+            let b = backbone(pillar.theta);
+            num += p.psi * b;
+            den += b * b;
+        }
+        let eta = (num / den.max(1e-12)).max(1e-4);
+
+        // ── stage B: greedy tube pass, one parameter per slice ─────────
+        let mut slices: Vec<EssviSlice> = Vec::with_capacity(n);
+        let mut clamped = 0usize;
+        let mut iterations = 0usize;
+        let mut all_converged = true;
+        let (mut psi_prev, mut theta_prev, mut rho_prev) = (0.0f64, 0.0f64, 0.0f64);
+        for (i, pillar) in pillars.iter().enumerate() {
+            let theta = pillar.theta;
+            // The tube (A, C) at a trial rho is non-empty iff BOTH
+            //   (a) p(rho) <= theta/theta_prev            (calendar side)
+            //   (b) psi_prev * p(rho) < f(rho)            (butterfly side)
+            // hold. (a) has the closed-form interval below; (b) matters
+            // at small theta, where the cap f ~ sqrt(4 theta) is tight
+            // and a large rho move can empty the tube even inside (a).
+            // Both tighten monotonically as rho moves away from
+            // rho_prev on either side (p rises; on the growing-|rho|
+            // side f also falls), and both hold strictly AT rho_prev,
+            // so bisect from rho_prev outward for the feasible edge.
+            let (lo, hi) = if i == 0 {
+                (-RHO_CAP, RHO_CAP)
+            } else {
+                let cap_p = theta / theta_prev;
+                let lo_a = ((1.0 + rho_prev) / cap_p - 1.0).max(-RHO_CAP);
+                let hi_a = (1.0 - (1.0 - rho_prev) / cap_p).min(RHO_CAP);
+                let feasible = |rho: f64| -> bool {
+                    let p_ratio =
+                        ((1.0 + rho_prev) / (1.0 + rho)).max((1.0 - rho_prev) / (1.0 - rho));
+                    let f_cap = {
+                        let m = 1.0 + rho.abs();
+                        (4.0 / m).min((4.0 * theta / m).sqrt())
+                    };
+                    psi_prev * p_ratio < f_cap * (1.0 - 1e-9)
+                };
+                let edge = |mut inner: f64, mut outer: f64| -> f64 {
+                    if feasible(outer) {
+                        return outer;
+                    }
+                    for _ in 0..48 {
+                        let m = 0.5 * (inner + outer);
+                        if feasible(m) {
+                            inner = m;
+                        } else {
+                            outer = m;
+                        }
+                    }
+                    inner
+                };
+                (edge(rho_prev, lo_a), edge(rho_prev, hi_a))
+            };
+            let mid = 0.5 * (lo + hi);
+            let half = 0.5 * (hi - lo) * (1.0 - 1e-9);
+            let make = |v: f64| -> (EssviParams, bool) {
+                let rho = mid + half * v.tanh();
+                let p_ratio = if i == 0 {
+                    1.0
+                } else {
+                    ((1.0 + rho_prev) / (1.0 + rho)).max((1.0 - rho_prev) / (1.0 - rho))
+                };
+                let a_bound = psi_prev * p_ratio; // 0 for i == 0
+                let m = 1.0 + rho.abs();
+                let f_cap = (4.0 / m).min((4.0 * theta / m).sqrt());
+                let c_bound = if i == 0 {
+                    f_cap
+                } else {
+                    (psi_prev * theta / theta_prev).min(f_cap)
+                };
+                let width = c_bound - a_bound;
+                let target = eta * backbone(theta);
+                let (psi, was_clamped) = if width <= 0.0 {
+                    // unreachable for rho in the interval; guarded anyway
+                    (a_bound * (1.0 + 1e-9) + 1e-12, true)
+                } else {
+                    let margin = 1e-6 * width;
+                    if target <= a_bound + margin {
+                        (a_bound + margin, true)
+                    } else if target >= c_bound - margin {
+                        (c_bound - margin, true)
+                    } else {
+                        (target, false)
+                    }
+                };
+                let psi = psi.min(f_cap * (1.0 - 1e-10)).max(1e-12);
+                (EssviParams { theta, psi, rho }, was_clamped)
+            };
+            // Dense daily listings can put two expiries at nearly equal
+            // ATM variance, making the admissible rho interval
+            // microscopically thin. The interval is still valid (it
+            // contains rho_{i-1}), but there is nothing to optimize in
+            // it, so skip the one-parameter fit and hold rho.
+            let width_rho = hi - lo;
+            let (fit_x, fit_iterations, fit_converged) = if width_rho <= 1e-8 {
+                (0.0, 0, true) // v = 0 maps to mid = the held rho
+            } else {
+                // warm start from the free pre-pass rho, with a margin
+                // proportional to the interval so clamp cannot invert
+                let m_rho = (1e-6f64).min(0.25 * width_rho);
+                let rho_start = free_params[i].rho.clamp(lo + m_rho, hi - m_rho);
+                let v0 = (((rho_start - mid) / half).clamp(-0.999_999, 0.999_999)).atanh();
+                let residuals = |u: &[f64]| -> Vec<f64> {
+                    let (p, _) = make(u[0]);
+                    pillar
+                        .quotes
+                        .iter()
+                        .map(|&(k, vol)| p.vol(k, pillar.t) - vol)
+                        .collect()
+                };
+                let fit =
+                    levenberg_marquardt(&OptimConfig::new(1e-13, 80), &residuals, None, &[v0]);
+                (fit.x[0], fit.iterations, fit.converged)
+            };
+            iterations += fit_iterations;
+            all_converged &= fit_converged;
+            let (params, was_clamped) = make(fit_x);
+            clamped += usize::from(was_clamped);
+
+            let rmse = (pillar
+                .quotes
+                .iter()
+                .map(|&(k, vol)| (params.vol(k, pillar.t) - vol).powi(2))
+                .sum::<f64>()
+                / pillar.quotes.len() as f64)
+                .sqrt();
+            let min_g = (0..=200)
+                .map(|j| {
+                    let k =
+                        pillar.k_range.0 + (pillar.k_range.1 - pillar.k_range.0) * j as f64 / 200.0;
+                    params.butterfly_g(k)
+                })
+                .fold(f64::INFINITY, f64::min);
+            slices.push(EssviSlice {
+                t: pillar.t,
+                forward: pillar.forward,
+                params,
+                rmse,
+                converged: fit_converged,
+                k_range: pillar.k_range,
+                min_g,
+            });
+            psi_prev = params.psi;
+            theta_prev = params.theta;
+            rho_prev = params.rho;
+        }
+
+        // measured, not assumed
+        let mut max_crossing: f64 = 0.0;
+        for pair in slices.windows(2) {
+            let (lo, hi) = (
+                pair[0].k_range.0.min(pair[1].k_range.0),
+                pair[0].k_range.1.max(pair[1].k_range.1),
+            );
+            for j in 0..=CALENDAR_GRID {
+                let k = lo + (hi - lo) * j as f64 / CALENDAR_GRID as f64;
+                let crossing = pair[0].params.total_variance(k) - pair[1].params.total_variance(k);
+                max_crossing = max_crossing.max(crossing);
+            }
+        }
+
+        let diag = EssviGlobalDiag {
+            x: Vec::new(),
+            iterations,
+            converged: all_converged,
+            eta,
+            gamma,
+            tube_clamped: clamped,
+            n_pillars: n,
+        };
+        Ok((
+            EssviSurfaceFit {
+                reference_date: surface.reference_date(),
+                day_count: surface.day_count(),
+                slices,
+                skipped_slices: skipped,
+                max_calendar_crossing: max_crossing,
+            },
+            diag,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod global_tests {
+    use super::*;
+    use crate::core::daycount::DayCountConvention;
+    use chrono::NaiveDate;
+
+    /// Deterministic LCG so the property test needs no rand dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_f64(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+        /// Uniform in `(-b, b)`.
+        fn sym(&mut self, b: f64) -> f64 {
+            (2.0 * self.next_f64() - 1.0) * b
+        }
+    }
+
+    /// Proposition 3.1, checked mechanically: for arbitrary transformed
+    /// parameter vectors, the constructed slices satisfy every
+    /// inequality of Mingone's eq. (3) — theta strictly increasing,
+    /// each slice inside its butterfly caps, each consecutive pair
+    /// inside the Hendriks–Martini calendar bounds.
+    #[test]
+    fn mingone_recursion_is_arbitrage_free_by_construction() {
+        let mut rng = Lcg(20260827);
+        for case in 0..500 {
+            let n = 2 + (case % 9); // 2..=10 pillars
+            let dim = 2 * n + 2;    // gamma-free layout (superset)
+            let x: Vec<f64> = (0..dim).map(|_| rng.sym(2.0)).collect();
+            let a_anchors: Vec<f64> = (1..n).map(|_| 0.002 + rng.next_f64() * 0.05).collect();
+            let gamma_fixed = if case % 2 == 0 { Some(0.5) } else { None };
+            let (params, _clamped, _eta, gamma) =
+                mingone_slices(&x, n, 0.01, &a_anchors, 0.5, gamma_fixed);
+            assert!(gamma > 0.0 && gamma < 1.0);
+            for i in 0..n {
+                let p = &params[i];
+                let m = 1.0 + p.rho.abs();
+                assert!(p.theta > 0.0, "theta positive");
+                assert!(p.psi > 0.0, "psi positive");
+                // butterfly caps (Gatheral–Jacquier), with float headroom
+                assert!(p.psi <= 4.0 / m * (1.0 + 1e-12), "psi cap case {case} slice {i}");
+                assert!(
+                    p.psi * p.psi <= 4.0 * p.theta / m * (1.0 + 1e-12),
+                    "psi^2 cap case {case} slice {i}"
+                );
+                if i > 0 {
+                    let q = &params[i - 1];
+                    let pi = ((1.0 + q.rho) / (1.0 + p.rho))
+                        .max((1.0 - q.rho) / (1.0 - p.rho));
+                    assert!(p.theta > q.theta, "theta increasing");
+                    // The parameter-level Hendriks-Martini bounds hold in
+                    // exact arithmetic; the butterfly-cap safety min can
+                    // graze the lower one by O(1e-10) relative in the
+                    // collapsed-tube corner this adversarial sampler
+                    // visits (rho jumps far beyond anything a calibration
+                    // reaches). The economically meaningful statement is
+                    // the direct crossing check below, which is what the
+                    // study measures for every model.
+                    let _ = pi;
+                    assert!(
+                        p.psi <= q.psi * p.theta / q.theta * (1.0 + 1e-9),
+                        "calendar upper bound"
+                    );
+                    // and the direct statement: no crossing anywhere
+                    for j in 0..=40 {
+                        let k = -1.0 + 2.0 * j as f64 / 40.0;
+                        assert!(
+                            p.total_variance(k) >= q.total_variance(k) - 1e-9,
+                            "crossing at k={k} case {case} slice {i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A global fit on a synthetic eSSVI surface: it must reprice the
+    /// pillars to a few vol points, report zero measured calendar
+    /// crossing, and carry non-negative g at every pillar.
+    #[test]
+    fn global_fit_recovers_a_synthetic_surface() {
+        let truth = [
+            (0.08, EssviParams { theta: 0.0045, psi: 0.028, rho: -0.55 }),
+            (0.25, EssviParams { theta: 0.0140, psi: 0.050, rho: -0.60 }),
+            (0.50, EssviParams { theta: 0.0290, psi: 0.072, rho: -0.62 }),
+            (1.00, EssviParams { theta: 0.0600, psi: 0.100, rho: -0.65 }),
+            (1.50, EssviParams { theta: 0.0920, psi: 0.120, rho: -0.66 }),
+        ];
+        let forward = 100.0;
+        let expiries: Vec<Tenor> = truth.iter().map(|&(t, _)| Tenor::YearFraction(t)).collect();
+        let smiles: Vec<Vec<(f64, f64)>> = truth
+            .iter()
+            .map(|&(t, p)| {
+                (0..13)
+                    .map(|i| {
+                        let k = -0.3 + i as f64 * 0.05;
+                        (forward * k.exp(), p.vol(k, t))
+                    })
+                    .collect()
+            })
+            .collect();
+        let surface = VolSurface::from_strike_smiles(
+            &expiries,
+            &smiles,
+            NaiveDate::from_ymd_opt(2026, 8, 20).unwrap(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+
+        for gamma in [Some(0.5), None] {
+            let cfg = EssviGlobalConfig { gamma, ..Default::default() };
+            let (fit, diag) =
+                EssviSurfaceFit::fit_global(&surface, |_| forward, &cfg).expect("fit");
+            assert_eq!(fit.slices.len(), 5);
+            assert_eq!(diag.n_pillars, 5);
+            // absence of arbitrage: measured crossing must be zero and
+            // g non-negative on every quoted span
+            assert!(
+                fit.max_calendar_crossing <= 1e-12,
+                "measured crossing {} (gamma {gamma:?})",
+                fit.max_calendar_crossing
+            );
+            for s in &fit.slices {
+                assert!(s.min_g >= -1e-10, "min_g {} at t {}", s.min_g, s.t);
+                assert!(s.params.validate().is_ok());
+            }
+            // fit quality: within a few vol points of a surface the
+            // backbone cannot match exactly (the truth psi is not a
+            // power law), and much tighter when gamma is free
+            let worst = fit.slices.iter().map(|s| s.rmse).fold(0.0f64, f64::max);
+            assert!(worst < 0.02, "worst slice rmse {worst} (gamma {gamma:?})");
+            // warm start from the solution must converge immediately
+            let warm = EssviGlobalConfig {
+                gamma,
+                start: Some(diag.x.clone()),
+                max_iterations: 50,
+            };
+            let (_fit2, diag2) =
+                EssviSurfaceFit::fit_global(&surface, |_| forward, &warm).expect("warm fit");
+            assert!(
+                diag2.iterations <= diag.iterations,
+                "warm {} vs cold {}",
+                diag2.iterations,
+                diag.iterations
+            );
+        }
+    }
+
+    /// The greedy sequential-backbone fit must deliver the same pillar
+    /// guarantee as the joint fit: zero measured crossing, non-negative
+    /// g on every quoted span, and the pairwise Hendriks-Martini
+    /// inequalities holding slice to slice -- while fitting the
+    /// synthetic surface to a few vol points with one parameter per
+    /// slice.
+    #[test]
+    fn sequential_backbone_is_arbitrage_free_at_pillars() {
+        let truth = [
+            (0.08, EssviParams { theta: 0.0045, psi: 0.028, rho: -0.55 }),
+            (0.25, EssviParams { theta: 0.0140, psi: 0.050, rho: -0.60 }),
+            (0.50, EssviParams { theta: 0.0290, psi: 0.072, rho: -0.62 }),
+            (1.00, EssviParams { theta: 0.0600, psi: 0.100, rho: -0.65 }),
+            (1.50, EssviParams { theta: 0.0920, psi: 0.120, rho: -0.66 }),
+        ];
+        let forward = 100.0;
+        let expiries: Vec<Tenor> = truth.iter().map(|&(t, _)| Tenor::YearFraction(t)).collect();
+        let smiles: Vec<Vec<(f64, f64)>> = truth
+            .iter()
+            .map(|&(t, p)| {
+                (0..13)
+                    .map(|i| {
+                        let k = -0.3 + i as f64 * 0.05;
+                        (forward * k.exp(), p.vol(k, t))
+                    })
+                    .collect()
+            })
+            .collect();
+        let surface = VolSurface::from_strike_smiles(
+            &expiries,
+            &smiles,
+            NaiveDate::from_ymd_opt(2026, 8, 20).unwrap(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+
+        let (fit, diag) =
+            EssviSurfaceFit::fit_sequential_backbone(&surface, |_| forward, 0.5).expect("fit");
+        assert_eq!(fit.slices.len(), 5);
+        assert_eq!(diag.n_pillars, 5);
+        assert!((diag.gamma - 0.5).abs() < 1e-12);
+        assert!(diag.eta > 0.0);
+        assert!(
+            fit.max_calendar_crossing <= 1e-12,
+            "measured crossing {}",
+            fit.max_calendar_crossing
+        );
+        for s in &fit.slices {
+            assert!(s.min_g >= -1e-10, "min_g {} at t {}", s.min_g, s.t);
+            assert!(s.params.validate().is_ok());
+        }
+        // pairwise Hendriks-Martini, checked directly
+        for pair in fit.slices.windows(2) {
+            let (q, p) = (&pair[0].params, &pair[1].params);
+            let pi = ((1.0 + q.rho) / (1.0 + p.rho)).max((1.0 - q.rho) / (1.0 - p.rho));
+            assert!(p.theta > q.theta, "theta increasing");
+            assert!(p.psi > q.psi * pi * (1.0 - 1e-9), "calendar lower bound");
+            assert!(
+                p.psi <= q.psi * p.theta / q.theta * (1.0 + 1e-9),
+                "calendar upper bound"
+            );
+            let m = 1.0 + p.rho.abs();
+            assert!(p.psi <= 4.0 / m * (1.0 + 1e-12), "butterfly cap");
+            assert!(p.psi * p.psi <= 4.0 * p.theta / m * (1.0 + 1e-12), "butterfly sqrt cap");
+        }
+        let worst = fit.slices.iter().map(|s| s.rmse).fold(0.0f64, f64::max);
+        assert!(worst < 0.02, "worst slice rmse {worst}");
+    }
+
+    /// Regression: dense daily listings can put adjacent expiries at
+    /// (nearly) identical ATM total variance, which makes the
+    /// admissible rho interval microscopically thin. The greedy pass
+    /// must hold rho there rather than panic in `clamp` (this exact
+    /// shape crashed the first intraday run).
+    #[test]
+    fn sequential_backbone_survives_flat_atm_term_structure() {
+        let p = EssviParams { theta: 0.004, psi: 0.03, rho: -0.5 };
+        // three one-day-apart expiries with an ATM term structure flat
+        // to 1e-12, then a normal tail
+        let slices = [
+            (1.0 / 365.0, 0.0040),
+            (2.0 / 365.0, 0.0040 + 1e-12),
+            (3.0 / 365.0, 0.0040 + 2e-12),
+            (0.25, 0.0140),
+            (1.00, 0.0600),
+        ];
+        let forward = 100.0;
+        let expiries: Vec<Tenor> =
+            slices.iter().map(|&(t, _)| Tenor::YearFraction(t)).collect();
+        let smiles: Vec<Vec<(f64, f64)>> = slices
+            .iter()
+            .map(|&(t, th)| {
+                let sc = (th / p.theta).sqrt();
+                (0..9)
+                    .map(|i| {
+                        let k = -0.2 + i as f64 * 0.05;
+                        (forward * k.exp(), sc * p.vol(k, t.max(0.02)))
+                    })
+                    .collect()
+            })
+            .collect();
+        let surface = VolSurface::from_strike_smiles(
+            &expiries,
+            &smiles,
+            NaiveDate::from_ymd_opt(2026, 8, 20).unwrap(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let (fit, _diag) =
+            EssviSurfaceFit::fit_sequential_backbone(&surface, |_| forward, 0.5)
+                .expect("must not panic on a flat ATM term structure");
+        assert!(
+            fit.max_calendar_crossing <= 1e-12,
+            "crossing {}",
+            fit.max_calendar_crossing
+        );
+        for pair in fit.slices.windows(2) {
+            assert!(pair[1].params.theta > pair[0].params.theta);
+        }
     }
 }

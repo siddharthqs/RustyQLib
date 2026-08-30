@@ -263,11 +263,29 @@ pub fn norm_cdf(x: f64) -> f64 {
 /// integration of `phi(x) N((b - rho x)/sqrt(1-rho^2))` for the highly
 /// correlated tail. Used by the Bjerksund-Stensland (2002) two-boundary
 /// American approximation.
+///
+/// Degenerate queries follow the crate's NaN-poison policy (see
+/// `core::interpolation::linear`) rather than panicking: NaN in `a`,
+/// `b` or `rho` returns NaN, `|rho|` overshooting 1 by floating-point
+/// noise (within 1e-12) is clamped to ±1, and a correlation genuinely
+/// outside `[-1, 1]` returns NaN so the bad input stays visible
+/// downstream. Valid inputs are computed exactly as before.
 pub fn bivariate_norm_cdf(a: f64, b: f64, rho: f64) -> f64 {
-    assert!(
-        (-1.0..=1.0).contains(&rho),
-        "correlation must be in [-1, 1]"
-    );
+    if a.is_nan() || b.is_nan() || rho.is_nan() {
+        // NaN in, NaN out — `f64::min` in the rho == 1 branch would
+        // otherwise silently drop a NaN argument, and the old assert
+        // panicked on NaN rho (every comparison against NaN is false)
+        return f64::NAN;
+    }
+    let rho = if rho.abs() > 1.0 {
+        if rho.abs() - 1.0 <= 1e-12 {
+            rho.signum() // floating-point noise: clamp to ±1
+        } else {
+            return f64::NAN; // genuinely out of range: poison, don't panic
+        }
+    } else {
+        rho
+    };
     if rho == 1.0 {
         return norm_cdf(a.min(b));
     }
@@ -431,5 +449,40 @@ mod tests {
             near < norm_cdf(0.5) + 1e-9 && near > norm_cdf(0.5) - 0.02,
             "{near}"
         );
+    }
+
+    #[test]
+    fn bivariate_normal_degenerate_correlations_poison_instead_of_panicking() {
+        // NaN in any argument poisons the result (the rho == 1 branch's
+        // f64::min would otherwise silently drop a NaN argument, and the
+        // old assert panicked on NaN rho)
+        assert!(bivariate_norm_cdf(f64::NAN, 0.0, 0.5).is_nan());
+        assert!(bivariate_norm_cdf(0.0, f64::NAN, 0.5).is_nan());
+        assert!(bivariate_norm_cdf(0.0, 0.0, f64::NAN).is_nan());
+        assert!(bivariate_norm_cdf(0.5, f64::NAN, 1.0).is_nan());
+
+        // the exact boundaries stay on the closed-form limits
+        assert!((bivariate_norm_cdf(0.5, 1.2, 1.0) - norm_cdf(0.5)).abs() < 1e-15);
+        let expect = (norm_cdf(0.5) + norm_cdf(-0.2) - 1.0).max(0.0);
+        assert!((bivariate_norm_cdf(0.5, -0.2, -1.0) - expect).abs() < 1e-15);
+
+        // |rho| overshooting 1 by floating-point noise clamps to +/-1
+        assert_eq!(
+            bivariate_norm_cdf(0.5, 1.2, 1.0 + 1e-13),
+            bivariate_norm_cdf(0.5, 1.2, 1.0)
+        );
+        assert_eq!(
+            bivariate_norm_cdf(0.5, -0.2, -1.0 - 1e-13),
+            bivariate_norm_cdf(0.5, -0.2, -1.0)
+        );
+
+        // a correlation genuinely outside [-1, 1] poisons, not panics
+        assert!(bivariate_norm_cdf(0.5, -0.3, 1.5).is_nan());
+        assert!(bivariate_norm_cdf(0.5, -0.3, -1.5).is_nan());
+        assert!(bivariate_norm_cdf(0.5, -0.3, f64::INFINITY).is_nan());
+
+        // valid interior inputs are untouched by the guard: the golden
+        // value from the cross-checked reference implementation holds
+        assert!((bivariate_norm_cdf(0.5, -0.3, 0.786) - 0.367657814886).abs() < 1e-9);
     }
 }

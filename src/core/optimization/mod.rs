@@ -221,7 +221,7 @@ pub fn minimize(
                     "optimization problem",
                     "differential evolution needs bounds: use Problem::with_bounds",
                 ))?;
-            Ok(differential_evolution(cfg, f, bounds, problem.seed))
+            differential_evolution(cfg, f, bounds, problem.seed)
         }
     }
 }
@@ -281,5 +281,22 @@ mod tests {
             &no_bounds
         )
         .is_err());
+    }
+
+    #[test]
+    fn invalid_de_bounds_surface_as_typed_errors_not_panics() {
+        let f = |x: &[f64]| sphere(x);
+        let bad_bounds =
+            Problem::scalar(&f, vec![0.0, 0.0]).with_bounds(vec![(0.0, 1.0), (5.0, -5.0)]);
+        let err = minimize(
+            &OptimConfig::default(),
+            Method::DifferentialEvolution,
+            &bad_bounds,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, RustyQLibError::InvalidInput { .. }),
+            "{err:?}"
+        );
     }
 }

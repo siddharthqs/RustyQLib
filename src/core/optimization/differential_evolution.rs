@@ -3,6 +3,7 @@
 //! basin globally, then polish with BFGS or Levenberg-Marquardt.
 
 use super::{OptimConfig, OptimResult};
+use crate::core::errors::RustyQLibError;
 
 const DIFFERENTIAL_WEIGHT: f64 = 0.8; // F
 const CROSSOVER_RATE: f64 = 0.9; // CR
@@ -11,16 +12,29 @@ const CROSSOVER_RATE: f64 = 0.9; // CR
 /// DE/rand/1/bin. Deterministic for a given `seed`; the population size
 /// is `max(15, 10 * dim)`. Converged when the population's value spread
 /// falls below `tol`; `iterations` counts generations.
+///
+/// Returns [`RustyQLibError::InvalidInput`] when `bounds` is empty or
+/// any pair does not satisfy `lo < hi` (NaN bounds included).
 pub fn differential_evolution(
     cfg: &OptimConfig,
     f: &dyn Fn(&[f64]) -> f64,
     bounds: &[(f64, f64)],
     seed: u64,
-) -> OptimResult {
+) -> Result<OptimResult, RustyQLibError> {
     let dim = bounds.len();
-    assert!(dim > 0, "bounds must give at least one parameter");
-    for &(lo, hi) in bounds {
-        assert!(lo < hi, "each bound needs lo < hi");
+    if dim == 0 {
+        return Err(RustyQLibError::invalid_input(
+            "bounds",
+            "bounds must give at least one parameter",
+        ));
+    }
+    for (i, &(lo, hi)) in bounds.iter().enumerate() {
+        if !(lo < hi) {
+            return Err(RustyQLibError::invalid_input(
+                "bounds",
+                format!("bound {i} is invalid: needs lo < hi, got ({lo}, {hi})"),
+            ));
+        }
     }
     let np = (10 * dim).max(15);
     let mut rng = Xorshift64Star::new(seed);
@@ -84,12 +98,12 @@ pub fn differential_evolution(
                 .enumerate()
                 .min_by(|a, b| a.1.total_cmp(b.1))
                 .expect("non-empty");
-            return OptimResult {
+            return Ok(OptimResult {
                 x: pop[i].clone(),
                 value,
                 iterations: gen,
                 converged: true,
-            };
+            });
         }
     }
     let (i, &value) = values
@@ -97,12 +111,12 @@ pub fn differential_evolution(
         .enumerate()
         .min_by(|a, b| a.1.total_cmp(b.1))
         .expect("non-empty");
-    OptimResult {
+    Ok(OptimResult {
         x: pop[i].clone(),
         value,
         iterations: cfg.max_iter,
         converged: false,
-    }
+    })
 }
 
 /// Small deterministic RNG (xorshift64*), so runs are reproducible for a
@@ -143,7 +157,7 @@ mod tests {
                 .sum::<f64>()
         };
         let bounds = [(-5.12, 5.12), (-5.12, 5.12)];
-        let r = differential_evolution(&OptimConfig::new(1e-10, 600), &f, &bounds, 7);
+        let r = differential_evolution(&OptimConfig::new(1e-10, 600), &f, &bounds, 7).unwrap();
         assert!(r.value < 1e-6, "stuck at a local minimum: {r:?}");
         assert!(r.x.iter().all(|xi| xi.abs() < 1e-3), "{:?}", r.x);
     }
@@ -153,8 +167,8 @@ mod tests {
         let f = |x: &[f64]| (x[0] - 0.5).powi(2) + (x[1] - 0.25).powi(2);
         let bounds = [(0.0, 1.0), (0.0, 1.0)];
         let cfg = OptimConfig::new(1e-12, 300);
-        let a = differential_evolution(&cfg, &f, &bounds, 123);
-        let b = differential_evolution(&cfg, &f, &bounds, 123);
+        let a = differential_evolution(&cfg, &f, &bounds, 123).unwrap();
+        let b = differential_evolution(&cfg, &f, &bounds, 123).unwrap();
         assert_eq!(a.x, b.x, "same seed must reproduce the same run");
         assert!(a.x.iter().all(|&v| (0.0..=1.0).contains(&v)));
         assert!(
@@ -162,7 +176,56 @@ mod tests {
             "{a:?}"
         );
         // a different seed still finds the optimum
-        let c = differential_evolution(&cfg, &f, &bounds, 999);
+        let c = differential_evolution(&cfg, &f, &bounds, 999).unwrap();
         assert!((c.x[0] - 0.5).abs() < 1e-5, "{c:?}");
+    }
+
+    #[test]
+    fn empty_bounds_are_a_typed_error() {
+        let f = |_: &[f64]| 0.0;
+        let err = differential_evolution(&OptimConfig::default(), &f, &[], 1).unwrap_err();
+        assert!(
+            matches!(err, RustyQLibError::InvalidInput { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_bound_pairs_error_and_name_the_offending_pair() {
+        let f = |x: &[f64]| x[0] + x[1];
+        // reversed pair at index 1
+        let err = differential_evolution(
+            &OptimConfig::default(),
+            &f,
+            &[(0.0, 1.0), (2.0, -3.0)],
+            1,
+        )
+        .unwrap_err();
+        match &err {
+            RustyQLibError::InvalidInput { field, reason } => {
+                assert_eq!(field, "bounds");
+                assert!(
+                    reason.contains("bound 1") && reason.contains("(2, -3)"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        // degenerate (lo == hi) and NaN pairs are rejected the same way
+        let degenerate =
+            differential_evolution(&OptimConfig::default(), &f, &[(1.0, 1.0), (0.0, 1.0)], 1)
+                .unwrap_err();
+        assert!(matches!(
+            degenerate,
+            RustyQLibError::InvalidInput { .. }
+        ));
+        let nan = differential_evolution(
+            &OptimConfig::default(),
+            &f,
+            &[(0.0, 1.0), (f64::NAN, 1.0)],
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(nan, RustyQLibError::InvalidInput { .. }));
     }
 }

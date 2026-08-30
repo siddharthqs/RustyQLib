@@ -3,19 +3,27 @@
 //! rank-revealing. `A = U diag(S) V^T` with orthonormal `U` (m x n,
 //! columns for nonzero singular values), non-negative `S` sorted
 //! descending, and orthogonal `V` (n x n).
+use crate::core::errors::RustyQLibError;
 
 /// SVD of an `m x n` matrix (any shape; internally transposes when
-/// `m < n`). Returns `(u, s, v)` with `A = U diag(S) V^T`.
-pub fn svd(a: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>) {
+/// `m < n`). Returns `(u, s, v)` with `A = U diag(S) V^T`. Errs on an
+/// empty or ragged matrix.
+pub fn svd(
+    a: &[Vec<f64>],
+) -> Result<(Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>), RustyQLibError> {
     let m = a.len();
     let n = if m == 0 { 0 } else { a[0].len() };
-    assert!(m > 0 && n > 0, "empty matrix");
-    assert!(a.iter().all(|row| row.len() == n), "ragged matrix");
+    if m == 0 || n == 0 {
+        return Err(RustyQLibError::NumericalError("empty matrix".to_string()));
+    }
+    if a.iter().any(|row| row.len() != n) {
+        return Err(RustyQLibError::NumericalError("ragged matrix".to_string()));
+    }
     if m < n {
         // A^T = U' S V'^T  =>  A = V' S U'^T
         let at: Vec<Vec<f64>> = (0..n).map(|j| (0..m).map(|i| a[i][j]).collect()).collect();
-        let (u_t, s, v_t) = svd(&at);
-        return (v_t, s, u_t);
+        let (u_t, s, v_t) = svd(&at)?;
+        return Ok((v_t, s, u_t));
     }
 
     // one-sided Jacobi: orthogonalize the columns of B = A V
@@ -80,17 +88,22 @@ pub fn svd(a: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>) {
     };
     let (u, v) = (permute(&u), permute(&v));
     s = s_sorted;
-    (u, s, v)
+    Ok((u, s, v))
 }
 
 /// Minimum-norm least-squares solve `A x ~ b` through the SVD
 /// pseudo-inverse, dropping singular values below `tol * s_max` — the
-/// robust choice for rank-deficient or ill-conditioned systems.
-pub fn pseudo_solve(a: &[Vec<f64>], b: &[f64], tol: f64) -> Vec<f64> {
-    let (u, s, v) = svd(a);
+/// robust choice for rank-deficient or ill-conditioned systems. Errs on
+/// an empty or ragged matrix, or when `b` does not match the row count.
+pub fn pseudo_solve(a: &[Vec<f64>], b: &[f64], tol: f64) -> Result<Vec<f64>, RustyQLibError> {
+    let (u, s, v) = svd(a)?;
     let m = a.len();
     let n = s.len();
-    assert_eq!(b.len(), m, "dimension mismatch");
+    if b.len() != m {
+        return Err(RustyQLibError::NumericalError(
+            "dimension mismatch".to_string(),
+        ));
+    }
     let cutoff = tol * s.first().copied().unwrap_or(0.0);
     let mut x = vec![0.0; n];
     for k in 0..n {
@@ -103,7 +116,7 @@ pub fn pseudo_solve(a: &[Vec<f64>], b: &[f64], tol: f64) -> Vec<f64> {
             *xj += coeff * v[j][k];
         }
     }
-    x
+    Ok(x)
 }
 
 #[cfg(test)]
@@ -135,7 +148,7 @@ mod tests {
     #[test]
     fn decomposition_reconstructs_and_is_orthogonal() {
         let a = fixture();
-        let (u, s, v) = svd(&a);
+        let (u, s, v) = svd(&a).unwrap();
         let recon = reconstruct(&u, &s, &v);
         for i in 0..5 {
             for j in 0..3 {
@@ -158,7 +171,7 @@ mod tests {
 
     #[test]
     fn known_singular_values_of_a_diagonal_matrix() {
-        let (_, s, _) = svd(&[vec![2.0, 0.0], vec![0.0, -3.0]]);
+        let (_, s, _) = svd(&[vec![2.0, 0.0], vec![0.0, -3.0]]).unwrap();
         assert!(
             (s[0] - 3.0).abs() < 1e-12 && (s[1] - 2.0).abs() < 1e-12,
             "{s:?}"
@@ -169,7 +182,7 @@ mod tests {
     fn rank_deficiency_is_revealed_and_wide_matrices_work() {
         // rank-1: second row is a multiple of the first; also test m < n
         let a = vec![vec![1.0, 2.0, 3.0], vec![2.0, 4.0, 6.0]];
-        let (u, s, v) = svd(&a);
+        let (u, s, v) = svd(&a).unwrap();
         assert!(s[0] > 1.0 && s[1].abs() < 1e-10, "{s:?}");
         let recon = reconstruct(&u, &s, &v);
         for i in 0..2 {
@@ -184,7 +197,7 @@ mod tests {
         let a = fixture();
         let b = [1.0, -2.0, 0.5, 3.0, -1.0];
         let via_qr = least_squares(&a, &b).unwrap();
-        let via_svd = pseudo_solve(&a, &b, 1e-12);
+        let via_svd = pseudo_solve(&a, &b, 1e-12).unwrap();
         for (x, y) in via_qr.iter().zip(&via_svd) {
             assert!((x - y).abs() < 1e-10, "{via_qr:?} vs {via_svd:?}");
         }
@@ -195,7 +208,7 @@ mod tests {
             .collect();
         let rhs = [1.0, 2.0, 3.0, 4.0];
         assert!(least_squares(&deficient, &rhs).is_err());
-        let x = pseudo_solve(&deficient, &rhs, 1e-12);
+        let x = pseudo_solve(&deficient, &rhs, 1e-12).unwrap();
         // x must satisfy the normal equations projected on the range:
         // residual orthogonal to the columns
         for j in 0..2 {
@@ -209,5 +222,42 @@ mod tests {
         }
         // and among solutions it is minimum norm: x parallel to (1, 2)
         assert!((x[1] - 2.0 * x[0]).abs() < 1e-10, "{x:?}");
+    }
+
+    #[test]
+    fn empty_and_ragged_matrices_are_rejected() {
+        // no rows, and rows with no columns
+        assert_eq!(
+            svd(&[]).unwrap_err(),
+            RustyQLibError::NumericalError("empty matrix".to_string())
+        );
+        assert_eq!(
+            svd(&[vec![], vec![]]).unwrap_err(),
+            RustyQLibError::NumericalError("empty matrix".to_string())
+        );
+        // ragged: second row has a different length
+        assert_eq!(
+            svd(&[vec![1.0, 2.0], vec![3.0]]).unwrap_err(),
+            RustyQLibError::NumericalError("ragged matrix".to_string())
+        );
+    }
+
+    #[test]
+    fn pseudo_solve_rejects_bad_input() {
+        // propagates the svd validation errors
+        assert_eq!(
+            pseudo_solve(&[], &[], 1e-12).unwrap_err(),
+            RustyQLibError::NumericalError("empty matrix".to_string())
+        );
+        assert_eq!(
+            pseudo_solve(&[vec![1.0, 2.0], vec![3.0]], &[1.0, 1.0], 1e-12).unwrap_err(),
+            RustyQLibError::NumericalError("ragged matrix".to_string())
+        );
+        // rhs length must match the row count
+        let a = fixture(); // 5 x 3
+        assert_eq!(
+            pseudo_solve(&a, &[1.0, 2.0, 3.0], 1e-12).unwrap_err(),
+            RustyQLibError::NumericalError("dimension mismatch".to_string())
+        );
     }
 }

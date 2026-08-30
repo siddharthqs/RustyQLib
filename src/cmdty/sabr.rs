@@ -174,7 +174,7 @@ impl ShiftedSabr {
             }
             displaced.push((k + shift, v));
         }
-        let fit = SabrParams::calibrate(&displaced, forward + shift, t, beta);
+        let fit = SabrParams::calibrate(&displaced, forward + shift, t, beta)?;
         Ok(ShiftedSabrFit {
             sabr: ShiftedSabr {
                 params: fit.params,

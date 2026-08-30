@@ -33,8 +33,10 @@
 //!   to one expiry's `(strike, vol)` quotes at fixed `beta` (the market
 //!   convention: `beta` is chosen, not identified, because it is nearly
 //!   collinear with `rho`); [`SabrParams::calibrate_all`] frees `beta`
-//!   too. Both are Levenberg-Marquardt fits in an unconstrained
-//!   transform space (`ln` / `tanh` / logistic), the same pattern as
+//!   too, and [`SabrParams::calibrate`] reports invalid input as a
+//!   returned error instead of a panic. All are Levenberg-Marquardt
+//!   fits in an unconstrained transform space (`ln` / `tanh` /
+//!   logistic), the same pattern as
 //!   [`heston::calibrate`](crate::equity::heston::calibrate) and SVI.
 //! - **Smile smoothing** — [`SabrSurfaceFit`] fits one SABR smile per
 //!   pillar expiry of a quoted [`VolSurface`] and interpolates total
@@ -212,13 +214,34 @@ impl SabrParams {
     /// dynamics), not what the smile identifies: `beta` and `rho` are
     /// nearly collinear over any quoted strike range. Equity desks
     /// typically run `beta = 1`.
-    pub fn calibrate(quotes: &[(f64, f64)], forward: f64, t: f64, beta: f64) -> SabrFit {
-        assert!(
-            quotes.len() >= 3,
-            "SABR has three free parameters at fixed beta; need at least three quotes"
-        );
-        assert!(forward > 0.0 && t > 0.0);
-        assert!((0.0..=1.0).contains(&beta), "beta must lie in [0, 1]");
+    ///
+    /// Invalid input — fewer than three quotes, non-positive or
+    /// non-finite strikes/vols/`forward`/`t`, or `beta` outside [0, 1]
+    /// — is a returned
+    /// [`invalid_input`](RustyQLibError::invalid_input) error.
+    pub fn calibrate(
+        quotes: &[(f64, f64)],
+        forward: f64,
+        t: f64,
+        beta: f64,
+    ) -> Result<SabrFit, RustyQLibError> {
+        if quotes.len() < 3 {
+            return Err(RustyQLibError::invalid_input(
+                "sabr calibration",
+                format!(
+                    "SABR has three free parameters at fixed beta; need at least \
+                     three quotes (got {})",
+                    quotes.len()
+                ),
+            ));
+        }
+        check_market_inputs(quotes, forward, t)?;
+        if !(0.0..=1.0).contains(&beta) {
+            return Err(RustyQLibError::invalid_input(
+                "sabr calibration",
+                format!("beta must lie in [0, 1] (got {beta})"),
+            ));
+        }
         let x0 = start_point(quotes, forward, beta);
         let unpack = |u: &[f64]| SabrParams {
             alpha: u[0].exp(),
@@ -226,19 +249,30 @@ impl SabrParams {
             rho: u[1].tanh(),
             nu: u[2].exp(),
         };
-        Self::run_fit(quotes, forward, t, &x0, unpack)
+        Ok(Self::run_fit(quotes, forward, t, &x0, unpack))
     }
 
     /// Calibrate all four parameters, `beta` through a logistic
     /// transform onto [0, 1]. Prefer [`calibrate`](Self::calibrate) with
     /// a chosen `beta` unless the quote set genuinely spans enough of
-    /// the backbone to identify it.
-    pub fn calibrate_all(quotes: &[(f64, f64)], forward: f64, t: f64) -> SabrFit {
-        assert!(
-            quotes.len() >= 4,
-            "free-beta SABR has four parameters; need at least four quotes"
-        );
-        assert!(forward > 0.0 && t > 0.0);
+    /// the backbone to identify it. Invalid input (fewer than four
+    /// quotes, non-positive or non-finite market data) is a returned
+    /// [`invalid_input`](RustyQLibError::invalid_input) error.
+    pub fn calibrate_all(
+        quotes: &[(f64, f64)],
+        forward: f64,
+        t: f64,
+    ) -> Result<SabrFit, RustyQLibError> {
+        if quotes.len() < 4 {
+            return Err(RustyQLibError::invalid_input(
+                "sabr calibration",
+                format!(
+                    "free-beta SABR has four parameters; need at least four quotes (got {})",
+                    quotes.len()
+                ),
+            ));
+        }
+        check_market_inputs(quotes, forward, t)?;
         let beta0: f64 = 0.9;
         let mut x0 = start_point(quotes, forward, beta0);
         x0.push((beta0 / (1.0 - beta0)).ln());
@@ -248,7 +282,7 @@ impl SabrParams {
             rho: u[1].tanh(),
             nu: u[2].exp(),
         };
-        Self::run_fit(quotes, forward, t, &x0, unpack)
+        Ok(Self::run_fit(quotes, forward, t, &x0, unpack))
     }
 
     fn run_fit(
@@ -280,6 +314,35 @@ impl SabrParams {
             converged: fit.converged,
         }
     }
+}
+
+/// Shared market-input validation for the calibration entry points:
+/// positive finite strikes, finite vols, positive finite forward and
+/// expiry. (Hagan's expansion — and the fit residuals through it —
+/// needs positive forward and strikes.)
+fn check_market_inputs(quotes: &[(f64, f64)], forward: f64, t: f64) -> Result<(), RustyQLibError> {
+    if quotes
+        .iter()
+        .any(|&(k, v)| !k.is_finite() || k <= 0.0 || !v.is_finite())
+    {
+        return Err(RustyQLibError::invalid_input(
+            "sabr calibration",
+            "quotes must have positive finite strikes and finite vols",
+        ));
+    }
+    if !forward.is_finite() || forward <= 0.0 {
+        return Err(RustyQLibError::invalid_input(
+            "sabr calibration",
+            format!("forward must be positive and finite (got {forward})"),
+        ));
+    }
+    if !t.is_finite() || t <= 0.0 {
+        return Err(RustyQLibError::invalid_input(
+            "sabr calibration",
+            format!("expiry time must be positive and finite (got {t})"),
+        ));
+    }
+    Ok(())
 }
 
 /// Starting point `[ln alpha, atanh rho, ln nu]`: `alpha` backs out of
@@ -524,7 +587,7 @@ impl SabrSurfaceFit {
                     (strike, vol)
                 })
                 .collect();
-            let fit = SabrParams::calibrate(&quotes, f, t, beta);
+            let fit = SabrParams::calibrate(&quotes, f, t, beta)?;
             let (k_lo, k_hi) =
                 quotes
                     .iter()
@@ -977,7 +1040,7 @@ mod tests {
             .map(|i| f * (-0.3 + i as f64 * 0.05_f64).exp())
             .map(|k| (k, truth.vol(f, k, t)))
             .collect();
-        let fit = SabrParams::calibrate(&quotes, f, t, 1.0);
+        let fit = SabrParams::calibrate(&quotes, f, t, 1.0).unwrap();
         assert!(
             fit.rmse < 1e-7,
             "vol rmse {} params {:?}",
@@ -1022,7 +1085,7 @@ mod tests {
             .map(|i| f * (-0.35 + i as f64 * 0.05_f64).exp())
             .map(|k| (k, truth.vol(f, k, t)))
             .collect();
-        let fit = SabrParams::calibrate_all(&quotes, f, t);
+        let fit = SabrParams::calibrate_all(&quotes, f, t).unwrap();
         assert!(
             fit.rmse < 5e-4,
             "vol rmse {} params {:?}",
@@ -1030,6 +1093,40 @@ mod tests {
             fit.params
         );
         assert!(fit.params.validate().is_ok());
+    }
+
+    #[test]
+    fn calibration_rejects_bad_input_instead_of_panicking() {
+        let truth = params();
+        let (f, t) = (100.0, 1.0);
+        let good: Vec<(f64, f64)> = (0..7)
+            .map(|i| f * (-0.24 + i as f64 * 0.08_f64).exp())
+            .map(|k| (k, truth.vol(f, k, t)))
+            .collect();
+        // too few quotes for either entry point
+        assert!(SabrParams::calibrate(&good[..2], f, t, 1.0).is_err());
+        assert!(SabrParams::calibrate_all(&good[..3], f, t).is_err());
+        // bad forward / expiry / beta
+        assert!(SabrParams::calibrate(&good, 0.0, t, 1.0).is_err());
+        assert!(SabrParams::calibrate(&good, f64::NAN, t, 1.0).is_err());
+        assert!(SabrParams::calibrate(&good, f, 0.0, 1.0).is_err());
+        assert!(SabrParams::calibrate(&good, f, f64::INFINITY, 1.0).is_err());
+        assert!(SabrParams::calibrate(&good, f, t, 1.5).is_err());
+        assert!(SabrParams::calibrate(&good, f, t, f64::NAN).is_err());
+        assert!(SabrParams::calibrate_all(&good, -1.0, t).is_err());
+        assert!(SabrParams::calibrate_all(&good, f, -0.5).is_err());
+        // non-positive or non-finite quotes
+        let mut bad = good.clone();
+        bad[1].0 = -5.0;
+        assert!(SabrParams::calibrate(&bad, f, t, 1.0).is_err());
+        bad[1].0 = f64::NAN;
+        assert!(SabrParams::calibrate(&bad, f, t, 1.0).is_err());
+        bad[1].0 = 95.0;
+        bad[2].1 = f64::INFINITY;
+        assert!(SabrParams::calibrate(&bad, f, t, 1.0).is_err());
+        assert!(SabrParams::calibrate_all(&bad, f, t).is_err());
+        // and the untouched quote set still calibrates
+        assert!(SabrParams::calibrate(&good, f, t, 1.0).is_ok());
     }
 
     #[test]

@@ -677,7 +677,7 @@ mod tests {
 
         // and the whole point of the migration: the stress runner sees it
         let mut book = EquityPortfolio::new();
-        book.add(option, 1.0);
+        book.add(option, 1.0).unwrap();
         let config = StressConfig {
             scenarios: vec![
                 StressScenario {

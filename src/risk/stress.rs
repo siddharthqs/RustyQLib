@@ -356,8 +356,9 @@ mod tests {
     #[cfg(feature = "stress-config")]
     fn book() -> EquityPortfolio {
         let mut b = EquityPortfolio::new();
-        b.add(option("ACME", PutOrCall::Call, 100.0), 100.0);
-        b.add(option("ACME", PutOrCall::Put, 90.0), 50.0);
+        b.add(option("ACME", PutOrCall::Call, 100.0), 100.0)
+            .unwrap();
+        b.add(option("ACME", PutOrCall::Put, 90.0), 50.0).unwrap();
         b
     }
 
@@ -548,7 +549,7 @@ mod tests {
             .build()
             .expect("option must build");
         let mut b = EquityPortfolio::new();
-        b.add(mid_pillar_option, 100.0);
+        b.add(mid_pillar_option, 100.0).unwrap();
         let key_rate = stress_mtm(&b, &config).unwrap();
         let parallel = StressConfig::from_toml_str(
             r#"

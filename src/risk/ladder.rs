@@ -288,7 +288,7 @@ mod tests {
             .build()
             .expect("option must build");
         let mut book = EquityPortfolio::new();
-        book.add(option, quantity);
+        book.add(option, quantity).unwrap();
         book
     }
 
@@ -370,7 +370,7 @@ mod tests {
             .build()
             .expect("accumulator must build");
         let mut book = EquityPortfolio::new();
-        book.add(option, 1.0);
+        book.add(option, 1.0).unwrap();
         let ladder = spot_ladder(&book, &[-0.20, -0.10, 0.0, 0.10, 0.20]).unwrap();
         let down = ladder.points[0].pnl;
         let up = ladder.points[4].pnl;
@@ -427,7 +427,7 @@ mod tests {
             .build()
             .unwrap();
         let mut otm_book = EquityPortfolio::new();
-        otm_book.add(otm, 1.0);
+        otm_book.add(otm, 1.0).unwrap();
         let otm_ladder = vol_ladder(&otm_book, &[-0.05, 0.0, 0.05]).unwrap();
         assert!(
             otm_ladder.points[1].volga.unwrap() > 0.0,
@@ -454,7 +454,7 @@ mod tests {
             .build()
             .expect("accumulator must build");
         let mut book = EquityPortfolio::new();
-        book.add(option, 1.0);
+        book.add(option, 1.0).unwrap();
         let ladder = vol_ladder(&book, &[-0.05, 0.0, 0.05]).unwrap();
         assert!(
             ladder.points[0].pnl > 0.0,

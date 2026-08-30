@@ -167,7 +167,7 @@ mod tests {
     fn book(positions: &[(PutOrCall, f64, f64)]) -> EquityPortfolio {
         let mut b = EquityPortfolio::new();
         for &(pc, k, qty) in positions {
-            b.add(option(pc, k, Engine::BlackScholes), qty);
+            b.add(option(pc, k, Engine::BlackScholes), qty).unwrap();
         }
         b
     }
