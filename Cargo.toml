@@ -92,6 +92,8 @@ criterion = "0.5"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+# the vol_modeling examples read the gzipped Cboe chain archive
+flate2 = "1"
 
 # integration tests for the `rustyqlib` binary
 [[test]]
@@ -117,3 +119,36 @@ required-features = ["fetch"]
 [[example]]
 name = "stress_mtm"
 required-features = ["stress-config"]
+
+# ── vol_modeling: smile parameterizations debugged on one archived
+#    index snapshot (see examples/vol_modeling/chain.rs for the data
+#    root and CLI). "fetch" is needed for the Treasury bootstrap only.
+[[example]]
+name = "vol_svi"
+path = "examples/vol_modeling/svi.rs"
+required-features = ["fetch"]
+
+[[example]]
+name = "vol_ssvi"
+path = "examples/vol_modeling/ssvi.rs"
+required-features = ["fetch"]
+
+[[example]]
+name = "vol_essvi"
+path = "examples/vol_modeling/essvi.rs"
+required-features = ["fetch"]
+
+[[example]]
+name = "vol_essvi_global"
+path = "examples/vol_modeling/essvi_global.rs"
+required-features = ["fetch"]
+
+[[example]]
+name = "vol_sabr"
+path = "examples/vol_modeling/sabr.rs"
+required-features = ["fetch"]
+
+[[example]]
+name = "vol_local_vol"
+path = "examples/vol_modeling/local_vol.rs"
+required-features = ["fetch"]

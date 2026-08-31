@@ -32,6 +32,28 @@ Release mode matters: the Monte Carlo examples run 50k–100k paths.
 | `american_baw` | American vanillas, analytic approximations | Barone-Adesi-Whaley and Bjerksund-Stensland 2002 vs binomial / FD / LSMC; early-exercise premium and critical boundary; the BS2002 lower-bound property; the exact Merton perpetual as the T -> infinity limit; true American Greeks; ~cents of error for a huge speed-up |
 | `sample_paths` | Raw model paths (no pricer) | the public `sample_paths` API over the process traits; GBM Sobol paths vs the lognormal law; max-drawdown scenario statistics; Heston `(S, v)` paths under Andersen QE and the rho = -0.7 crash/vol signature |
 
+## Volatility modeling (`vol_modeling/`, all need `--features fetch`)
+
+One archived Cboe index snapshot (default SPY 2026-08-20 15:30, from the
+smile-smoothing-shootout data archive; see `vol_modeling/chain.rs` for the
+data root, `SHOOTOUT_DATA` override, and CLI), taken through the paper's
+exact preparation — filters, parity forwards, implied vols, arbitrage
+repair — then fitted by one smile parameterization per example. Built for
+debugging a single surface interactively.
+
+```bash
+cargo run --release --features fetch --example vol_essvi_global -- QQQ 2026-08-19 1000
+```
+
+| Example | Model | What it demonstrates |
+|---|---|---|
+| `vol_svi` | Raw SVI, per expiry | five params per slice; per-slice params/RMSE/min_g; fitted smile vs pillar quotes at 1M; where the unstructured benchmark pins its bounds (rho = -1 short-end) |
+| `vol_ssvi` | SSVI (Gatheral–Jacquier) | three global shape params; theta term structure; the **conditional** butterfly guarantee failing when the fitted gamma leaves (0, 1/2] |
+| `vol_essvi` | eSSVI, sequential Hendriks–Martini | per-slice (theta, psi, rho) with calendar/butterfly penalties; the residual `max calendar crossing` the penalties leak |
+| `vol_essvi_global` | The three **guaranteed** eSSVI arms | Mingone (2022) joint solve at gamma = 1/2 and gamma free, plus the greedy sequential-backbone variant; identical 0.0 pillar crossings, fit/speed/rho-path trade-offs side by side |
+| `vol_sabr` | SABR (Hagan), per expiry at fixed beta | alpha/rho/nu paths; `-- beta=0.5`; where the asymptotic expansion misbehaves (nu blow-ups, negative min_g) |
+| `vol_local_vol` | Dupire local vol from any of the above | `-- svi\|ssvi\|essvi\|sabr\|essvi_g05\|essvi_gfree\|essvi_sg05`; the sigma_loc grid, guard-clamp rate, curvature roughness, ATM implied-vs-local term structure |
+
 ## Reading the output
 
 - Engines that refuse a combination by design (analytic + American, tree +
