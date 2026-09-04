@@ -27,13 +27,17 @@ use chrono::NaiveDate;
 use crate::cmdty::bachelier;
 use crate::cmdty::forward_curve::CommodityForwardCurve;
 use crate::cmdty::vol::CommodityVol;
-use crate::core::curves::{Compounding, YieldCurve};
+use crate::cmdty::{expiry_inputs, ExpiryInputs};
+use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 use crate::core::results::Greeks;
+use crate::core::solvers::Solver1d;
 use crate::core::trade::PutOrCall;
 use crate::equity::black76;
 
 pub use crate::equity::black76::FuturesSettlement;
+
+const FIELD: &str = "commodity option";
 
 /// A European option on a commodity future. Premium and Greeks are
 /// quoted for the whole contract: `quantity` units of the index
@@ -110,7 +114,8 @@ impl CommodityOption {
         vol: impl Into<CommodityVol>,
     ) -> Result<f64, RustyQLibError> {
         let quote = vol.into().validated("commodity option")?;
-        let (f, r, t) = self.market_inputs(discount, forward)?;
+        let (f, m) = self.market_inputs(discount, forward)?;
+        let (r, t) = (m.r, m.t);
         let (pc, s) = (self.put_or_call, self.settlement);
         Ok(self.quantity
             * match quote {
@@ -139,8 +144,25 @@ impl CommodityOption {
         vol: impl Into<CommodityVol>,
     ) -> Result<Greeks, RustyQLibError> {
         let quote = vol.into().validated("commodity option")?;
-        let (f, r, t) = self.market_inputs(discount, forward)?;
+        let (f, m) = self.market_inputs(discount, forward)?;
+        let (r, t) = (m.r, m.t);
         let (pc, s, q) = (self.put_or_call, self.settlement, self.quantity);
+        // with no time or no diffusion left the kernels' `d` is 0/0, so
+        // the whole dispatch collapses to one model-free branch — but
+        // the lognormal quotes still refuse a non-positive displaced
+        // market first, exactly as `price` does
+        if t <= 0.0 || quote.vol() <= 0.0 {
+            match quote {
+                CommodityVol::Lognormal(_) => {
+                    self.displaced_inputs(f, 0.0)?;
+                }
+                CommodityVol::ShiftedLognormal { shift, .. } => {
+                    self.displaced_inputs(f, shift)?;
+                }
+                CommodityVol::Normal(_) => {}
+            }
+            return self.degenerate_greeks(f, m);
+        }
         Ok(match quote {
             CommodityVol::Lognormal(vol) | CommodityVol::ShiftedLognormal { vol, .. } => {
                 let shift = match quote {
@@ -175,6 +197,76 @@ impl CommodityOption {
                     zomma: q * bachelier::zomma(f, k, r, vol, t, s),
                 }
             }
+        })
+    }
+
+    /// The Greeks of an option with no diffusion left — expiring today
+    /// (`t = 0`) or quoted at zero vol — where the kernels' `d` is
+    /// `0/0`. The contract is then its (discounted) intrinsic, so the
+    /// second-order Greeks vanish and delta is the payoff's own slope;
+    /// this is the same convention [`bachelier`] applies, and it is
+    /// model-free, so the branch is shared by all three quotes.
+    ///
+    /// Exactly at the money the payoff has a kink: the one-sided deltas
+    /// are 1 and 0, and no single value is defensible, so that case is
+    /// an error rather than a silent half.
+    fn degenerate_greeks(&self, f: f64, m: ExpiryInputs) -> Result<Greeks, RustyQLibError> {
+        let ExpiryInputs { t, r, .. } = m;
+        let df = match self.settlement {
+            // the curve's own discount factor to expiry, which the
+            // kernels reproduce as e^{-rt}
+            FuturesSettlement::Discounted => m.df,
+            FuturesSettlement::Margined => 1.0,
+        };
+        let (k, q) = (self.strike, self.quantity);
+        let intrinsic = match self.put_or_call {
+            PutOrCall::Call => (f - k).max(0.0),
+            PutOrCall::Put => (k - f).max(0.0),
+        };
+        if f == k {
+            return Err(RustyQLibError::invalid_input(
+                FIELD,
+                format!(
+                    "delta is undefined for a struck-at-the-money option with no \
+                     diffusion left (forward {f} = strike {k}, t = {t}): the payoff \
+                     kinks there, so the one-sided deltas are 1 and 0"
+                ),
+            ));
+        }
+        let delta = match self.put_or_call {
+            PutOrCall::Call => {
+                if f > k {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            PutOrCall::Put => {
+                if f < k {
+                    -1.0
+                } else {
+                    0.0
+                }
+            }
+        };
+        Ok(Greeks {
+            delta: q * df * delta,
+            gamma: 0.0,
+            vega: 0.0,
+            // only the discount factor on the intrinsic still decays
+            theta: match self.settlement {
+                FuturesSettlement::Discounted => q * r * df * intrinsic,
+                FuturesSettlement::Margined => 0.0,
+            },
+            // and the premium's own rate sensitivity is that discounting
+            rho: match self.settlement {
+                FuturesSettlement::Discounted => -t * q * df * intrinsic,
+                FuturesSettlement::Margined => 0.0,
+            },
+            vanna: 0.0,
+            charm: 0.0,
+            gamma_p: 0.0,
+            zomma: 0.0,
         })
     }
 
@@ -240,7 +332,7 @@ impl CommodityOption {
                 format!("premium must be non-negative, got {premium}"),
             ));
         }
-        let (mut lo, mut hi) = (1e-9, hi);
+        let lo = 1e-9;
         if price_at(lo)? > premium + 1e-12 {
             return Err(RustyQLibError::invalid_input(
                 "commodity option",
@@ -253,18 +345,13 @@ impl CommodityOption {
                 format!("premium {premium} exceeds the vol={hi} price"),
             ));
         }
-        for _ in 0..200 {
-            let mid = 0.5 * (lo + hi);
-            if price_at(mid)? < premium {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-            if (hi - lo) < 1e-12 * hi.max(1.0) {
-                break;
-            }
-        }
-        Ok(0.5 * (lo + hi))
+        // premium is monotone in vol and the bracket straddles the root:
+        // the shared bisection converges on it. A quote the solver only
+        // bracketed (rather than hit to tolerance) is still the best
+        // estimate of the vol, so the root is returned either way.
+        let root = Solver1d::new(1e-12, 200)
+            .bisection(|v| price_at(v).unwrap_or(f64::NAN) - premium, lo, hi)?;
+        Ok(root.x)
     }
 
     /// Shift and validate `(F, K)` for the (displaced) Black-76 kernel,
@@ -290,38 +377,25 @@ impl CommodityOption {
         Ok((fs, ks))
     }
 
-    /// Resolve `(F, r, t)`: the futures price off the forward curve, and
-    /// the continuously compounded zero rate and year fraction to expiry
-    /// off the discount curve (so `e^{-rt}` is exactly the curve's
-    /// discount factor to expiry).
+    /// Resolve `(F, r, t)`: the futures price off the forward curve, the
+    /// Act/365 vol time to expiry, and the continuous rate reproducing
+    /// the curve's discount factor over that time (so `e^{-rt}` is
+    /// exactly `discount.df_date(expiry)` — see the [`crate::cmdty`]
+    /// conventions).
     fn market_inputs(
         &self,
         discount: &YieldCurve,
         forward: &CommodityForwardCurve,
-    ) -> Result<(f64, f64, f64), RustyQLibError> {
-        let valuation = discount.reference_date();
-        if self.expiry_date < valuation {
-            return Err(RustyQLibError::invalid_input(
-                "commodity option",
-                format!("option expired {} (valuing {valuation})", self.expiry_date),
-            ));
-        }
-        let f = self.forward_price(forward);
-        let t = discount
-            .day_count()
-            .year_fraction(valuation, self.expiry_date);
-        let r = if t > 0.0 {
-            discount.zero_rate_with(t, Compounding::Continuous)
-        } else {
-            0.0
-        };
-        Ok((f, r, t))
+    ) -> Result<(f64, ExpiryInputs), RustyQLibError> {
+        let inputs = expiry_inputs(FIELD, self.expiry_date, discount)?;
+        Ok((self.forward_price(forward), inputs))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::curves::Compounding;
     use crate::core::daycount::DayCountConvention;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -489,6 +563,108 @@ mod tests {
         .unwrap();
         let price = option.price(&discount, &forward, 0.3).unwrap();
         assert!((price - 1_000.0 * 2.0).abs() < 1e-10, "{price}");
+    }
+
+    #[test]
+    fn degenerate_greeks_are_finite_for_both_quote_kinds() {
+        let discount = flat_discount(0.04);
+        let reference = d(REF.0, REF.1, REF.2);
+        let forward = CommodityForwardCurve::flat(72.0, reference).unwrap();
+        // (a) expiring today, (b) quoted at zero vol
+        let expiring = CommodityOption::new(
+            1_000.0,
+            70.0,
+            PutOrCall::Call,
+            reference,
+            reference,
+            FuturesSettlement::Discounted,
+        )
+        .unwrap();
+        let year_out = call(70.0, FuturesSettlement::Discounted);
+        for (option, quote, t) in [
+            (&expiring, CommodityVol::Lognormal(0.35), 0.0),
+            (&expiring, CommodityVol::Normal(20.0), 0.0),
+            (&year_out, CommodityVol::Lognormal(0.0), 1.0),
+            (&year_out, CommodityVol::Normal(0.0), 1.0),
+            (
+                &year_out,
+                CommodityVol::ShiftedLognormal {
+                    vol: 0.0,
+                    shift: 10.0,
+                },
+                1.0,
+            ),
+        ] {
+            let g = option.greeks(&discount, &forward, quote).unwrap();
+            for value in [
+                g.delta, g.gamma, g.vega, g.theta, g.rho, g.vanna, g.charm, g.gamma_p, g.zomma,
+            ] {
+                assert!(value.is_finite(), "{quote:?} at t={t}: {value}");
+            }
+            // an in-the-money call: full discounted delta, no convexity
+            let df = discount.df_date(option.expiry_date);
+            assert!((g.delta - 1_000.0 * df).abs() < 1e-12, "{}", g.delta);
+            assert_eq!(
+                [g.gamma, g.vega, g.vanna, g.charm, g.zomma, g.gamma_p],
+                [0.0; 6]
+            );
+            // rho and theta are the decay of the discounting on the
+            // intrinsic — and at t = 0 the effective rate is zero, so
+            // both vanish
+            let intrinsic = 1_000.0 * df * 2.0;
+            let r = if t > 0.0 { -df.ln() / t } else { 0.0 };
+            assert!((g.rho + t * intrinsic).abs() < 1e-10, "{}", g.rho);
+            assert!((g.theta - r * intrinsic).abs() < 1e-10, "{}", g.theta);
+        }
+    }
+
+    #[test]
+    fn degenerate_greeks_follow_the_settlement_style() {
+        let discount = flat_discount(0.04);
+        let reference = d(REF.0, REF.1, REF.2);
+        let forward = CommodityForwardCurve::flat(72.0, reference).unwrap();
+        // margined: no discounting, so no rate sensitivity and no decay
+        let margined = call(70.0, FuturesSettlement::Margined);
+        let g = margined.greeks(&discount, &forward, 0.0).unwrap();
+        assert_eq!(g.delta, 1_000.0);
+        assert_eq!(g.rho, 0.0);
+        assert_eq!(g.theta, 0.0);
+        // out of the money: no delta either way
+        let otm = call(80.0, FuturesSettlement::Discounted);
+        let g_otm = otm.greeks(&discount, &forward, 0.0).unwrap();
+        assert_eq!(g_otm.delta, 0.0);
+        assert_eq!(g_otm.rho, 0.0);
+        assert_eq!(g_otm.theta, 0.0);
+        // a put is short the underlying
+        let mut put = call(80.0, FuturesSettlement::Discounted);
+        put.put_or_call = PutOrCall::Put;
+        let df = discount.df_date(put.expiry_date);
+        let g_put = put.greeks(&discount, &forward, 0.0).unwrap();
+        assert!((g_put.delta + 1_000.0 * df).abs() < 1e-12, "{}", g_put.delta);
+        // struck exactly at the money the payoff kinks: an error, not a
+        // silent half-delta
+        assert!(call(72.0, FuturesSettlement::Discounted)
+            .greeks(&discount, &forward, 0.0)
+            .is_err());
+        // and the lognormal branch still refuses a negative forward
+        let negative = CommodityForwardCurve::flat(-37.63, reference).unwrap();
+        assert!(call(70.0, FuturesSettlement::Discounted)
+            .greeks(&discount, &negative, 0.0)
+            .is_err());
+    }
+
+    #[test]
+    fn degenerate_greeks_are_the_limit_of_the_live_ones() {
+        // shrinking the vol walks the live Greeks onto the degenerate
+        // branch, so the guard is continuous rather than a special case
+        let discount = flat_discount(0.04);
+        let forward = CommodityForwardCurve::flat(72.0, d(REF.0, REF.1, REF.2)).unwrap();
+        let option = call(70.0, FuturesSettlement::Discounted);
+        let limit = option.greeks(&discount, &forward, 0.0).unwrap();
+        let near = option.greeks(&discount, &forward, 1e-6).unwrap();
+        assert!((limit.delta - near.delta).abs() < 1e-6, "{}", near.delta);
+        assert!((limit.rho - near.rho).abs() < 1e-6, "{}", near.rho);
+        assert!(near.vega.abs() < 1e-6, "{}", near.vega);
     }
 
     #[test]

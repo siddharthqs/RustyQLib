@@ -775,20 +775,12 @@ fn write_local_vol_artifacts(
 fn local_vol_axes(surface: &VolSurface) -> (Vec<f64>, Vec<f64>) {
     let (mut lo, mut hi) = (50.0, 150.0);
     let mut t_max: f64 = 2.0;
-    if let VolInput::StrikeSmiles {
-        expiries, smiles, ..
-    } = surface.to_input()
-    {
+    if let VolInput::StrikeSmiles { smiles, .. } = surface.to_input() {
         let strikes: Vec<f64> = smiles.iter().flatten().map(|&(k, _)| k).collect();
         lo = strikes.iter().copied().fold(f64::MAX, f64::min);
         hi = strikes.iter().copied().fold(f64::MIN, f64::max);
-        t_max = expiries
-            .iter()
-            .map(|tenor| match tenor {
-                crate::core::curves::Tenor::YearFraction(t) => *t,
-                crate::core::curves::Tenor::Date(_) => 0.0,
-            })
-            .fold(0.0, f64::max);
+        // the surface's own pillar times, not re-resolved tenors
+        t_max = surface.expiry_times().iter().copied().fold(0.0, f64::max);
     }
     let t_lo = (2.0 / 52.0_f64).min(0.5 * t_max);
     (linspace(lo, hi, 50), linspace(t_lo, t_max, 30))
@@ -847,9 +839,13 @@ pub fn parse_contract(
 }
 
 /// Load an equity options book from a contracts document for risk and
-/// stress runs. Every contract must be an option on the same underlying;
-/// the signed position quantity is taken from each contract's
-/// `long_short` field (default 1).
+/// stress runs. Every contract must be an option on the same underlying,
+/// quoting the same spot and the same valuation date — the book
+/// aggregates risk against a single market, and the risk estimators
+/// generate their scenarios off the first position's spot, so a document
+/// that disagrees with itself would silently mix two markets. The signed
+/// position quantity is taken from each contract's `long_short` field
+/// (default 1).
 pub fn build_portfolio(contents: &str) -> Result<EquityPortfolio> {
     let format = Format::detect(contents);
     let list_contracts: Contracts = serialization::parse(contents, format)
@@ -871,6 +867,27 @@ pub fn build_portfolio(contents: &str) -> Result<EquityPortfolio> {
                      (book is '{}', contract is '{}')",
                     first.option.base.symbol,
                     option.base.symbol
+                );
+            }
+            let (book_spot, spot) = (
+                first.option.market.spot.value(),
+                option.market.spot.value(),
+            );
+            if (book_spot - spot).abs() > 1e-12 {
+                bail!(
+                    "contract {index}: the portfolio must quote one spot for '{}' \
+                     (book is {book_spot}, contract is {spot})",
+                    option.base.symbol
+                );
+            }
+            let (book_date, date) = (
+                first.option.market.valuation_date,
+                option.market.valuation_date,
+            );
+            if book_date != date {
+                bail!(
+                    "contract {index}: the portfolio must share one valuation date \
+                     (book is {book_date}, contract is {date})"
                 );
             }
         }

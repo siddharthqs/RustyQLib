@@ -51,7 +51,7 @@ fn validate_symbol(symbol: &str) -> Result<(), RustyQLibError> {
 }
 
 /// Parse an OCC option symbol — root, `YYMMDD`, `C`/`P`, strike in
-/// eighths of a cent (`AAPL261218C00310000`) — into
+/// thousandths of a dollar (`AAPL261218C00310000` = strike 310) — into
 /// `(root, expiry, right, strike)`.
 pub fn parse_occ(symbol: &str) -> Option<(&str, NaiveDate, PutOrCall, f64)> {
     if symbol.len() < 16 || !symbol.is_ascii() {
@@ -76,15 +76,22 @@ pub fn parse_occ(symbol: &str) -> Option<(&str, NaiveDate, PutOrCall, f64)> {
     Some((root, expiry, right, strike))
 }
 
+/// The response's `data.options` array — the one shape check every
+/// entry point shares, owning both the error and the borrow so no
+/// caller re-checks and then unwraps.
+fn options_of(value: &serde_json::Value) -> Result<&Vec<serde_json::Value>, RustyQLibError> {
+    value["data"]["options"].as_array().ok_or_else(|| {
+        RustyQLibError::ParseError(
+            "no `data.options` array — this does not look like a Cboe delayed-quotes response"
+                .to_string(),
+        )
+    })
+}
+
 fn parse_response(text: &str) -> Result<serde_json::Value, RustyQLibError> {
     let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| RustyQLibError::ParseError(format!("invalid JSON: {e}")))?;
-    if value["data"]["options"].as_array().is_none() {
-        return Err(RustyQLibError::ParseError(
-            "no `data.options` array — this does not look like a Cboe delayed-quotes response"
-                .to_string(),
-        ));
-    }
+    options_of(&value)?;
     Ok(value)
 }
 
@@ -115,19 +122,17 @@ pub fn to_chain(text: &str) -> Result<OptionChain, RustyQLibError> {
 /// [`to_chain`] for an already-parsed response value (the CLI `build`
 /// command arrives here from either JSON or XML documents).
 pub fn chain_from_value(value: &serde_json::Value) -> Result<OptionChain, RustyQLibError> {
-    if value["data"]["options"].as_array().is_none() {
-        return Err(RustyQLibError::ParseError(
-            "no `data.options` array — this does not look like a Cboe delayed-quotes response"
-                .to_string(),
-        ));
-    }
+    let records = options_of(value)?;
     let timestamp = value["timestamp"].as_str().unwrap_or_default().to_string();
-    let as_of = NaiveDate::parse_from_str(&timestamp[..timestamp.len().min(10)], "%Y-%m-%d")
-        .map_err(|_| {
-            RustyQLibError::ParseError(format!(
-                "cannot read a snapshot date from timestamp `{timestamp}`"
-            ))
-        })?;
+    // `get` respects char boundaries: a multibyte timestamp from an
+    // unexpected feed must fail as a parse error, not panic on a byte
+    // slice through the middle of a code point
+    let head = timestamp.get(..10).unwrap_or(&timestamp);
+    let as_of = NaiveDate::parse_from_str(head, "%Y-%m-%d").map_err(|_| {
+        RustyQLibError::ParseError(format!(
+            "cannot read a snapshot date from timestamp `{timestamp}`"
+        ))
+    })?;
     let symbol = value["data"]["symbol"]
         .as_str()
         .or(value["symbol"].as_str())
@@ -135,7 +140,6 @@ pub fn chain_from_value(value: &serde_json::Value) -> Result<OptionChain, RustyQ
         .to_string();
     let spot = value["data"]["current_price"].as_f64().filter(|p| *p > 0.0);
 
-    let records = value["data"]["options"].as_array().expect("checked above");
     let mut quotes = Vec::with_capacity(records.len());
     let mut unparsed = 0usize;
     for record in records {
@@ -277,6 +281,37 @@ mod tests {
             56
         );
         assert!(to_document("{}", "AAPL").is_err());
+    }
+
+    /// A non-ASCII timestamp used to byte-slice through a code point and
+    /// panic; it must come back as a parse error like any other garbage.
+    #[test]
+    fn odd_timestamps_are_parse_errors_not_panics() {
+        let with_timestamp = |timestamp: serde_json::Value| {
+            serde_json::json!({
+                "timestamp": timestamp,
+                "data": { "symbol": "AAPL", "options": [] },
+            })
+        };
+        for timestamp in [
+            // multibyte: the 10-byte prefix lands mid-character
+            serde_json::json!("2026-08-0\u{4e2d}\u{6587}"),
+            serde_json::json!("\u{1f4c8}\u{1f4c9}"),
+            serde_json::json!("short"),
+            serde_json::json!(""),
+            serde_json::json!(20260808),
+        ] {
+            let err = chain_from_value(&with_timestamp(timestamp.clone()))
+                .expect_err("must not parse")
+                .to_string();
+            assert!(err.contains("snapshot date"), "{timestamp}: {err}");
+        }
+        // exactly ten ASCII characters still parse
+        let ok = chain_from_value(&with_timestamp(serde_json::json!(
+            "2026-08-08 14:30:00"
+        )))
+        .unwrap();
+        assert_eq!(ok.as_of, d(2026, 8, 8));
     }
 
     #[test]

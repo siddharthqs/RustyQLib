@@ -27,6 +27,25 @@ use crate::equity::models::calibration::TransformSpace;
 
 // ── Jump specifications ─────────────────────────────────────────────────
 
+/// What the Heston-times-jumps composition needs from a jump law: the
+/// arrival intensity, the martingale compensator `kbar = E[e^Y] - 1`,
+/// and the jump-size characteristic function `E[e^{iuY}]`. Implemented
+/// by [`MertonJumps`] and [`KouJumps`], so the characteristic function,
+/// the pricer and the calibration are each written once.
+pub(crate) trait JumpSpec {
+    fn intensity(&self) -> f64;
+    fn kbar(&self) -> f64;
+    fn cf(&self, u: Cpx) -> Cpx;
+}
+
+/// A Heston-plus-jumps parameter set, as the generic pricing and
+/// calibration entry points see it.
+pub(crate) trait JumpModel: TransformSpace {
+    type Jumps: JumpSpec;
+    fn heston(&self) -> &HestonParams;
+    fn jumps(&self) -> &Self::Jumps;
+}
+
 /// Lognormal (Merton) jumps: `ln(1 + J) ~ N(ln(1 + mean_jump) -
 /// jump_vol^2/2, jump_vol^2)`, arriving at `intensity` per year.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -41,26 +60,36 @@ pub struct MertonJumps {
 }
 
 impl MertonJumps {
+    /// Every bound is written as `!(finite && ...)` so NaN and the
+    /// infinities are refused too: a comparison-only gate lets a NaN
+    /// through into the characteristic function, where it prices to
+    /// NaN or (through a downstream floor) to a finite wrong number.
     pub fn validate(&self) -> Result<(), RustyQLibError> {
-        if self.intensity < 0.0 {
+        if !(self.intensity.is_finite() && self.intensity >= 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "bates params",
-                "jump intensity must be non-negative",
+                "jump intensity must be non-negative and finite",
             ));
         }
-        if self.mean_jump <= -1.0 {
+        if !(self.mean_jump.is_finite() && self.mean_jump > -1.0) {
             return Err(RustyQLibError::invalid_input(
                 "bates params",
-                "mean jump must be greater than -100%",
+                "mean jump must be finite and greater than -100%",
             ));
         }
-        if self.jump_vol <= 0.0 {
+        if !(self.jump_vol.is_finite() && self.jump_vol > 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "bates params",
-                "jump vol must be positive",
+                "jump vol must be positive and finite",
             ));
         }
         Ok(())
+    }
+}
+
+impl JumpSpec for MertonJumps {
+    fn intensity(&self) -> f64 {
+        self.intensity
     }
 
     /// Martingale compensator `kbar = E[e^Y] - 1`.
@@ -95,11 +124,14 @@ pub struct KouJumps {
 }
 
 impl KouJumps {
+    /// NaN-safe, for the reason spelled out on
+    /// [`MertonJumps::validate`]. (`p_up` is already NaN-safe: a range
+    /// `contains` is false for NaN.)
     pub fn validate(&self) -> Result<(), RustyQLibError> {
-        if self.intensity < 0.0 {
+        if !(self.intensity.is_finite() && self.intensity >= 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "bates params",
-                "jump intensity must be non-negative",
+                "jump intensity must be non-negative and finite",
             ));
         }
         if !(0.0..=1.0).contains(&self.p_up) {
@@ -108,19 +140,25 @@ impl KouJumps {
                 "p_up must be in [0, 1]",
             ));
         }
-        if self.eta_up <= 1.0 {
+        if !(self.eta_up.is_finite() && self.eta_up > 1.0) {
             return Err(RustyQLibError::invalid_input(
                 "bates params",
-                "eta_up must exceed 1 (finite expected up-jump)",
+                "eta_up must be finite and exceed 1 (finite expected up-jump)",
             ));
         }
-        if self.eta_down <= 0.0 {
+        if !(self.eta_down.is_finite() && self.eta_down > 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "bates params",
-                "eta_down must be positive",
+                "eta_down must be positive and finite",
             ));
         }
         Ok(())
+    }
+}
+
+impl JumpSpec for KouJumps {
+    fn intensity(&self) -> f64 {
+        self.intensity
     }
 
     /// `kbar = E[e^Y] - 1 = p eta1/(eta1 - 1) + (1-p) eta2/(eta2 + 1) - 1`.
@@ -173,6 +211,26 @@ impl BatesDoubleExpParams {
     }
 }
 
+impl JumpModel for BatesParams {
+    type Jumps = MertonJumps;
+    fn heston(&self) -> &HestonParams {
+        &self.heston
+    }
+    fn jumps(&self) -> &MertonJumps {
+        &self.jumps
+    }
+}
+
+impl JumpModel for BatesDoubleExpParams {
+    type Jumps = KouJumps;
+    fn heston(&self) -> &HestonParams {
+        &self.heston
+    }
+    fn jumps(&self) -> &KouJumps {
+        &self.jumps
+    }
+}
+
 /// The compensated compound-Poisson factor
 /// `exp(lambda t (cf_jump(u) - 1) - iu lambda t kbar)`.
 fn jump_factor(u: Cpx, t: f64, intensity: f64, kbar: f64, jump_cf: Cpx) -> Cpx {
@@ -184,17 +242,43 @@ fn jump_factor(u: Cpx, t: f64, intensity: f64, kbar: f64, jump_cf: Cpx) -> Cpx {
         .exp()
 }
 
-/// Log-price characteristic function of the Bates (Heston + Merton
-/// jumps) model — the diffusion CF times the compensated jump factor.
-pub(crate) fn ln_price_cf(u: Cpx, s: f64, r: f64, q: f64, t: f64, params: &BatesParams) -> Cpx {
-    let j = params.jumps;
-    characteristic_fn(u, s, r, q, t, &params.heston).mul(jump_factor(
+/// Log-price characteristic function of any Heston-plus-jumps model:
+/// the diffusion CF times the compensated jump factor. The single
+/// composition every entry point below routes through.
+pub(crate) fn ln_price_cf_with<J: JumpSpec>(
+    u: Cpx,
+    s: f64,
+    r: f64,
+    q: f64,
+    t: f64,
+    hp: &HestonParams,
+    j: &J,
+) -> Cpx {
+    characteristic_fn(u, s, r, q, t, hp).mul(jump_factor(
         u,
         t,
-        j.intensity,
+        j.intensity(),
         j.kbar(),
         j.cf(u),
     ))
+}
+
+/// [`ln_price_cf_with`] for a whole parameter set.
+pub(crate) fn ln_price_cf_of<M: JumpModel>(
+    u: Cpx,
+    s: f64,
+    r: f64,
+    q: f64,
+    t: f64,
+    params: &M,
+) -> Cpx {
+    ln_price_cf_with(u, s, r, q, t, params.heston(), params.jumps())
+}
+
+/// Log-price characteristic function of the Bates (Heston + Merton
+/// jumps) model.
+pub(crate) fn ln_price_cf(u: Cpx, s: f64, r: f64, q: f64, t: f64, params: &BatesParams) -> Cpx {
+    ln_price_cf_of(u, s, r, q, t, params)
 }
 
 /// Log-price characteristic function of the Heston + Kou model.
@@ -206,33 +290,23 @@ pub(crate) fn ln_price_cf_double_exp(
     t: f64,
     params: &BatesDoubleExpParams,
 ) -> Cpx {
-    let j = params.jumps;
-    characteristic_fn(u, s, r, q, t, &params.heston).mul(jump_factor(
-        u,
-        t,
-        j.intensity,
-        j.kbar(),
-        j.cf(u),
-    ))
+    ln_price_cf_of(u, s, r, q, t, params)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn price_with_jumps(
+/// Semi-analytic vanilla price under any Heston-plus-jumps model, from
+/// the shared P1/P2 machinery.
+fn price_with_jumps<J: JumpSpec>(
     s: f64,
     k: f64,
     r: f64,
     q: f64,
     t: f64,
     hp: &HestonParams,
-    intensity: f64,
-    kbar: f64,
-    jump_cf: &dyn Fn(Cpx) -> Cpx,
+    j: &J,
     put_or_call: PutOrCall,
 ) -> f64 {
     assert!(s > 0.0 && k > 0.0 && t > 0.0);
-    let cf = |u: Cpx| -> Cpx {
-        characteristic_fn(u, s, r, q, t, hp).mul(jump_factor(u, t, intensity, kbar, jump_cf(u)))
-    };
+    let cf = |u: Cpx| -> Cpx { ln_price_cf_with(u, s, r, q, t, hp, j) };
     let forward = s * ((r - q) * t).exp();
     let (p1, p2) = probabilities_with_cf(&cf, forward, k);
     let call = s * (-q * t).exp() * p1 - k * (-r * t).exp() * p2;
@@ -253,19 +327,7 @@ pub fn bates_price(
     put_or_call: PutOrCall,
 ) -> f64 {
     params.validate().expect("invalid Bates parameters");
-    let jumps = params.jumps;
-    price_with_jumps(
-        s,
-        k,
-        r,
-        q,
-        t,
-        &params.heston,
-        jumps.intensity,
-        jumps.kbar(),
-        &|u| jumps.cf(u),
-        put_or_call,
-    )
+    price_with_jumps(s, k, r, q, t, &params.heston, &params.jumps, put_or_call)
 }
 
 /// Semi-analytic Bates double-exponential (Heston + Kou jumps) price of
@@ -282,19 +344,7 @@ pub fn bates_double_exp_price(
     params
         .validate()
         .expect("invalid Bates double-exponential parameters");
-    let jumps = params.jumps;
-    price_with_jumps(
-        s,
-        k,
-        r,
-        q,
-        t,
-        &params.heston,
-        jumps.intensity,
-        jumps.kbar(),
-        &|u| jumps.cf(u),
-        put_or_call,
-    )
+    price_with_jumps(s, k, r, q, t, &params.heston, &params.jumps, put_or_call)
 }
 
 // ── Calibration ─────────────────────────────────────────────────────────
@@ -309,12 +359,26 @@ pub type BatesFit = crate::equity::models::calibration::Fit<BatesParams>;
 /// (`rmse` in price units).
 pub type BatesDoubleExpFit = crate::equity::models::calibration::Fit<BatesDoubleExpParams>;
 
+/// The floor applied to a starting jump intensity before it enters log
+/// space.
+///
+/// `lambda` calibrates as `exp(u)`, so `d lambda / du = lambda`: a start
+/// at (or near) zero intensity has a numerically zero Jacobian column,
+/// the optimizer cannot move it, and the fit converges — reporting
+/// `converged = true` — on a negligible intensity paired with absurd
+/// compensating jump sizes. Starting from a small but *calibratable*
+/// intensity leaves the parameter free; the fit is free to shrink it
+/// back toward zero from there.
+const MIN_START_INTENSITY: f64 = 0.05;
+
 /// Unconstrained space: Heston's five transforms plus
-/// `[ln lambda, ln(1 + mean_jump), ln jump_vol]`.
+/// `[ln lambda, ln(1 + mean_jump), ln jump_vol]`. The intensity is
+/// floored at [`MIN_START_INTENSITY`] so a zero-intensity start stays
+/// calibratable.
 impl TransformSpace for BatesParams {
     fn to_unconstrained(&self) -> Vec<f64> {
         let mut u = self.heston.to_unconstrained();
-        u.push(self.jumps.intensity.max(1e-8).ln());
+        u.push(self.jumps.intensity.max(MIN_START_INTENSITY).ln());
         u.push((1.0 + self.jumps.mean_jump).ln());
         u.push(self.jumps.jump_vol.ln());
         u
@@ -333,12 +397,13 @@ impl TransformSpace for BatesParams {
 }
 
 /// Unconstrained space: Heston's five transforms plus
-/// `[ln lambda, logit p_up, ln(eta_up - 1), ln eta_down]`.
+/// `[ln lambda, logit p_up, ln(eta_up - 1), ln eta_down]`, with the
+/// same [`MIN_START_INTENSITY`] floor on the intensity.
 impl TransformSpace for BatesDoubleExpParams {
     fn to_unconstrained(&self) -> Vec<f64> {
         let p = self.jumps.p_up.clamp(1e-6, 1.0 - 1e-6);
         let mut u = self.heston.to_unconstrained();
-        u.push(self.jumps.intensity.max(1e-8).ln());
+        u.push(self.jumps.intensity.max(MIN_START_INTENSITY).ln());
         u.push((p / (1.0 - p)).ln());
         u.push((self.jumps.eta_up - 1.0).max(1e-8).ln());
         u.push(self.jumps.eta_down.ln());
@@ -358,30 +423,55 @@ impl TransformSpace for BatesDoubleExpParams {
     }
 }
 
+/// Calibrate any Heston-plus-jumps parameter set to European vanilla
+/// quotes: the Levenberg-Marquardt-in-transform-space driver, shared by
+/// both models. `start` is validated by the caller; the quotes are
+/// validated inside.
+fn calibrate_jump_model<M: JumpModel>(
+    s: f64,
+    r: f64,
+    q: f64,
+    quotes: &[HestonQuote],
+    start: &M,
+) -> Result<crate::equity::models::calibration::Fit<M>, RustyQLibError> {
+    crate::equity::models::calibration::calibrate_generic(quotes, start, r, 1e-10, |p, u, t| {
+        ln_price_cf_of(u, s, r, q, t, p)
+    })
+}
+
 /// Calibrate all eight Bates parameters to European vanilla quotes —
 /// the same Levenberg-Marquardt-in-transform-space pattern as
 /// [`heston::calibrate`](crate::equity::heston::calibrate). Short-dated
 /// quotes are what identify the jump parameters against the diffusion.
-pub fn calibrate(s: f64, r: f64, q: f64, quotes: &[HestonQuote], start: &BatesParams) -> BatesFit {
-    start.validate().expect("invalid starting parameters");
-    crate::equity::models::calibration::calibrate_generic(quotes, start, r, 1e-10, |p, u, t| {
-        ln_price_cf(u, s, r, q, t, p)
-    })
+///
+/// Invalid input — an invalid `start`, no quotes, or a quote with a
+/// non-positive / non-finite strike or maturity or a negative /
+/// non-finite price — is a returned
+/// [`invalid_input`](RustyQLibError::invalid_input) error. A
+/// zero-intensity start is admissible: it enters log space at
+/// [`MIN_START_INTENSITY`] so the jump leg stays calibratable.
+pub fn calibrate(
+    s: f64,
+    r: f64,
+    q: f64,
+    quotes: &[HestonQuote],
+    start: &BatesParams,
+) -> Result<BatesFit, RustyQLibError> {
+    start.validate()?;
+    calibrate_jump_model(s, r, q, quotes, start)
 }
 
 /// Calibrate all nine double-exponential Bates parameters to European
-/// vanilla quotes.
+/// vanilla quotes. Same input contract as [`calibrate`].
 pub fn calibrate_double_exp(
     s: f64,
     r: f64,
     q: f64,
     quotes: &[HestonQuote],
     start: &BatesDoubleExpParams,
-) -> BatesDoubleExpFit {
-    start.validate().expect("invalid starting parameters");
-    crate::equity::models::calibration::calibrate_generic(quotes, start, r, 1e-10, |p, u, t| {
-        ln_price_cf_double_exp(u, s, r, q, t, p)
-    })
+) -> Result<BatesDoubleExpFit, RustyQLibError> {
+    start.validate()?;
+    calibrate_jump_model(s, r, q, quotes, start)
 }
 
 #[cfg(test)]
@@ -650,7 +740,7 @@ mod tests {
                 jump_vol: 0.2,
             },
         };
-        let fit = calibrate(S, R, Q, &quotes, &start);
+        let fit = calibrate(S, R, Q, &quotes, &start).unwrap();
         assert!(
             fit.rmse < 1e-3,
             "price rmse {} params {:?}",
@@ -658,6 +748,154 @@ mod tests {
             fit.params
         );
         assert!(fit.params.validate().is_ok());
+    }
+
+    #[test]
+    fn a_zero_intensity_start_still_recovers_the_jumps() {
+        // lambda calibrates as exp(u), so a start at zero intensity used
+        // to enter log space at ln(1e-8) with a numerically zero
+        // Jacobian column: the fit froze there and "converged" on a
+        // negligible intensity with absurd compensating jump sizes.
+        // Floored at MIN_START_INTENSITY it must recover the generating
+        // jumps from the same quotes as the calibration test above.
+        let truth = bates();
+        let mut quotes = Vec::new();
+        for (t, strikes) in [
+            (0.25_f64, [90.0, 100.0, 110.0]),
+            (1.0, [85.0, 100.0, 115.0]),
+        ] {
+            for k in strikes {
+                quotes.push(HestonQuote {
+                    strike: k,
+                    maturity: t,
+                    price: bates_price(S, k, R, Q, t, &truth, PutOrCall::Call),
+                    put_or_call: PutOrCall::Call,
+                });
+            }
+        }
+        let start = BatesParams {
+            heston: HestonParams {
+                v0: 0.05,
+                kappa: 1.5,
+                theta: 0.04,
+                vol_of_vol: 0.4,
+                rho: -0.5,
+            },
+            jumps: MertonJumps {
+                intensity: 0.0, // the degenerate start
+                mean_jump: -0.04,
+                jump_vol: 0.2,
+            },
+        };
+        let fit = calibrate(S, R, Q, &quotes, &start).unwrap();
+        assert!(
+            fit.rmse < 1e-3,
+            "price rmse {} params {:?}",
+            fit.rmse,
+            fit.params
+        );
+        assert!(fit.params.validate().is_ok());
+        // the jump leg is alive, not frozen at the floor with the size
+        // parameters blown up to compensate
+        assert!(
+            fit.params.jumps.intensity > 0.1,
+            "jump intensity collapsed to {}",
+            fit.params.jumps.intensity
+        );
+        assert!(
+            fit.params.jumps.mean_jump.abs() < 0.5,
+            "absurd mean jump {}",
+            fit.params.jumps.mean_jump
+        );
+        assert!(
+            fit.params.jumps.jump_vol < 1.0,
+            "absurd jump vol {}",
+            fit.params.jumps.jump_vol
+        );
+        // the floor only touches the start: it does not stop the fit
+        // from reading a genuinely jump-free market as jump-free
+        let heston_only: Vec<HestonQuote> = [90.0, 100.0, 110.0]
+            .iter()
+            .map(|&k| HestonQuote {
+                strike: k,
+                maturity: 1.0,
+                price: crate::equity::heston::heston_price(
+                    S,
+                    k,
+                    R,
+                    Q,
+                    1.0,
+                    &heston(),
+                    PutOrCall::Call,
+                ),
+                put_or_call: PutOrCall::Call,
+            })
+            .collect();
+        let flat = calibrate(S, R, Q, &heston_only, &start).unwrap();
+        assert!(flat.rmse < 1e-3, "price rmse {}", flat.rmse);
+    }
+
+    #[test]
+    fn calibration_rejects_bad_input_instead_of_panicking() {
+        let truth = bates();
+        let good: Vec<HestonQuote> = [90.0, 100.0, 110.0]
+            .iter()
+            .map(|&k| HestonQuote {
+                strike: k,
+                maturity: T,
+                price: bates_price(S, k, R, Q, T, &truth, PutOrCall::Call),
+                put_or_call: PutOrCall::Call,
+            })
+            .collect();
+        // no quotes, and an invalid start, for both entry points
+        assert!(calibrate(S, R, Q, &[], &truth).is_err());
+        let bad_start = BatesParams {
+            jumps: MertonJumps {
+                jump_vol: f64::NAN,
+                ..truth.jumps
+            },
+            ..truth
+        };
+        assert!(calibrate(S, R, Q, &good, &bad_start).is_err());
+        let kou_truth = kou();
+        assert!(calibrate_double_exp(S, R, Q, &[], &kou_truth).is_err());
+        assert!(calibrate_double_exp(
+            S,
+            R,
+            Q,
+            &good,
+            &BatesDoubleExpParams {
+                jumps: KouJumps {
+                    eta_up: 0.5,
+                    ..kou_truth.jumps
+                },
+                ..kou_truth
+            }
+        )
+        .is_err());
+        // a poisoned quote
+        for (strike, maturity, price) in [
+            (0.0, T, 5.0),
+            (f64::NAN, T, 5.0),
+            (100.0, 0.0, 5.0),
+            (100.0, f64::NAN, 5.0),
+            (100.0, T, -1.0),
+            (100.0, T, f64::INFINITY),
+        ] {
+            let mut quotes = good.clone();
+            quotes[1] = HestonQuote {
+                strike,
+                maturity,
+                price,
+                put_or_call: PutOrCall::Call,
+            };
+            assert!(
+                calibrate(S, R, Q, &quotes, &truth).is_err(),
+                "K={strike} t={maturity} price={price} should be refused"
+            );
+            assert!(calibrate_double_exp(S, R, Q, &quotes, &kou_truth).is_err());
+        }
+        assert!(calibrate(S, R, Q, &good, &truth).is_ok());
     }
 
     #[test]
@@ -687,7 +925,7 @@ mod tests {
                 eta_down: 15.0,
             },
         };
-        let fit = calibrate_double_exp(S, R, Q, &quotes, &start);
+        let fit = calibrate_double_exp(S, R, Q, &quotes, &start).unwrap();
         assert!(
             fit.rmse < 1e-3,
             "price rmse {} params {:?}",
@@ -708,5 +946,83 @@ mod tests {
         d = kou();
         d.jumps.p_up = 1.4;
         assert!(d.validate().is_err());
+    }
+
+    #[test]
+    fn parameter_validation_rejects_nan_and_infinities() {
+        // comparison-only gates let NaN through into the characteristic
+        // function; every jump bound must refuse it and both infinities
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for jumps in [
+                MertonJumps {
+                    intensity: bad,
+                    ..bates().jumps
+                },
+                MertonJumps {
+                    mean_jump: bad,
+                    ..bates().jumps
+                },
+                MertonJumps {
+                    jump_vol: bad,
+                    ..bates().jumps
+                },
+            ] {
+                assert!(
+                    BatesParams {
+                        heston: heston(),
+                        jumps
+                    }
+                    .validate()
+                    .is_err(),
+                    "merton {jumps:?} with {bad}"
+                );
+            }
+            for jumps in [
+                KouJumps {
+                    intensity: bad,
+                    ..kou().jumps
+                },
+                KouJumps {
+                    p_up: bad,
+                    ..kou().jumps
+                },
+                KouJumps {
+                    eta_up: bad,
+                    ..kou().jumps
+                },
+                KouJumps {
+                    eta_down: bad,
+                    ..kou().jumps
+                },
+            ] {
+                assert!(
+                    BatesDoubleExpParams {
+                        heston: heston(),
+                        jumps
+                    }
+                    .validate()
+                    .is_err(),
+                    "kou {jumps:?} with {bad}"
+                );
+            }
+            // the Heston leg is gated by the same rule
+            assert!(BatesParams {
+                heston: HestonParams { v0: bad, ..heston() },
+                jumps: bates().jumps,
+            }
+            .validate()
+            .is_err());
+        }
+        // zero intensity remains a valid (jump-free) parameter set
+        assert!(BatesParams {
+            heston: heston(),
+            jumps: MertonJumps {
+                intensity: 0.0,
+                ..bates().jumps
+            },
+        }
+        .validate()
+        .is_ok());
+        assert!(bates().validate().is_ok() && kou().validate().is_ok());
     }
 }

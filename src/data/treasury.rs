@@ -57,10 +57,6 @@ pub struct ParYieldRow {
     pub points: Vec<ParYieldPoint>,
 }
 
-/// Reject percent yields outside this band: a value above 50 almost
-/// certainly means the feed changed units and must not pass through.
-const PERCENT_BOUNDS: (f64, f64) = (-5.0, 50.0);
-
 /// Parse a tenor column header (`"1 Mo"`, `"1.5 Month"`, `"30 Yr"`) into
 /// whole months plus leftover days. `None` for anything unrecognized.
 fn parse_tenor_header(header: &str) -> Option<(u32, u32)> {
@@ -155,17 +151,10 @@ pub fn parse_csv(text: &str) -> Result<Vec<ParYieldRow>, RustyQLibError> {
                     &headers[i]
                 ))
             })?;
-            if !(yield_pct.is_finite()
-                && yield_pct > PERCENT_BOUNDS.0
-                && yield_pct < PERCENT_BOUNDS.1)
-            {
-                return Err(RustyQLibError::ParseError(format!(
-                    "row {} ({date}): {yield_pct} in column `{}` is outside the plausible \
-                     percent range — refusing to guess the feed's units",
-                    line + 2,
-                    &headers[i]
-                )));
-            }
+            super::plausible_percent(
+                yield_pct,
+                &format!("row {} ({date}), column `{}`", line + 2, &headers[i]),
+            )?;
             points.push(ParYieldPoint {
                 label: headers[i].to_string(),
                 months,
@@ -187,34 +176,7 @@ pub fn select_row(
     rows: &[ParYieldRow],
     date: Option<NaiveDate>,
 ) -> Result<&ParYieldRow, RustyQLibError> {
-    let latest = rows
-        .iter()
-        .max_by_key(|r| r.date)
-        .ok_or_else(|| RustyQLibError::ParseError("the CSV contains no data rows".to_string()))?;
-    let Some(date) = date else {
-        return Ok(latest);
-    };
-    if let Some(row) = rows.iter().find(|r| r.date == date) {
-        return Ok(row);
-    }
-    let nearest_earlier = rows.iter().filter(|r| r.date < date).max_by_key(|r| r.date);
-    Err(match nearest_earlier {
-        Some(row) => RustyQLibError::invalid_input(
-            "date",
-            format!(
-                "no par yields published for {date} (weekend or holiday?); \
-                 the nearest earlier published date is {}",
-                row.date
-            ),
-        ),
-        None => RustyQLibError::invalid_input(
-            "date",
-            format!(
-                "no par yields published for {date}; this file starts at {}",
-                rows.iter().map(|r| r.date).min().unwrap_or(latest.date)
-            ),
-        ),
-    })
+    super::select_dated(rows, date, |row| row.date, "par yields")
 }
 
 /// Render one day's curve as a plain document: the points exactly as
@@ -282,13 +244,7 @@ pub fn row_from_document(value: &serde_json::Value) -> Result<ParYieldRow, Rusty
         let yield_pct = entry["yield"].as_f64().ok_or_else(|| {
             RustyQLibError::ParseError(format!("tenor `{label}` has no numeric `yield`"))
         })?;
-        if !(yield_pct.is_finite() && yield_pct > PERCENT_BOUNDS.0 && yield_pct < PERCENT_BOUNDS.1)
-        {
-            return Err(RustyQLibError::ParseError(format!(
-                "tenor `{label}`: {yield_pct} is outside the plausible percent range — \
-                 refusing to guess the document's units"
-            )));
-        }
+        super::plausible_percent(yield_pct, &format!("tenor `{label}`"))?;
         points.push(ParYieldPoint {
             label: label.to_string(),
             months,
@@ -346,13 +302,10 @@ pub fn bootstrap_par_yield_curve(row: &ParYieldRow) -> Result<YieldCurve, RustyQ
                         format!("cannot advance {settlement} by `{}`", point.label),
                     )
                 })?;
-            let n = (maturity - settlement).num_days() as f64;
-            let price = if n <= 182.0 {
-                100.0 / (1.0 + yield_rate * n / 365.0)
-            } else {
-                100.0 / ((1.0 + yield_rate / 2.0) * (1.0 + (n / 365.0 - 0.5) * yield_rate))
-            };
             let bill = TreasuryBill::new(100.0, maturity)?;
+            // the published sub-year par yield is a BEY; the bill owns
+            // that convention, including where it stops being simple
+            let price = bill.price_from_bond_equivalent_yield(yield_rate, settlement)?;
             let discount_rate = bill.discount_rate_from_price(price, settlement)?;
             instruments.push(Box::new(BillQuote::new(bill, discount_rate, settlement)?));
         } else {

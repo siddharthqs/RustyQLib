@@ -1285,6 +1285,28 @@ pub fn implied_vol_from_price(
             "option is expired".to_string(),
         ));
     }
+    if !t.is_finite() {
+        return Err(RustyQLibError::invalid_input(
+            "time_to_maturity",
+            format!("time to maturity must be finite, got {t}"),
+        ));
+    }
+    for (name, x) in [("spot", s), ("strike", k)] {
+        if !(x.is_finite() && x > 0.0) {
+            return Err(RustyQLibError::invalid_input(
+                name,
+                format!("{name} must be positive and finite, got {x}"),
+            ));
+        }
+    }
+    // a live option's price is strictly positive; zero, negative or NaN
+    // quotes would otherwise ride through the bound checks as NaN
+    if !(target.is_finite() && target > 0.0) {
+        return Err(RustyQLibError::invalid_input(
+            "option_price",
+            format!("option price must be positive and finite, got {target}"),
+        ));
+    }
     let lower_bound = bs_price(s, k, r, q, 0.0, t, put_or_call);
     let upper_bound = match put_or_call {
         PutOrCall::Call => s * exp(-q * t),

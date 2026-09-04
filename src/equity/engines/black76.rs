@@ -63,6 +63,22 @@ fn d1_d2(f: f64, k: f64, sigma: f64, t: f64) -> (f64, f64) {
     (d1, d1 - st)
 }
 
+/// At expiry or with no volatility the lognormal density collapses: the
+/// closed forms below divide by `sigma sqrt(T)`, so every Greek takes its
+/// limiting value instead (delta becomes the discounted in-the-money
+/// indicator, the curvature and vol sensitivities vanish).
+fn degenerate(sigma: f64, t: f64) -> bool {
+    t <= 0.0 || sigma <= 0.0
+}
+
+/// Intrinsic value of the option on the futures price.
+fn intrinsic(f: f64, k: f64, put_or_call: PutOrCall) -> f64 {
+    match put_or_call {
+        PutOrCall::Call => (f - k).max(0.0),
+        PutOrCall::Put => (k - f).max(0.0),
+    }
+}
+
 /// Black-76 price of a European option on a future.
 pub fn price(
     f: f64,
@@ -78,12 +94,8 @@ pub fn price(
         "futures price and strike must be positive"
     );
     let df = settlement.discount_factor(r, t);
-    if t <= 0.0 || sigma <= 0.0 {
-        let intrinsic = match put_or_call {
-            PutOrCall::Call => (f - k).max(0.0),
-            PutOrCall::Put => (k - f).max(0.0),
-        };
-        return df * intrinsic;
+    if degenerate(sigma, t) {
+        return df * intrinsic(f, k, put_or_call);
     }
     let (d1, d2) = d1_d2(f, k, sigma, t);
     match put_or_call {
@@ -103,6 +115,13 @@ pub fn delta(
     settlement: FuturesSettlement,
 ) -> f64 {
     let df = settlement.discount_factor(r, t);
+    if degenerate(sigma, t) {
+        // discounted in-the-money indicator
+        return match put_or_call {
+            PutOrCall::Call => df * f64::from(u8::from(f > k)),
+            PutOrCall::Put => -df * f64::from(u8::from(f < k)),
+        };
+    }
     let (d1, _) = d1_d2(f, k, sigma, t);
     match put_or_call {
         PutOrCall::Call => df * norm_cdf(d1),
@@ -112,6 +131,9 @@ pub fn delta(
 
 /// Gamma with respect to the futures price `F` (same for calls and puts).
 pub fn gamma(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
     df * norm_pdf(d1) / (f * sigma * t.sqrt())
@@ -135,12 +157,18 @@ pub fn gamma_p(
 
 /// Zomma, the change in futures gamma per unit change in volatility.
 pub fn zomma(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let (d1, d2) = d1_d2(f, k, sigma, t);
     gamma(f, k, r, sigma, t, settlement) * (d1 * d2 - 1.0) / sigma
 }
 
 /// Vega (per unit of vol; same for calls and puts).
 pub fn vega(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
     df * f * norm_pdf(d1) * t.sqrt()
@@ -151,12 +179,18 @@ pub fn vega(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettl
 /// and puts, since put-call parity is volatility-independent. It is negative
 /// near the money (vega is concave in vol there) and positive in the wings.
 pub fn volga(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let (d1, d2) = d1_d2(f, k, sigma, t);
     vega(f, k, r, sigma, t, settlement) * d1 * d2 / sigma
 }
 
 /// Vanna, the change in futures delta per unit change in volatility.
 pub fn vanna(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
     df * norm_pdf(d1) * (t.sqrt() - d1 / sigma)
@@ -172,6 +206,9 @@ pub fn charm(
     put_or_call: PutOrCall,
     settlement: FuturesSettlement,
 ) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     let (d1, _) = d1_d2(f, k, sigma, t);
     let d1_dt = sigma / (2.0 * t.sqrt()) - d1 / (2.0 * t);
@@ -215,6 +252,13 @@ pub fn theta(
     settlement: FuturesSettlement,
 ) -> f64 {
     let df = settlement.discount_factor(r, t);
+    if degenerate(sigma, t) {
+        // no volatility bleed: only the discount unwinds on the intrinsic
+        return match settlement {
+            FuturesSettlement::Margined => 0.0,
+            FuturesSettlement::Discounted => r * df * intrinsic(f, k, put_or_call),
+        };
+    }
     let (d1, _) = d1_d2(f, k, sigma, t);
     // volatility bleed term F df dN(d1) sigma / (2 sqrt(T)), common to both
     // settlement styles and to calls and puts
@@ -350,6 +394,76 @@ mod tests {
         );
         let bsm = bs_price(s, K, R, q, SIG, T, PutOrCall::Call);
         assert!((b76 - bsm).abs() < 1e-10, "b76 {b76} vs bsm {bsm}");
+    }
+
+    #[test]
+    fn greeks_take_limiting_values_at_expiry_and_zero_vol() {
+        // the closed forms divide by sigma sqrt(T): at expiry or with no
+        // vol every Greek must mirror price()'s intrinsic branch instead
+        // of returning NaN/inf
+        for s in [FuturesSettlement::Discounted, FuturesSettlement::Margined] {
+            for (sigma, t) in [(SIG, 0.0), (0.0, T), (0.0, 0.0)] {
+                let df = s.discount_factor(R, t);
+                for (f, pc, indicator) in [
+                    (110.0, PutOrCall::Call, 1.0),
+                    (90.0, PutOrCall::Call, 0.0),
+                    (90.0, PutOrCall::Put, -1.0),
+                    (110.0, PutOrCall::Put, 0.0),
+                ] {
+                    let intrinsic = match pc {
+                        PutOrCall::Call => (f - K).max(0.0),
+                        PutOrCall::Put => (K - f).max(0.0),
+                    };
+                    assert_eq!(
+                        price(f, K, R, sigma, t, pc, s),
+                        df * intrinsic,
+                        "{s:?} {pc:?}"
+                    );
+                    assert_eq!(
+                        delta(f, K, R, sigma, t, pc, s),
+                        df * indicator,
+                        "{s:?} {pc:?}"
+                    );
+                    assert_eq!(gamma(f, K, R, sigma, t, s), 0.0);
+                    assert_eq!(gamma_p(f, K, R, sigma, t, pc, s), 0.0);
+                    assert_eq!(vega(f, K, R, sigma, t, s), 0.0);
+                    assert_eq!(vanna(f, K, R, sigma, t, s), 0.0);
+                    assert_eq!(charm(f, K, R, sigma, t, pc, s), 0.0);
+                    assert_eq!(zomma(f, K, R, sigma, t, s), 0.0);
+                    assert_eq!(volga(f, K, R, sigma, t, s), 0.0);
+                    let expected_theta = match s {
+                        FuturesSettlement::Discounted => R * df * intrinsic,
+                        FuturesSettlement::Margined => 0.0,
+                    };
+                    assert_eq!(
+                        theta(f, K, R, sigma, t, pc, s),
+                        expected_theta,
+                        "{s:?} {pc:?}"
+                    );
+                    let expected_rho = match s {
+                        // rho stays -T * price, which is now the
+                        // discounted intrinsic
+                        FuturesSettlement::Discounted => -t * price(f, K, R, sigma, t, pc, s),
+                        FuturesSettlement::Margined => 0.0,
+                    };
+                    assert_eq!(rho(f, K, R, sigma, t, pc, s), expected_rho, "{s:?} {pc:?}");
+                }
+            }
+        }
+        // and the guard does not touch a live option
+        assert!(
+            (delta(
+                F,
+                K,
+                R,
+                SIG,
+                T,
+                PutOrCall::Call,
+                FuturesSettlement::Discounted
+            ) - 0.53232482)
+                .abs()
+                < 1e-7
+        );
     }
 
     #[test]

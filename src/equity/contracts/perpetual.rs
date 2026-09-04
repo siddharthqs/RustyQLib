@@ -14,6 +14,21 @@
 //!
 //! Conventions match the rest of the library: `q` is the total carry
 //! (dividend yield + borrow), `b = r - q`.
+//!
+//! All three closed forms need a **positive risk-free rate**: at `r = 0`
+//! the put's optimal-stopping problem degenerates (`y2 = 0`, a zero
+//! exercise boundary) and for `r < 0` the discriminant can go negative,
+//! so `r <= 0` is rejected as an error rather than returning a
+//! degenerate number. The call additionally needs a positive carry cost
+//! (`b < r`, i.e. `q > 0`): with `b = r` it is never exercised and worth
+//! the stock, with `b > r` its value is unbounded.
+//!
+//! These are standalone functions: they are **not yet wired to a
+//! contract or engine** — no `EquityOption` payoff, `PricingEngine`
+//! variant or JSON contract routes to them.
+
+use crate::core::errors::RustyQLibError;
+use crate::core::trade::PutOrCall;
 
 /// The positive (`y1`) and negative (`y2`) roots of the fundamental
 /// quadratic.
@@ -24,73 +39,109 @@ fn roots(r: f64, b: f64, sigma: f64) -> (f64, f64) {
     (half_shift + disc, half_shift - disc)
 }
 
-/// Perpetual American call.
-///
-/// Requires `q > 0` (i.e. `b < r`) for a finite value: without a carry
-/// cost early exercise is never optimal and the value equals the spot
-/// (`b = r`); with `b > r` the value is unbounded and infinity is
-/// returned.
-pub fn perpetual_call(s: f64, k: f64, r: f64, q: f64, sigma: f64) -> f64 {
-    assert!(
-        s > 0.0 && k > 0.0 && sigma > 0.0,
-        "need positive spot, strike and vol"
-    );
+fn check_positive(field: &str, x: f64) -> Result<(), RustyQLibError> {
+    if !(x.is_finite() && x > 0.0) {
+        return Err(RustyQLibError::invalid_input(
+            field,
+            format!("{field} must be finite and positive, got {x}"),
+        ));
+    }
+    Ok(())
+}
+
+/// The discounting the stationary problem needs (see the module doc).
+fn check_rate(r: f64) -> Result<(), RustyQLibError> {
+    if !(r.is_finite() && r > 0.0) {
+        return Err(RustyQLibError::invalid_input(
+            "risk_free_rate",
+            format!(
+                "the perpetual closed forms need a positive risk-free rate, got {r}: \
+                 without discounting the optimal-stopping problem degenerates"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The call's carry-cost requirement `b < r` (see the module doc).
+fn check_call_carry(r: f64, q: f64) -> Result<(), RustyQLibError> {
     let b = r - q;
-    if b > r {
-        return f64::INFINITY; // undiscounted growth beats financing
+    if !(b.is_finite() && b < r) {
+        return Err(RustyQLibError::invalid_input(
+            "carry",
+            format!(
+                "the perpetual call needs a positive carry cost q > 0 (b < r), got q = {q}: \
+                 with q = 0 it is never exercised and worth the stock, with q < 0 it is \
+                 unbounded"
+            ),
+        ));
     }
-    if b == r {
-        return s; // never exercised; the option is worth the stock
-    }
+    Ok(())
+}
+
+/// Perpetual American call. Requires `r > 0` and `q > 0` (i.e. `b < r`):
+/// without a carry cost early exercise is never optimal.
+pub fn perpetual_call(s: f64, k: f64, r: f64, q: f64, sigma: f64) -> Result<f64, RustyQLibError> {
+    check_positive("spot", s)?;
+    check_positive("strike", k)?;
+    check_positive("volatility", sigma)?;
+    check_rate(r)?;
+    check_call_carry(r, q)?;
+    let b = r - q;
     let (y1, _) = roots(r, b, sigma);
     let boundary = y1 / (y1 - 1.0) * k;
     if s >= boundary {
-        return s - k;
+        return Ok(s - k);
     }
-    k / (y1 - 1.0) * (((y1 - 1.0) / y1) * (s / k)).powf(y1)
+    Ok(k / (y1 - 1.0) * (((y1 - 1.0) / y1) * (s / k)).powf(y1))
 }
 
 /// Perpetual American put. Requires `r > 0` (with no discounting the
 /// optimal-stopping problem degenerates).
-pub fn perpetual_put(s: f64, k: f64, r: f64, q: f64, sigma: f64) -> f64 {
-    assert!(
-        s > 0.0 && k > 0.0 && sigma > 0.0,
-        "need positive spot, strike and vol"
-    );
-    assert!(r > 0.0, "the perpetual put needs a positive risk-free rate");
+pub fn perpetual_put(s: f64, k: f64, r: f64, q: f64, sigma: f64) -> Result<f64, RustyQLibError> {
+    check_positive("spot", s)?;
+    check_positive("strike", k)?;
+    check_positive("volatility", sigma)?;
+    check_rate(r)?;
     let b = r - q;
     let (_, y2) = roots(r, b, sigma);
     let boundary = y2 / (y2 - 1.0) * k;
     if s <= boundary {
-        return k - s;
+        return Ok(k - s);
     }
-    k / (1.0 - y2) * (((y2 - 1.0) / y2) * (s / k)).powf(y2)
+    Ok(k / (1.0 - y2) * (((y2 - 1.0) / y2) * (s / k)).powf(y2))
 }
 
 /// The constant early-exercise boundary: exercise the call once the spot
 /// rises to `y1/(y1-1) K`, the put once it falls to `y2/(y2-1) K`.
+/// Requires `r > 0`, and `b < r` for the call.
 pub fn exercise_boundary(
     k: f64,
     r: f64,
     q: f64,
     sigma: f64,
-    put_or_call: crate::core::trade::PutOrCall,
-) -> f64 {
+    put_or_call: PutOrCall,
+) -> Result<f64, RustyQLibError> {
+    check_positive("strike", k)?;
+    check_positive("volatility", sigma)?;
+    check_rate(r)?;
     let b = r - q;
-    let (y1, y2) = roots(r, b, sigma);
     match put_or_call {
-        crate::core::trade::PutOrCall::Call => {
-            assert!(b < r, "the perpetual call is never exercised when b >= r");
-            y1 / (y1 - 1.0) * k
+        PutOrCall::Call => {
+            check_call_carry(r, q)?;
+            let (y1, _) = roots(r, b, sigma);
+            Ok(y1 / (y1 - 1.0) * k)
         }
-        crate::core::trade::PutOrCall::Put => y2 / (y2 - 1.0) * k,
+        PutOrCall::Put => {
+            let (_, y2) = roots(r, b, sigma);
+            Ok(y2 / (y2 - 1.0) * k)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::trade::PutOrCall;
 
     const S: f64 = 100.0;
     const K: f64 = 100.0;
@@ -100,10 +151,14 @@ mod tests {
 
     #[test]
     fn golden_values_match_the_validated_reference() {
-        assert!((perpetual_call(S, K, R, Q, V) - 40.3730823948).abs() < 1e-9);
-        assert!((perpetual_put(S, K, R, Q, V) - 23.4169723789).abs() < 1e-9);
-        assert!((exercise_boundary(K, R, Q, V, PutOrCall::Call) - 318.505635).abs() < 1e-5);
-        assert!((exercise_boundary(K, R, Q, V, PutOrCall::Put) - 52.327698).abs() < 1e-5);
+        assert!((perpetual_call(S, K, R, Q, V).unwrap() - 40.3730823948).abs() < 1e-9);
+        assert!((perpetual_put(S, K, R, Q, V).unwrap() - 23.4169723789).abs() < 1e-9);
+        assert!(
+            (exercise_boundary(K, R, Q, V, PutOrCall::Call).unwrap() - 318.505635).abs() < 1e-5
+        );
+        assert!(
+            (exercise_boundary(K, R, Q, V, PutOrCall::Put).unwrap() - 52.327698).abs() < 1e-5
+        );
     }
 
     #[test]
@@ -111,8 +166,8 @@ mod tests {
         // 1/2 v^2 S^2 V'' + b S V' - r V = 0 in the continuation region
         let b = R - Q;
         for f in [
-            (|s: f64| perpetual_call(s, K, R, Q, V)) as fn(f64) -> f64,
-            |s: f64| perpetual_put(s, K, R, Q, V),
+            (|s: f64| perpetual_call(s, K, R, Q, V).unwrap()) as fn(f64) -> f64,
+            |s: f64| perpetual_put(s, K, R, Q, V).unwrap(),
         ] {
             for s in [60.0, 80.0, 100.0, 150.0] {
                 let h = s * 1e-4;
@@ -130,19 +185,24 @@ mod tests {
 
     #[test]
     fn value_matching_and_smooth_pasting_at_the_boundary() {
-        let call_boundary = exercise_boundary(K, R, Q, V, PutOrCall::Call);
-        let put_boundary = exercise_boundary(K, R, Q, V, PutOrCall::Put);
+        let call_boundary = exercise_boundary(K, R, Q, V, PutOrCall::Call).unwrap();
+        let put_boundary = exercise_boundary(K, R, Q, V, PutOrCall::Put).unwrap();
         // value matching: the formula meets intrinsic at the boundary
-        assert!((perpetual_call(call_boundary, K, R, Q, V) - (call_boundary - K)).abs() < 1e-9);
-        assert!((perpetual_put(put_boundary, K, R, Q, V) - (K - put_boundary)).abs() < 1e-9);
+        assert!(
+            (perpetual_call(call_boundary, K, R, Q, V).unwrap() - (call_boundary - K)).abs()
+                < 1e-9
+        );
+        assert!(
+            (perpetual_put(put_boundary, K, R, Q, V).unwrap() - (K - put_boundary)).abs() < 1e-9
+        );
         // smooth pasting: the derivative meets +-1 there
         let h = 1e-5;
-        let call_slope = (perpetual_call(call_boundary - h, K, R, Q, V)
-            - perpetual_call(call_boundary - 2.0 * h, K, R, Q, V))
+        let call_slope = (perpetual_call(call_boundary - h, K, R, Q, V).unwrap()
+            - perpetual_call(call_boundary - 2.0 * h, K, R, Q, V).unwrap())
             / h;
         assert!((call_slope - 1.0).abs() < 1e-4, "call slope {call_slope}");
-        let put_slope = (perpetual_put(put_boundary + 2.0 * h, K, R, Q, V)
-            - perpetual_put(put_boundary + h, K, R, Q, V))
+        let put_slope = (perpetual_put(put_boundary + 2.0 * h, K, R, Q, V).unwrap()
+            - perpetual_put(put_boundary + h, K, R, Q, V).unwrap())
             / h;
         assert!((put_slope + 1.0).abs() < 1e-4, "put slope {put_slope}");
     }
@@ -150,20 +210,36 @@ mod tests {
     #[test]
     fn put_call_duality_holds() {
         // McDonald-Schroder: P(S, K, r, q) = C(K, S, r' = q, q' = r)
-        let p = perpetual_put(S, K, R, Q, V);
-        let c = perpetual_call(K, S, Q, R, V);
+        let p = perpetual_put(S, K, R, Q, V).unwrap();
+        let c = perpetual_call(K, S, Q, R, V).unwrap();
         assert!((p - c).abs() < 1e-12, "{p} vs {c}");
     }
 
     #[test]
-    fn degenerate_carry_cases() {
-        // no carry cost: the perpetual call is worth the stock
-        assert_eq!(perpetual_call(100.0, 80.0, 0.05, 0.0, 0.3), 100.0);
+    fn degenerate_carry_and_rate_cases_are_typed_errors() {
+        let names = |e: RustyQLibError| e.to_string();
+        // no carry cost: the perpetual call would be worth the stock
+        let err = perpetual_call(100.0, 80.0, 0.05, 0.0, 0.3).map_err(names).unwrap_err();
+        assert!(err.contains("carry"), "{err}");
         // negative q (carry above r): unbounded
-        assert!(perpetual_call(100.0, 80.0, 0.05, -0.01, 0.3).is_infinite());
+        assert!(perpetual_call(100.0, 80.0, 0.05, -0.01, 0.3).is_err());
+        assert!(exercise_boundary(K, R, 0.0, V, PutOrCall::Call).is_err());
+        // no discounting: the put's boundary would collapse to zero, and a
+        // negative rate can take the discriminant negative
+        for r in [0.0, -0.01] {
+            let err = perpetual_put(S, K, r, Q, V).map_err(names).unwrap_err();
+            assert!(err.contains("risk_free_rate"), "{err}");
+            assert!(perpetual_call(S, K, r, Q + 0.02, V).is_err());
+            assert!(exercise_boundary(K, r, Q, V, PutOrCall::Put).is_err());
+            assert!(exercise_boundary(K, r, Q, V, PutOrCall::Call).is_err());
+        }
+        // non-positive market inputs are errors, not panics
+        assert!(perpetual_put(0.0, K, R, Q, V).is_err());
+        assert!(perpetual_call(S, -1.0, R, Q, V).is_err());
+        assert!(exercise_boundary(K, R, Q, 0.0, PutOrCall::Put).is_err());
         // deep in the exercise regions: intrinsic
-        assert_eq!(perpetual_call(500.0, 100.0, R, Q, V), 400.0);
-        assert_eq!(perpetual_put(30.0, 100.0, R, Q, V), 70.0);
+        assert_eq!(perpetual_call(500.0, 100.0, R, Q, V).unwrap(), 400.0);
+        assert_eq!(perpetual_put(30.0, 100.0, R, Q, V).unwrap(), 70.0);
     }
 
     #[test]
@@ -174,7 +250,7 @@ mod tests {
         // (BAW is NOT a bound: at T = 40 it overshoots this perpetual by
         // ~0.6, which is exactly why it is not used for this test.)
         use crate::equity::bjerksund_stensland;
-        let perpetual = perpetual_put(S, K, R, Q, V);
+        let perpetual = perpetual_put(S, K, R, Q, V).unwrap();
         let mut last = 0.0;
         for t in [1.0, 5.0, 15.0, 40.0] {
             let finite = bjerksund_stensland::price(S, K, R, Q, V, t, PutOrCall::Put);

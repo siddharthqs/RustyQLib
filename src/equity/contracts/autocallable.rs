@@ -108,6 +108,15 @@ impl Payoff for AutocallablePayoff {
     fn payoff(&self, _spot: f64, _strike: f64) -> f64 {
         0.0
     }
+
+    /// An autocallable has no strike — its economics live at the call
+    /// and protection levels — so a constant-vol engine reads the
+    /// surface at the ATM forward rather than at the placeholder
+    /// `strike_price` (0 from JSON, 100 from the builder), which under a
+    /// skew would pick up the far put wing.
+    fn vol_anchor_strike(&self, forward: f64) -> Option<f64> {
+        Some(forward)
+    }
     fn path_payoff(&self, _path: &[f64], _strike: f64) -> f64 {
         panic!(
             "Autocallables pay at multiple dates and cannot be valued through \

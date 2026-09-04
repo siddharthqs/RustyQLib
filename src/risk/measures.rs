@@ -6,38 +6,83 @@
 //! both VaR and ES are reported as **positive loss amounts** in the P&L
 //! currency. ES is always >= VaR at the same level (asserted in tests).
 
+use crate::core::errors::RustyQLibError;
 use crate::core::utils::{inv_norm_cdf, norm_pdf};
 
-/// Linear-interpolation (type-7) empirical quantile of a sample.
+/// Reject a confidence level outside the one-sided range `(0.5, 1)`.
+pub(crate) fn validate_confidence(confidence: f64) -> Result<(), RustyQLibError> {
+    if !(confidence > 0.5 && confidence < 1.0) {
+        return Err(RustyQLibError::invalid_input(
+            "confidence",
+            format!("must be strictly between 0.5 and 1, got {confidence}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject an empty sample or one carrying a non-finite observation
+/// (a NaN would otherwise sort to the end and poison the quantile).
+pub(crate) fn validate_sample(what: &str, sample: &[f64]) -> Result<(), RustyQLibError> {
+    if sample.is_empty() {
+        return Err(RustyQLibError::invalid_input(
+            what,
+            "the sample is empty".to_string(),
+        ));
+    }
+    if let Some((i, bad)) = sample.iter().enumerate().find(|(_, x)| !x.is_finite()) {
+        return Err(RustyQLibError::invalid_input(
+            what,
+            format!("sample[{i}] is not finite ({bad})"),
+        ));
+    }
+    Ok(())
+}
+
+/// Linear-interpolation (type-7) empirical quantile of a non-empty
+/// sorted sample.
 fn quantile(sorted: &[f64], p: f64) -> f64 {
     let n = sorted.len();
-    assert!(n > 0);
+    debug_assert!(n > 0, "callers validate the sample first");
     let h = (n as f64 - 1.0) * p.clamp(0.0, 1.0);
     let lo = h.floor() as usize;
     let hi = (lo + 1).min(n - 1);
     sorted[lo] + (h - lo as f64) * (sorted[hi] - sorted[lo])
 }
 
-/// Historical (empirical) VaR from a P&L sample.
-pub fn historical_var(pnl: &[f64], confidence: f64) -> f64 {
-    assert!(!pnl.is_empty() && confidence > 0.5 && confidence < 1.0);
-    let mut losses: Vec<f64> = pnl.iter().map(|x| -x).collect();
-    losses.sort_by(f64::total_cmp);
-    quantile(&losses, confidence).max(0.0)
-}
-
-/// Historical Expected Shortfall: the average loss at or beyond the VaR
-/// quantile.
-pub fn historical_expected_shortfall(pnl: &[f64], confidence: f64) -> f64 {
-    assert!(!pnl.is_empty() && confidence > 0.5 && confidence < 1.0);
+/// Historical VaR and Expected Shortfall together, `(var, es)`, from
+/// one sort of the P&L sample: the type-7 empirical loss quantile at
+/// `confidence`, and the mean loss at or beyond it. Both are positive
+/// loss amounts (floored at zero). Errors on an empty or non-finite
+/// sample, or a confidence outside `(0.5, 1)`.
+pub fn historical_var_es(pnl: &[f64], confidence: f64) -> Result<(f64, f64), RustyQLibError> {
+    validate_sample("pnl", pnl)?;
+    validate_confidence(confidence)?;
     let mut losses: Vec<f64> = pnl.iter().map(|x| -x).collect();
     losses.sort_by(f64::total_cmp);
     let var = quantile(&losses, confidence);
-    let tail: Vec<f64> = losses.iter().copied().filter(|&l| l >= var).collect();
-    if tail.is_empty() {
-        return var.max(0.0);
-    }
-    (tail.iter().sum::<f64>() / tail.len() as f64).max(0.0)
+    // the largest loss is always >= the quantile, so the tail is non-empty
+    let (tail_sum, tail_count) = losses
+        .iter()
+        .filter(|&&l| l >= var)
+        .fold((0.0, 0usize), |(s, c), &l| (s + l, c + 1));
+    let es = if tail_count == 0 {
+        var
+    } else {
+        tail_sum / tail_count as f64
+    };
+    Ok((var.max(0.0), es.max(0.0)))
+}
+
+/// Historical (empirical) VaR from a P&L sample — see
+/// [`historical_var_es`] for the conventions and errors.
+pub fn historical_var(pnl: &[f64], confidence: f64) -> Result<f64, RustyQLibError> {
+    historical_var_es(pnl, confidence).map(|(var, _)| var)
+}
+
+/// Historical Expected Shortfall: the average loss at or beyond the VaR
+/// quantile — see [`historical_var_es`] for the conventions and errors.
+pub fn historical_expected_shortfall(pnl: &[f64], confidence: f64) -> Result<f64, RustyQLibError> {
+    historical_var_es(pnl, confidence).map(|(_, es)| es)
 }
 
 /// Parametric VaR under normal P&L with the given `mean` and `std`.
@@ -145,13 +190,34 @@ mod tests {
     fn historical_measures_on_a_hand_checked_sample() {
         // losses: 10, 8, 6, 4, 2 and five gains
         let pnl = [-10.0, -8.0, -6.0, -4.0, -2.0, 1.0, 2.0, 3.0, 4.0, 5.0];
-        let var90 = historical_var(&pnl, 0.9);
+        let var90 = historical_var(&pnl, 0.9).unwrap();
         // type-7 quantile at p=0.9 on n=10 sorted losses: index 8.1
         assert!((var90 - 8.2).abs() < 1e-12, "{var90}");
-        let es90 = historical_expected_shortfall(&pnl, 0.9);
+        let es90 = historical_expected_shortfall(&pnl, 0.9).unwrap();
         assert!(es90 >= var90 && es90 <= 10.0, "{es90}");
+        // the paired estimator is what the single-value ones delegate to
+        assert_eq!(historical_var_es(&pnl, 0.9).unwrap(), (var90, es90));
         // monotone in confidence
-        assert!(historical_var(&pnl, 0.95) >= var90);
+        assert!(historical_var(&pnl, 0.95).unwrap() >= var90);
+        // an all-profit sample floors at zero loss
+        assert_eq!(historical_var_es(&[1.0, 2.0, 3.0], 0.9).unwrap(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn historical_measures_reject_bad_samples_and_levels() {
+        let pnl = [-1.0, 2.0, -3.0];
+        for bad in [0.0, 0.5, 1.0, 1.5, f64::NAN] {
+            let err = historical_var(&pnl, bad).unwrap_err();
+            assert!(err.to_string().contains("confidence"), "{bad}: {err}");
+            assert!(historical_expected_shortfall(&pnl, bad).is_err());
+        }
+        assert!(historical_var_es(&[], 0.99).is_err(), "empty sample");
+        // a NaN used to sort to the top of the losses and be masked to 0
+        for poison in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = historical_var(&[-1.0, poison, 2.0], 0.9).unwrap_err();
+            assert!(err.to_string().contains("not finite"), "{err}");
+            assert!(historical_expected_shortfall(&[poison], 0.9).is_err());
+        }
     }
 
     #[test]
@@ -163,10 +229,10 @@ mod tests {
             .map(|_| mu + sd * rng.sample::<f64, _>(rand_distr::StandardNormal))
             .collect();
         for conf in [0.95, 0.99] {
-            let hist = historical_var(&pnl, conf);
+            let hist = historical_var(&pnl, conf).unwrap();
             let para = parametric_var(mu, sd, conf);
             assert!((hist - para).abs() < 0.4, "VaR {conf}: {hist} vs {para}");
-            let hist_es = historical_expected_shortfall(&pnl, conf);
+            let hist_es = historical_expected_shortfall(&pnl, conf).unwrap();
             let para_es = parametric_expected_shortfall(mu, sd, conf);
             assert!(
                 (hist_es - para_es).abs() < 0.5,

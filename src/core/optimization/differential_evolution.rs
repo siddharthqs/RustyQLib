@@ -29,10 +29,12 @@ pub fn differential_evolution(
         ));
     }
     for (i, &(lo, hi)) in bounds.iter().enumerate() {
-        if !(lo < hi) {
+        // written so NaN and infinite bounds fail too: a NaN compares
+        // false against everything, so a bare `lo >= hi` would let it past
+        if !(lo.is_finite() && hi.is_finite() && lo < hi) {
             return Err(RustyQLibError::invalid_input(
                 "bounds",
-                format!("bound {i} is invalid: needs lo < hi, got ({lo}, {hi})"),
+                format!("bound {i} is invalid: needs finite lo < hi, got ({lo}, {hi})"),
             ));
         }
     }

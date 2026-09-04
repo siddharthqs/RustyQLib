@@ -1483,6 +1483,53 @@ fn heston_barrier_and_asian_price_on_mc() {
     assert!(asian_price > 0.0 && asian_price < vanilla);
 }
 
+#[test]
+fn stochastic_vol_mc_honours_double_barriers_and_rebates() {
+    // the SV routes used to bridge against `barrier` alone: a corridor
+    // priced as its single lower barrier and an at-expiry rebate was
+    // never paid. Same seed throughout, so every gap below is a
+    // per-path effect, not noise.
+    use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+    let barrier = |barrier2: Option<f64>, rebate: f64| {
+        Box::new(BarrierPayoff {
+            put_or_call: PutOrCall::Call,
+            exercise_style: ContractStyle::European,
+            direction: Down,
+            knock: Out,
+            barrier: 90.0,
+            barrier2,
+            rebate,
+            rebate_at_hit: false,
+        }) as Box<dyn Payoff>
+    };
+    let rebate = 5.0;
+    for (model, make) in [
+        ("heston", heston_option as fn(Box<dyn Payoff>) -> EquityOption),
+        ("sabr", sabr_option as fn(Box<dyn Payoff>) -> EquityOption),
+    ] {
+        let price = |payoff: Box<dyn Payoff>| {
+            let mut o = make(payoff);
+            o.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+            o.mc_cfg_mut().paths = 20_000;
+            o.npv()
+        };
+        let single = price(barrier(None, 0.0));
+        // a second knock-out level can only remove paying paths
+        let corridor = price(barrier(Some(115.0), 0.0));
+        assert!(
+            corridor < single - 0.05,
+            "{model}: corridor {corridor} must sit clearly below the single barrier {single}"
+        );
+        // the rebate lifts the price by its knock probability times its
+        // discounted value: strictly above plain, below plain + rebate
+        let rebated = price(barrier(None, rebate));
+        assert!(
+            rebated > single + 0.05 && rebated < single + rebate,
+            "{model}: rebated {rebated} vs plain {single}"
+        );
+    }
+}
+
 fn heston_american_put() -> Box<dyn Payoff> {
     Box::new(VanillaPayoff {
         put_or_call: PutOrCall::Put,
@@ -2385,4 +2432,91 @@ fn zero_curve_prices_off_maturity_pillar() {
     let option = test_option(PutOrCall::Call, curve);
     assert_approx_eq!(option.npv(), 14.2312547860, 1e-8);
     assert_approx_eq!(option.risk_free_rate(), 0.05, 1e-12);
+}
+
+// ── Stochastic-vol sampling diagnostics and CEV boundary ────────────
+
+#[test]
+fn stochastic_vol_routes_report_a_standard_error_under_the_default_sampler() {
+    // the SV routes draw seeded pseudo-random antithetic streams
+    // whatever `mc_sampler` says, so their standard error is always a
+    // meaningful sample statistic. They used to pass `is_qmc(cfg)` to
+    // `summarize`, which suppressed it under the *default* (Sobol)
+    // sampler — every Heston/SABR price shipped without a std_err.
+    let mut mc = heston_vanilla(PutOrCall::Call);
+    mc.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+    mc.mc_cfg_mut().paths = 20_000;
+    // the default sampler, explicitly: this is the reported case
+    assert_eq!(
+        mc.mc_cfg().sampler,
+        crate::equity::montecarlo::Sampler::Sobol
+    );
+    let stats = crate::equity::montecarlo::stats(&mc, None);
+    let se = stats
+        .std_err
+        .expect("the Heston route simulates pseudo-random draws and must report a standard error");
+    assert!(se > 0.0 && se.is_finite(), "stderr {se}");
+    // and it is a real error bar: the semi-analytic value sits inside a
+    // few of them
+    let analytic = heston_vanilla(PutOrCall::Call).npv();
+    assert!(
+        (stats.pv - analytic).abs() < 5.0 * se + 0.05,
+        "pv={} analytic={analytic} stderr={se}",
+        stats.pv
+    );
+
+    // the SABR route (same `route_sv_paths` scaffold) likewise
+    let mut sabr = sabr_vanilla(PutOrCall::Call);
+    sabr.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+    sabr.mc_cfg_mut().paths = 20_000;
+    assert!(
+        crate::equity::montecarlo::stats(&sabr, None).std_err.is_some(),
+        "the SABR route must report a standard error too"
+    );
+}
+
+#[test]
+fn sabr_cev_absorption_keeps_an_up_barrier_price_finite() {
+    // beta < 1 absorbs the forward at zero; the bridge vol used to be
+    // read off the raw forward as `alpha * F^(beta-1)`, which is +inf
+    // once F == 0. Against an *up* barrier the bridge exponent then
+    // evaluated -inf/inf = NaN and poisoned the whole price. Extreme
+    // vol-of-vol makes absorption actually happen.
+    use crate::equity::barrier::{BarrierDirection::*, KnockType::*};
+    let mut option = test_option_with(
+        Box::new(BarrierPayoff {
+            put_or_call: PutOrCall::Call,
+            exercise_style: ContractStyle::European,
+            direction: Up,
+            knock: Out,
+            barrier: 120.0,
+            barrier2: None,
+            rebate: 0.0,
+            rebate_at_hit: false,
+        }),
+        flat_5pct(),
+    );
+    option.market.dividend_yield = 0.02;
+    option.model = crate::equity::utils::Model::Sabr(crate::equity::sabr::SabrParams {
+        // at beta = 0.5 the ATM vol is ~alpha / sqrt(F): alpha = 2.5 is
+        // roughly 25% on a spot near 100
+        alpha: 2.5,
+        beta: 0.5,
+        rho: -0.5,
+        nu: 5.0,
+    });
+    option.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
+    option.mc_cfg_mut().paths = 20_000;
+    let stats = crate::equity::montecarlo::stats(&option, None);
+    assert!(
+        stats.pv.is_finite() && stats.pv >= 0.0,
+        "up-and-out under CEV absorption must stay finite, got {}",
+        stats.pv
+    );
+    // an up-and-out call cannot be worth more than the spot
+    assert!(stats.pv < 100.0, "{}", stats.pv);
+    assert!(
+        stats.std_err.is_some_and(|se| se.is_finite()),
+        "a NaN path value would surface here as a NaN standard error"
+    );
 }

@@ -147,7 +147,7 @@ const QE_PSI_SWITCH: f64 = 1.5;
 
 /// Forward level below which a CEV (`beta < 1`) SABR path is treated
 /// as absorbed at zero (the process's true boundary behavior).
-const CEV_ABSORB: f64 = 1e-10;
+pub(crate) const CEV_ABSORB: f64 = 1e-10;
 
 /// Which QE sampler fired, with the parameters the martingale correction
 /// needs.
@@ -181,11 +181,15 @@ fn qe_variance_draw(hp: &HestonParams, v: f64, dt: f64, z_v: f64) -> (f64, QeBra
         // normal's uniform so the caller's draw pipeline is unchanged
         let p = (psi - 1.0) / (psi + 1.0);
         let beta = (1.0 - p) / m;
-        let u = crate::core::utils::norm_cdf(z_v);
-        let v_next = if u <= p {
+        // the inverse of the exponential tail needs 1 - u = P(Z > z)
+        // directly: `1 - norm_cdf(z)` cancels to exactly 0 for z >~ 8.3
+        // (ln(inf) = infinite variance) and `norm_cdf(-z)` underflows the
+        // same way, whereas erfc keeps the tail to ~1e-300
+        let one_minus_u = 0.5 * libm::erfc(z_v / std::f64::consts::SQRT_2);
+        let v_next = if one_minus_u >= 1.0 - p {
             0.0
         } else {
-            ((1.0 - p) / (1.0 - u)).ln() / beta
+            ((1.0 - p) / one_minus_u.max(f64::MIN_POSITIVE)).ln() / beta
         };
         (v_next, QeBranch::Exponential { p, beta })
     }
@@ -665,6 +669,54 @@ mod tests {
             assert!(out[1] >= 0.0, "z={z}: v_next={}", out[1]);
             assert!(out[0] > 0.0);
         }
+    }
+
+    #[test]
+    fn qe_exponential_branch_stays_finite_in_the_far_tail() {
+        // z = 8.3 is where norm_cdf(z) rounds to exactly 1: the old
+        // `1 - norm_cdf` form divided by zero and produced an infinite
+        // variance; the erfc form must give a large but finite draw that
+        // grows monotonically with z
+        let hp = HestonParams {
+            v0: 0.001,
+            kappa: 0.5,
+            theta: 0.04,
+            vol_of_vol: 1.0,
+            rho: -0.7,
+        };
+        let (v, dt) = (0.001, 1.0);
+        let (m, s2) = cir_moments(&hp, v, dt);
+        assert!(s2 / (m * m) > QE_PSI_SWITCH, "must hit the exponential branch");
+        let mut prev = qe_variance_step(&hp, v, dt, 4.0);
+        for z in [6.0, 8.3, 9.0, 12.0, 40.0] {
+            let next = qe_variance_step(&hp, v, dt, z);
+            assert!(next.is_finite() && next > 0.0, "z={z}: v_next={next}");
+            assert!(next >= prev, "z={z}: {next} < {prev}");
+            prev = next;
+        }
+        // the bulk is untouched. the mass at zero still fires below the
+        // switch point...
+        let psi = s2 / (m * m);
+        let p = (psi - 1.0) / (psi + 1.0);
+        let beta = (1.0 - p) / m;
+        assert_eq!(qe_variance_step(&hp, v, dt, -3.0), 0.0);
+        assert_eq!(
+            qe_variance_step(&hp, v, dt, 0.0),
+            0.0,
+            "u = 0.5 <= p = {p} is the mass at zero"
+        );
+        // ...and in the tail the erfc form reproduces the textbook
+        // `ln((1 - p) / (1 - Phi(z))) / beta` (they are algebraically
+        // the same expression; erfc only avoids the cancellation)
+        let z = 2.5_f64;
+        let u = crate::core::utils::norm_cdf(z);
+        assert!(1.0 - u < 1.0 - p, "z = {z} must be past the mass point");
+        let textbook = ((1.0 - p) / (1.0 - u)).ln() / beta;
+        let got = qe_variance_step(&hp, v, dt, z);
+        assert!(
+            (got - textbook).abs() < 1e-12 * textbook.abs(),
+            "{got} vs {textbook}"
+        );
     }
 
     // ── Multi-asset GBM ─────────────────────────────────────────────────

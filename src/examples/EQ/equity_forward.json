@@ -10,7 +10,8 @@
         "underlying_price": 96.0,
         "entry_price": 103.0,
         "risk_free_rate": 0.06,
-        "maturity": "2025-03-31",
+        "valuation_date": "2026-09-30",
+        "maturity": "2027-03-31",
         "dividend": 0.01,
         "notional": 10000,
         "long_short": 1
@@ -27,7 +28,8 @@
         "current_price": 99.0,
         "entry_price": 103.0,
         "risk_free_rate":0.06,
-        "maturity":"2025-03-31",
+        "valuation_date": "2026-09-30",
+        "maturity":"2027-03-31",
         "dividend": 0.01,
         "multiplier": 1000,
         "long_short": -1

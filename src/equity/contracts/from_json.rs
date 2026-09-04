@@ -112,9 +112,29 @@ impl EquityOption {
         }
 
         // ── exercise style ──────────────────────────────────────────────
-        builder = match data.exercise_style.as_deref().unwrap_or("European").trim() {
-            "American" | "american" => builder.american(),
-            "Bermudan" | "bermudan" => {
+        // enum strings are matched case-insensitively, like the payoff
+        // sub-type strings below
+        let exercise_style = data.exercise_style.as_deref().unwrap_or("European").trim();
+        builder = match exercise_style.to_lowercase().as_str() {
+            "american" | "european" => {
+                // a date list on a non-Bermudan contract is a mistake in
+                // the document, not something to ignore
+                if data.exercise_dates.is_some() {
+                    return Err(RustyQLibError::invalid_input(
+                        "exercise_dates",
+                        format!(
+                            "exercise_dates is only meaningful when exercise_style is \
+                             Bermudan (got '{exercise_style}')"
+                        ),
+                    ));
+                }
+                if exercise_style.eq_ignore_ascii_case("american") {
+                    builder.american()
+                } else {
+                    builder
+                }
+            }
+            "bermudan" => {
                 let dates = data.exercise_dates.as_deref().ok_or_else(|| {
                     RustyQLibError::invalid_input(
                         "exercise_dates",
@@ -123,24 +143,25 @@ impl EquityOption {
                 })?;
                 builder.bermudan(parse_date_list("exercise_dates", dates)?)
             }
-            "European" | "european" => builder,
-            other => {
+            _ => {
                 return Err(RustyQLibError::invalid_input(
                     "exercise_style",
                     format!(
-                    "unknown exercise_style '{other}' (use 'European', 'American' or 'Bermudan')"
-                ),
+                        "unknown exercise_style '{exercise_style}' (use 'European', \
+                         'American' or 'Bermudan')"
+                    ),
                 ))
             }
         };
 
-        let side = match data.put_or_call.trim() {
-            "C" | "c" | "Call" | "call" => PutOrCall::Call,
-            "P" | "p" | "Put" | "put" => PutOrCall::Put,
-            other => {
+        let put_or_call = data.put_or_call.trim();
+        let side = match put_or_call.to_lowercase().as_str() {
+            "c" | "call" => PutOrCall::Call,
+            "p" | "put" => PutOrCall::Put,
+            _ => {
                 return Err(RustyQLibError::invalid_input(
                     "put_or_call",
-                    format!("invalid side '{other}' (use 'C' or 'P')"),
+                    format!("invalid side '{put_or_call}' (use 'C' or 'P')"),
                 ))
             }
         };
@@ -224,21 +245,16 @@ impl EquityOption {
                         "choice_date is required for chooser options",
                     )
                 })?;
-                let choice_date =
-                    NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
-                        RustyQLibError::invalid_input(
-                            "choice_date",
-                            format!("invalid date '{date_str}' (expected YYYY-MM-DD)"),
-                        )
-                    })?;
-                if !(choice_date > valuation_date && choice_date < maturity_date) {
-                    return Err(RustyQLibError::invalid_input(
-                        "choice_date",
-                        "choice_date must lie between valuation and maturity",
-                    ));
-                }
-                let choice_fraction = (choice_date - valuation_date).num_days() as f64
-                    / (maturity_date - valuation_date).num_days() as f64;
+                let choice_date = parse_date("choice_date", date_str)?;
+                let choice_fraction = life_fraction(
+                    "choice_date",
+                    choice_date,
+                    valuation_date,
+                    maturity_date,
+                    valuation_date,
+                    false,
+                    "choice_date must lie between valuation and maturity",
+                )?;
                 let complex = data.chooser_call_strike.is_some()
                     || data.chooser_put_strike.is_some()
                     || data.chooser_call_expiry.is_some()
@@ -247,23 +263,16 @@ impl EquityOption {
                     // absent leg expiries default to the maturity (1.0)
                     let leg_fraction = |field: &str, date: &Option<String>| match date {
                         None => Ok(1.0),
-                        Some(sd) => {
-                            let leg = NaiveDate::parse_from_str(sd, "%Y-%m-%d").map_err(|_| {
-                                RustyQLibError::invalid_input(
-                                    field,
-                                    format!("invalid date '{sd}' (expected YYYY-MM-DD)"),
-                                )
-                            })?;
-                            if !(leg > choice_date && leg <= maturity_date) {
-                                return Err(RustyQLibError::invalid_input(
-                                    field,
-                                    "leg expiry must lie after the choice date and at or \
-                                     before maturity",
-                                ));
-                            }
-                            Ok((leg - valuation_date).num_days() as f64
-                                / (maturity_date - valuation_date).num_days() as f64)
-                        }
+                        Some(sd) => life_fraction(
+                            field,
+                            parse_date(field, sd)?,
+                            valuation_date,
+                            maturity_date,
+                            choice_date,
+                            true,
+                            "leg expiry must lie after the choice date and at or before \
+                             maturity",
+                        ),
                     };
                     builder.complex_chooser(
                         choice_fraction,
@@ -363,21 +372,15 @@ impl EquityOption {
                         "forward_start_date is required for forward-start options",
                     )
                 })?;
-                let start_date =
-                    NaiveDate::parse_from_str(start_date_str, "%Y-%m-%d").map_err(|_| {
-                        RustyQLibError::invalid_input(
-                            "forward_start_date",
-                            format!("invalid date '{start_date_str}' (expected YYYY-MM-DD)"),
-                        )
-                    })?;
-                if !(start_date > valuation_date && start_date < maturity_date) {
-                    return Err(RustyQLibError::invalid_input(
-                        "forward_start_date",
-                        "forward_start_date must lie between valuation and maturity",
-                    ));
-                }
-                let start_fraction = (start_date - valuation_date).num_days() as f64
-                    / (maturity_date - valuation_date).num_days() as f64;
+                let start_fraction = life_fraction(
+                    "forward_start_date",
+                    parse_date("forward_start_date", start_date_str)?,
+                    valuation_date,
+                    maturity_date,
+                    valuation_date,
+                    false,
+                    "forward_start_date must lie between valuation and maturity",
+                )?;
                 builder.forward_start(side, data.strike_fraction.unwrap_or(1.0), start_fraction)
             }
             PayoffType::Autocallable => {
@@ -394,7 +397,8 @@ impl EquityOption {
                     )
                 })?;
                 let coupon = data.autocall_coupon.unwrap_or(0.0);
-                let observations = data.autocall_observations.unwrap_or(4).max(1);
+                // an explicit 0 reaches the builder, which rejects it
+                let observations = data.autocall_observations.unwrap_or(4);
                 let notional = data.notional.unwrap_or(100.0);
                 // a coupon barrier makes it a phoenix; memory is inert
                 // without one
@@ -427,20 +431,23 @@ impl EquityOption {
         };
 
         // ── engine (it carries only its own configuration) ──────────────
-        let engine_kind = match data.pricer.as_ref().map_or("Analytical", |v| v).trim() {
-            "Analytical" | "analytical" | "bs" => Engine::BlackScholes,
-            "MonteCarlo" | "montecarlo" | "MC" | "mc" => Engine::MonteCarlo,
-            "Binomial" | "binomial" | "bino" => Engine::Binomial,
-            "FiniteDifference" | "finitdifference" | "FD" | "fd" => Engine::FiniteDifference,
-            "BaroneAdesiWhaley" | "baw" | "BAW" => Engine::BaroneAdesiWhaley,
-            "BjerksundStensland" | "bjerksund_stensland" | "bs2002" | "BS2002" => {
+        let pricer = data.pricer.as_deref().unwrap_or("Analytical").trim();
+        let engine_kind = match pricer.to_lowercase().as_str() {
+            "analytical" | "bs" => Engine::BlackScholes,
+            "montecarlo" | "mc" => Engine::MonteCarlo,
+            "binomial" | "bino" => Engine::Binomial,
+            // "finitdifference" is a historical misspelling that existing
+            // documents rely on
+            "finitedifference" | "finitdifference" | "fd" => Engine::FiniteDifference,
+            "baroneadesiwhaley" | "baw" => Engine::BaroneAdesiWhaley,
+            "bjerksundstensland" | "bjerksund_stensland" | "bs2002" => {
                 Engine::BjerksundStensland
             }
-            other => {
+            _ => {
                 return Err(RustyQLibError::invalid_input(
                     "pricer",
                     format!(
-                        "unknown pricer '{other}' (use Analytical, MonteCarlo, Binomial, \
+                        "unknown pricer '{pricer}' (use Analytical, MonteCarlo, Binomial, \
                          FiniteDifference, BAW or BS2002)"
                     ),
                 ));
@@ -487,19 +494,255 @@ impl EquityOption {
     }
 }
 
+/// Parse one `YYYY-MM-DD` contract date, naming `field` in the error.
+fn parse_date(field: &str, s: &str) -> Result<NaiveDate, RustyQLibError> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+        RustyQLibError::invalid_input(
+            field,
+            format!("invalid date '{s}' (expected YYYY-MM-DD)"),
+        )
+    })
+}
+
 /// Parse a JSON date-string list into `NaiveDate`s. Ordering and range
 /// validation happens in [`EquityOptionBuilder::build`]; this only
 /// handles the string format, naming `field` in errors.
 fn parse_date_list(field: &str, dates: &[String]) -> Result<Vec<NaiveDate>, RustyQLibError> {
-    dates
-        .iter()
-        .map(|s| {
-            NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
-                RustyQLibError::invalid_input(
-                    field,
-                    format!("invalid date '{s}' (expected YYYY-MM-DD)"),
-                )
-            })
-        })
-        .collect()
+    dates.iter().map(|s| parse_date(field, s)).collect()
+}
+
+/// Calendar-day fraction of the option life at `date`:
+/// `(date - valuation) / (maturity - valuation)`, the time argument the
+/// chooser, chooser-leg and forward-start payoffs take. The date must
+/// lie strictly after `lower` (the valuation date, or the choice date
+/// for a chooser leg) and strictly before maturity — at maturity too
+/// when `upper_inclusive` — else `field` is rejected with `out_of_range`
+/// as the reason.
+#[allow(clippy::too_many_arguments)]
+fn life_fraction(
+    field: &str,
+    date: NaiveDate,
+    valuation: NaiveDate,
+    maturity: NaiveDate,
+    lower: NaiveDate,
+    upper_inclusive: bool,
+    out_of_range: &str,
+) -> Result<f64, RustyQLibError> {
+    let below_upper = if upper_inclusive {
+        date <= maturity
+    } else {
+        date < maturity
+    };
+    if !(date > lower && below_upper) {
+        return Err(RustyQLibError::invalid_input(field, out_of_range));
+    }
+    Ok((date - valuation).num_days() as f64 / (maturity - valuation).num_days() as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::utils::ContractStyle;
+
+    fn data(json: &str) -> EquityOptionData {
+        serde_json::from_str(json).expect("contract must parse")
+    }
+
+    const VANILLA: &str = r#"{
+        "symbol": "ACME", "underlying_price": 100.0, "put_or_call": "C",
+        "payoff_type": "vanilla", "strike_price": 100.0, "volatility": 0.25,
+        "risk_free_rate": 0.03, "valuation_date": "2026-01-05",
+        "maturity": "2027-01-04", "pricer": "Analytical"
+    }"#;
+
+    fn with(field: &str, value: &str) -> EquityOptionData {
+        let mut json = VANILLA.trim_end_matches(['}', ' ', '\n']).to_string();
+        json.push_str(&format!(", \"{field}\": {value} }}"));
+        data(&json)
+    }
+
+    fn set_pricer(name: &str) -> EquityOptionData {
+        data(&VANILLA.replace("\"pricer\": \"Analytical\"", &format!("\"pricer\": \"{name}\"")))
+    }
+
+    #[test]
+    fn engine_names_parse_case_insensitively_with_every_legacy_spelling() {
+        let cases = [
+            ("Analytical", Engine::BlackScholes),
+            ("analytical", Engine::BlackScholes),
+            ("ANALYTICAL", Engine::BlackScholes),
+            ("bs", Engine::BlackScholes),
+            ("MonteCarlo", Engine::MonteCarlo),
+            ("MONTECARLO", Engine::MonteCarlo),
+            ("MC", Engine::MonteCarlo),
+            ("mc", Engine::MonteCarlo),
+            ("Binomial", Engine::Binomial),
+            ("bino", Engine::Binomial),
+            ("FiniteDifference", Engine::FiniteDifference),
+            ("finitedifference", Engine::FiniteDifference),
+            ("finitdifference", Engine::FiniteDifference),
+            ("FD", Engine::FiniteDifference),
+            ("fd", Engine::FiniteDifference),
+            (" fd ", Engine::FiniteDifference),
+        ];
+        for (name, expected) in cases {
+            let option = EquityOption::try_from_json(&set_pricer(name))
+                .unwrap_or_else(|e| panic!("pricer '{name}' must parse: {e}"));
+            assert_eq!(option.engine.kind(), expected, "pricer '{name}'");
+        }
+        // the American approximations, on an American vanilla
+        let american = VANILLA.replace(
+            "\"pricer\": \"Analytical\"",
+            "\"exercise_style\": \"American\", \"pricer\": \"PRICER\"",
+        );
+        for (name, expected) in [
+            ("BaroneAdesiWhaley", Engine::BaroneAdesiWhaley),
+            ("baw", Engine::BaroneAdesiWhaley),
+            ("BAW", Engine::BaroneAdesiWhaley),
+            ("BjerksundStensland", Engine::BjerksundStensland),
+            ("bjerksund_stensland", Engine::BjerksundStensland),
+            ("bs2002", Engine::BjerksundStensland),
+            ("BS2002", Engine::BjerksundStensland),
+        ] {
+            let option = EquityOption::try_from_json(&data(&american.replace("PRICER", name)))
+                .unwrap_or_else(|e| panic!("pricer '{name}' must parse: {e}"));
+            assert_eq!(option.engine.kind(), expected, "pricer '{name}'");
+        }
+        // unknown names still name the field and echo the input spelling
+        let err = EquityOption::try_from_json(&set_pricer("NoSuchEngine"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pricer") && err.contains("NoSuchEngine"), "{err}");
+    }
+
+    #[test]
+    fn side_and_exercise_style_parse_case_insensitively() {
+        for side in ["C", "c", "Call", "call", "CALL"] {
+            let option = EquityOption::try_from_json(&data(
+                &VANILLA.replace("\"put_or_call\": \"C\"", &format!("\"put_or_call\": \"{side}\"")),
+            ))
+            .unwrap_or_else(|e| panic!("side '{side}' must parse: {e}"));
+            assert_eq!(*option.payoff.put_or_call(), PutOrCall::Call, "side '{side}'");
+        }
+        for side in ["P", "p", "Put", "put", "PUT"] {
+            let option = EquityOption::try_from_json(&data(
+                &VANILLA.replace("\"put_or_call\": \"C\"", &format!("\"put_or_call\": \"{side}\"")),
+            ))
+            .unwrap_or_else(|e| panic!("side '{side}' must parse: {e}"));
+            assert_eq!(*option.payoff.put_or_call(), PutOrCall::Put, "side '{side}'");
+        }
+        let err = EquityOption::try_from_json(&data(
+            &VANILLA.replace("\"put_or_call\": \"C\"", "\"put_or_call\": \"X\""),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("put_or_call"), "{err}");
+
+        let styled = |style: &str| {
+            let mut d = set_pricer("Binomial");
+            d.exercise_style = Some(style.to_string());
+            EquityOption::try_from_json(&d)
+        };
+        for style in ["American", "american", "AMERICAN", " American "] {
+            let option = styled(style).unwrap_or_else(|e| panic!("style '{style}': {e}"));
+            assert_eq!(*option.payoff.exercise_style(), ContractStyle::American);
+        }
+        for style in ["European", "EUROPEAN"] {
+            let option = styled(style).unwrap_or_else(|e| panic!("style '{style}': {e}"));
+            assert_eq!(*option.payoff.exercise_style(), ContractStyle::European);
+        }
+        let err = styled("Asian").unwrap_err().to_string();
+        assert!(err.contains("exercise_style"), "{err}");
+    }
+
+    #[test]
+    fn exercise_dates_outside_bermudan_style_are_rejected() {
+        let mut d = set_pricer("Binomial");
+        d.exercise_dates = Some(vec!["2026-07-06".to_string()]);
+        // default (European) and explicit American both refuse the list
+        let err = EquityOption::try_from_json(&d).unwrap_err().to_string();
+        assert!(err.contains("exercise_dates"), "{err}");
+        d.exercise_style = Some("American".to_string());
+        let err = EquityOption::try_from_json(&d).unwrap_err().to_string();
+        assert!(err.contains("exercise_dates"), "{err}");
+        // Bermudan consumes it (case-insensitively)
+        d.exercise_style = Some("BERMUDAN".to_string());
+        let option = EquityOption::try_from_json(&d).expect("Bermudan must build");
+        assert!(matches!(
+            option.payoff.exercise_style(),
+            ContractStyle::Bermudan(_)
+        ));
+    }
+
+    #[test]
+    fn zero_autocall_observations_reach_the_builder_rejection() {
+        let autocall = r#"{
+            "symbol": "ACME", "underlying_price": 100.0, "put_or_call": "C",
+            "payoff_type": "autocallable", "autocall_barrier": 100.0,
+            "protection_barrier": 70.0, "autocall_coupon": 0.05,
+            "autocall_observations": 0, "volatility": 0.25,
+            "risk_free_rate": 0.03, "valuation_date": "2026-01-05",
+            "maturity": "2027-01-04", "pricer": "MC", "simulation": 1000
+        }"#;
+        let err = EquityOption::try_from_json(&data(autocall))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("observations"), "{err}");
+        // and the default still applies when the field is absent
+        let defaulted = autocall.replace("\"autocall_observations\": 0,", "");
+        assert!(EquityOption::try_from_json(&data(&defaulted)).is_ok());
+    }
+
+    #[test]
+    fn life_fraction_preserves_each_sites_range_rule() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let (valuation, maturity) = (d(2026, 1, 1), d(2027, 1, 1));
+        // strict on both ends (chooser choice date, forward-start fixing)
+        let mid = life_fraction("f", d(2026, 7, 2), valuation, maturity, valuation, false, "bad")
+            .unwrap();
+        assert!((mid - 182.0 / 365.0).abs() < 1e-15, "{mid}");
+        for date in [valuation, maturity, d(2025, 12, 31), d(2027, 1, 2)] {
+            let err = life_fraction("f", date, valuation, maturity, valuation, false, "bad")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("f") && err.contains("bad"), "{err}");
+        }
+        // chooser legs: after the choice date, maturity itself allowed
+        let choice = d(2026, 7, 1);
+        assert_eq!(
+            life_fraction("leg", maturity, valuation, maturity, choice, true, "bad").unwrap(),
+            1.0
+        );
+        assert!(life_fraction("leg", choice, valuation, maturity, choice, true, "bad").is_err());
+        assert!(life_fraction("leg", d(2026, 6, 1), valuation, maturity, choice, true, "bad")
+            .is_err());
+        assert!(life_fraction("leg", d(2026, 7, 2), valuation, maturity, choice, true, "bad")
+            .is_ok());
+        // the JSON sites report their own wording
+        let mut chooser = with("choice_date", "\"2027-06-01\"");
+        chooser.payoff_type = "chooser".to_string();
+        let err = EquityOption::try_from_json(&chooser).unwrap_err().to_string();
+        assert!(
+            err.contains("choice_date must lie between valuation and maturity"),
+            "{err}"
+        );
+        let mut fs = with("forward_start_date", "\"2027-01-04\"");
+        fs.payoff_type = "forward_start".to_string();
+        fs.pricer = Some("MC".to_string());
+        let err = EquityOption::try_from_json(&fs).unwrap_err().to_string();
+        assert!(
+            err.contains("forward_start_date must lie between valuation and maturity"),
+            "{err}"
+        );
+        let mut leg = with("choice_date", "\"2026-07-05\"");
+        leg.payoff_type = "chooser".to_string();
+        leg.chooser_put_expiry = Some("2026-07-05".to_string());
+        let err = EquityOption::try_from_json(&leg).unwrap_err().to_string();
+        assert!(
+            err.contains("chooser_put_expiry") && err.contains("leg expiry must lie after"),
+            "{err}"
+        );
+        leg.chooser_put_expiry = Some("2027-01-04".to_string());
+        assert!(EquityOption::try_from_json(&leg).is_ok());
+    }
 }

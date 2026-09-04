@@ -119,6 +119,15 @@ pub struct UsabilityReport {
     /// The desk rule of thumb applied: mean round-trip error <= 20 vol
     /// bps, max <= 50, and under 1% of the grid clamped or guarded.
     ///
+    /// Note what each leg grades: the clamp/fallback fractions describe
+    /// the `local_vol_checked` sampler handed to
+    /// [`usability_report`], while the round-trip statistics come from
+    /// the finite-difference engine's **own** Dupire local vol of the
+    /// implied `surface` (the engine has no hook for a caller-supplied
+    /// local vol). For the library's Dupire samplers the two coincide;
+    /// for a smoothed-model sampler (SVI/SABR local vol) the round trip
+    /// still measures the numerical Dupire of the sampled surface.
+    ///
     /// Deliberately **not** a function of [`Self::martingale`]. The two
     /// answer different questions, and against parity forwards the
     /// martingale check also carries the pipeline's zero-dividend
@@ -141,6 +150,18 @@ pub struct UsabilityReport {
 /// [`UsabilityConfig::martingale`] is set, the drift for the
 /// forward-recovery simulation (zero dividends throughout, matching the
 /// build pipeline).
+///
+/// Which leg grades what: the **clamp/fallback fractions** and the
+/// optional **martingale** check sample `local_vol_checked` directly.
+/// The **round trip** does not — it prices through the
+/// finite-difference engine, which derives its own Dupire local vol from
+/// `surface` (there is no plumbing for a caller-supplied local vol), so
+/// it grades the numerical Dupire of `surface`, not the sampler. When
+/// the sampler *is* that Dupire (the library's `LocalVol` /
+/// `LocalVolGrid`) the distinction is moot; for a smoothed-model
+/// sampler it is not, and the round trip should be read as "is the
+/// surface this model was sampled into usable", not as a verdict on the
+/// model's own local vol.
 pub fn usability_report(
     surface: &VolSurface,
     local_vol_checked: &dyn Fn(f64, f64) -> (f64, bool),
@@ -179,15 +200,7 @@ pub fn usability_report(
     }
 
     // round-trip: reprice interior vanillas under the local vol model
-    let pillar_times: Vec<f64> = surface.expiry_times().to_vec();
-    let selected: Vec<f64> = if pillar_times.len() <= config.max_expiries {
-        pillar_times
-    } else {
-        let step = (pillar_times.len() - 1) as f64 / (config.max_expiries - 1) as f64;
-        (0..config.max_expiries)
-            .map(|i| pillar_times[(i as f64 * step).round() as usize])
-            .collect()
-    };
+    let selected = select_expiries(surface.expiry_times(), config.max_expiries);
     let reference = surface.reference_date();
     let mut errors: Vec<f64> = Vec::new();
     for &t in &selected {
@@ -201,8 +214,7 @@ pub fn usability_report(
         let atm_vol = surface.vol(forward, forward, t_eff);
         let cap = (config.moneyness.1.ln()).min(-config.moneyness.0.ln());
         let half_width = (1.5 * atm_vol * t_eff.sqrt()).min(cap.abs());
-        for i in 0..n {
-            let k = -half_width + 2.0 * half_width * i as f64 / (n - 1).max(1) as f64;
+        for k in strike_offsets(n, half_width) {
             let strike = forward * k.exp();
             if strike < report.trusted_region.strike_lo || strike > report.trusted_region.strike_hi
             {
@@ -260,6 +272,38 @@ pub fn usability_report(
         ));
     }
     report
+}
+
+/// The pillar expiries the round trip reprices: all of them when there
+/// are at most `max_expiries`, otherwise `max_expiries` of them evenly
+/// spread from the first to the last pillar. A request for zero is read
+/// as one, and a single slot takes the front pillar (the expiry where
+/// Dupire is most sensitive to the surface). An empty surface selects
+/// nothing.
+fn select_expiries(pillar_times: &[f64], max_expiries: usize) -> Vec<f64> {
+    let n_sel = max_expiries.max(1);
+    if pillar_times.len() <= n_sel {
+        pillar_times.to_vec()
+    } else if n_sel == 1 {
+        vec![pillar_times[0]]
+    } else {
+        let step = (pillar_times.len() - 1) as f64 / (n_sel - 1) as f64;
+        (0..n_sel)
+            .map(|i| pillar_times[(i as f64 * step).round() as usize])
+            .collect()
+    }
+}
+
+/// `n` log-moneyness offsets spread evenly over `[-half_width,
+/// half_width]`; a single strike sits at the money (`k = 0`) rather
+/// than on the put-wing edge of the band.
+fn strike_offsets(n: usize, half_width: f64) -> Vec<f64> {
+    if n == 1 {
+        return vec![0.0];
+    }
+    (0..n)
+        .map(|i| -half_width + 2.0 * half_width * i as f64 / (n - 1) as f64)
+        .collect()
 }
 
 /// The strike/time box quoted on every pillar: the intersection of the
@@ -461,6 +505,85 @@ mod tests {
         assert_eq!(report.trusted_region.strike_lo, 70.0);
         assert_eq!(report.trusted_region.strike_hi, 130.0);
         assert!((report.trusted_region.t_hi - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn expiry_selection_handles_every_cap() {
+        let pillars: Vec<f64> = (1..=10).map(|i| i as f64 * 0.1).collect();
+        // fewer pillars than slots: all of them, in order
+        assert_eq!(select_expiries(&pillars, 10), pillars);
+        assert_eq!(select_expiries(&pillars, 20), pillars);
+        // the default cap of 8 spreads evenly from first to last
+        let eight = select_expiries(&pillars, 8);
+        assert_eq!(eight.len(), 8);
+        assert_eq!(eight[0], pillars[0]);
+        assert_eq!(eight[7], pillars[9]);
+        assert!(eight.windows(2).all(|w| w[0] < w[1]));
+        // two slots: the ends
+        assert_eq!(select_expiries(&pillars, 2), vec![pillars[0], pillars[9]]);
+        // one slot (and zero, read as one): the front pillar, no
+        // division by zero and no underflow
+        assert_eq!(select_expiries(&pillars, 1), vec![pillars[0]]);
+        assert_eq!(select_expiries(&pillars, 0), vec![pillars[0]]);
+        // an empty surface selects nothing under any cap
+        assert!(select_expiries(&[], 0).is_empty());
+        assert!(select_expiries(&[], 1).is_empty());
+        assert!(select_expiries(&[], 8).is_empty());
+        // a single pillar is kept as is
+        assert_eq!(select_expiries(&[0.5], 0), vec![0.5]);
+    }
+
+    #[test]
+    fn strike_offsets_put_a_single_strike_at_the_money() {
+        assert_eq!(strike_offsets(1, 0.2), vec![0.0]);
+        let three = strike_offsets(3, 0.2);
+        assert_eq!(three.len(), 3);
+        assert!((three[0] + 0.2).abs() < 1e-15);
+        assert!(three[1].abs() < 1e-15);
+        assert!((three[2] - 0.2).abs() < 1e-15);
+        let two = strike_offsets(2, 0.1);
+        assert!((two[0] + 0.1).abs() < 1e-15 && (two[1] - 0.1).abs() < 1e-15);
+    }
+
+    #[test]
+    fn degenerate_sampling_caps_reprice_one_atm_vanilla() {
+        // max_expiries 0 or 1 with one strike per expiry: the front
+        // pillar's ATM vanilla, nothing else, and no panic
+        let surface = VolSurface::from_strike_smiles(
+            &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0)],
+            &[
+                (0..13)
+                    .map(|i| (70.0 + 5.0 * i as f64, 0.25))
+                    .collect(),
+                (0..13)
+                    .map(|i| (70.0 + 5.0 * i as f64, 0.25))
+                    .collect(),
+            ],
+            asof(),
+            DayCountConvention::Act365,
+        )
+        .unwrap();
+        let curve = flat_curve(0.02);
+        let local_vol = LocalVol::new(&surface, &curve, 100.0, 0.0, 0.0);
+        for max_expiries in [0usize, 1] {
+            let report = usability_report(
+                &surface,
+                &|level, t| local_vol.vol_checked(level, t),
+                &[90.0, 100.0, 110.0],
+                &[0.4, 0.6],
+                &curve,
+                100.0,
+                &UsabilityConfig {
+                    max_expiries,
+                    strikes_per_expiry: 1,
+                    ..UsabilityConfig::default()
+                },
+            );
+            assert_eq!(report.roundtrip.failures, 0, "{report:?}");
+            assert_eq!(report.roundtrip.points, 1, "{report:?}");
+            // a flat surface round-trips its own vol closely
+            assert!(report.roundtrip.max_vol_bps < 20.0, "{report:?}");
+        }
     }
 
     #[test]

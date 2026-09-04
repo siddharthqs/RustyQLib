@@ -172,6 +172,34 @@ pub enum LongShort {
     LONG,
     SHORT,
 }
+
+impl LongShort {
+    /// `+1.0` for a long position, `-1.0` for a short one — the factor
+    /// that signs a position's value and Greeks.
+    pub fn sign(self) -> f64 {
+        match self {
+            LongShort::LONG => 1.0,
+            LongShort::SHORT => -1.0,
+        }
+    }
+}
+
+/// The contract convention: `1` = long, `-1` = short. Anything else is
+/// rejected rather than silently read as long.
+impl TryFrom<i32> for LongShort {
+    type Error = crate::core::errors::RustyQLibError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(LongShort::LONG),
+            -1 => Ok(LongShort::SHORT),
+            _ => Err(crate::core::errors::RustyQLibError::invalid_input(
+                "long_short",
+                "use 1 (long) or -1 (short)",
+            )),
+        }
+    }
+}
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PayoffType {
@@ -228,6 +256,21 @@ pub trait Payoff: Debug + Send + Sync {
         self.payoff(*path.last().expect("empty path"), strike)
     }
 
+    /// [`path_payoff`](Payoff::path_payoff) with the initial spot `s0`
+    /// available.
+    ///
+    /// `path` excludes the initial spot by convention, which is right for
+    /// payoffs that only see the simulated fixings. A lookback's running
+    /// extremum, though, starts at `S_0` — the closed forms in
+    /// [`lookback`](crate::equity::lookback) take it as the seasoned
+    /// extremum — so omitting it makes Monte Carlo disagree with the
+    /// analytic engine on the same contract. Payoffs that need the
+    /// initial fixing override this; the default ignores it, so nothing
+    /// else changes.
+    fn path_payoff_from(&self, _s0: f64, path: &[f64], strike: f64) -> f64 {
+        self.path_payoff(path, strike)
+    }
+
     /// True when the payoff depends on the whole path (Asian, Barrier), so
     /// engines must simulate paths rather than terminal values.
     fn is_path_dependent(&self) -> bool {
@@ -253,6 +296,25 @@ pub trait Payoff: Debug + Send + Sync {
         _path: &[crate::core::aad::Var<'t>],
         _strike: f64,
     ) -> Option<crate::core::aad::Var<'t>> {
+        None
+    }
+
+    /// The strike at which a constant-vol engine should read the
+    /// volatility surface, when that is **not** the contract strike.
+    ///
+    /// Forward-start options and autocallables carry no meaningful
+    /// strike at inception (`strike_price` is a placeholder — 0 from
+    /// JSON, 100 from the builder), so reading the surface there lands
+    /// on the far put wing and, under a skew, prices the trade at the
+    /// wrong vol. They override this to name an economically meaningful
+    /// point on the surface instead. `None` (the default) means "use the
+    /// contract strike".
+    ///
+    /// Consulted by every constant-vol read of the surface —
+    /// [`EquityOption::volatility`](crate::equity::vanilla_option::EquityOption::volatility)
+    /// and the Monte Carlo market parameters — so a price and its Greeks
+    /// can never read different points.
+    fn vol_anchor_strike(&self, _forward: f64) -> Option<f64> {
         None
     }
 

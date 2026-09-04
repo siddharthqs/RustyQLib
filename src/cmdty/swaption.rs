@@ -32,13 +32,16 @@ use crate::cmdty::apo::black_on_lognormal_moments;
 use crate::cmdty::bachelier;
 use crate::cmdty::clewlow_strickland::ClewlowStrickland;
 use crate::cmdty::forward_curve::CommodityForwardCurve;
-use crate::cmdty::swap::CommoditySwap;
+use crate::cmdty::swap::{positive_annuity, CommoditySwap};
 use crate::cmdty::vol::CommodityVol;
+use crate::cmdty::{expiry_inputs, vol_time};
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 use crate::core::trade::PutOrCall;
 use crate::equity::black76::{self, FuturesSettlement};
 use crate::rates::PayerReceiver;
+
+const FIELD: &str = "commodity swaption";
 
 /// A European option to enter `swap` at `expiry_date`. The strike is
 /// the swap's `fixed_price`; the payer/receiver side is the swap's.
@@ -82,6 +85,15 @@ impl CommoditySwaption {
             .settlement_annuity(discount, self.swap.effective_date)
     }
 
+    /// The option side on the par price: a payer exercises when par
+    /// exceeds the strike (a call), a receiver the other way.
+    fn option_side(&self) -> PutOrCall {
+        match self.swap.payer_receiver {
+            PayerReceiver::Payer => PutOrCall::Call,
+            PayerReceiver::Receiver => PutOrCall::Put,
+        }
+    }
+
     /// Premium. A bare `f64` vol is a Black (lognormal) vol on the par
     /// price; pass a [`CommodityVol`] to select the shifted or normal
     /// model. Within the one-factor flat-vol dynamics each formula is
@@ -93,26 +105,10 @@ impl CommoditySwaption {
         vol: impl Into<CommodityVol>,
     ) -> Result<f64, RustyQLibError> {
         let quote = vol.into().validated("commodity swaption")?;
-        let valuation = discount.reference_date();
-        if self.expiry_date < valuation {
-            return Err(RustyQLibError::invalid_input(
-                "commodity swaption",
-                format!(
-                    "swaption expired {} (valuing {valuation})",
-                    self.expiry_date
-                ),
-            ));
-        }
-        let t = discount
-            .day_count()
-            .year_fraction(valuation, self.expiry_date);
+        let t = expiry_inputs(FIELD, self.expiry_date, discount)?.t;
         let p0 = self.forward_par_price(discount, forward)?;
         let k = self.swap.fixed_price;
-        // a payer exercises when par > strike: a call on the par price
-        let pc = match self.swap.payer_receiver {
-            PayerReceiver::Payer => PutOrCall::Call,
-            PayerReceiver::Receiver => PutOrCall::Put,
-        };
+        let pc = self.option_side();
         // the annuity carries all the discounting, so the kernel runs
         // undiscounted (margined, r = 0)
         let undiscounted = match quote {
@@ -154,28 +150,13 @@ impl CommoditySwaption {
         model: &ClewlowStrickland,
     ) -> Result<f64, RustyQLibError> {
         let valuation = discount.reference_date();
-        if self.expiry_date < valuation {
-            return Err(RustyQLibError::invalid_input(
-                "commodity swaption",
-                format!(
-                    "swaption expired {} (valuing {valuation})",
-                    self.expiry_date
-                ),
-            ));
-        }
-        let dc = discount.day_count();
-        let t_ex = dc.year_fraction(valuation, self.expiry_date);
+        let t_ex = expiry_inputs(FIELD, self.expiry_date, discount)?.t;
         let periods = self.swap.periods()?;
         let dfs: Vec<f64> = periods
             .iter()
             .map(|p| discount.df_date(p.payment))
             .collect();
-        let a_df: f64 = dfs.iter().sum();
-        if a_df <= 0.0 {
-            return Err(RustyQLibError::NumericalError(format!(
-                "non-positive settlement annuity {a_df}"
-            )));
-        }
+        let a_df = positive_annuity(FIELD, dfs.iter().sum())?;
         // the par price as a weighted basket of the daily forwards
         let mut obs: Vec<(f64, f64, f64)> = Vec::new(); // (T_d, F_d, w_d)
         for (period, &df_p) in periods.iter().zip(&dfs) {
@@ -198,15 +179,14 @@ impl CommoditySwaption {
                         format!("lognormal moment matching needs positive forwards, got {f}"),
                     ));
                 }
-                obs.push((dc.year_fraction(valuation, day), f, w));
+                // the observation's own maturity, on the same vol clock
+                // as the exercise date
+                obs.push((vol_time(valuation, day), f, w));
             }
         }
         let m1: f64 = obs.iter().map(|&(_, f, w)| w * f).sum();
         let k = self.swap.fixed_price;
-        let pc = match self.swap.payer_receiver {
-            PayerReceiver::Payer => PutOrCall::Call,
-            PayerReceiver::Receiver => PutOrCall::Put,
-        };
+        let pc = self.option_side();
         let annuity = self.annuity(discount)?;
         // a non-positive strike on a positive basket: the payer always
         // exercises, the receiver never does
@@ -244,6 +224,11 @@ impl CommoditySwaption {
     }
 
     /// Vega per unit of the quote's vol, by central bump.
+    ///
+    /// The down bump is floored at zero vol, so at (or just above) a
+    /// zero quote the pair is one-sided; dividing by the **realized**
+    /// bump width rather than `2h` keeps it a true difference quotient
+    /// instead of halving the forward difference.
     pub fn vega(
         &self,
         discount: &YieldCurve,
@@ -252,9 +237,14 @@ impl CommoditySwaption {
     ) -> Result<f64, RustyQLibError> {
         let quote = vol.into();
         let h = 1e-4;
-        let up = self.price(discount, forward, quote.bumped_vol(h))?;
-        let down = self.price(discount, forward, quote.bumped_vol(-h))?;
-        Ok((up - down) / (2.0 * h))
+        let (qu, qd) = (quote.bumped_vol(h), quote.bumped_vol(-h));
+        let width = qu.vol() - qd.vol();
+        if width <= 0.0 {
+            return Ok(0.0);
+        }
+        let up = self.price(discount, forward, qu)?;
+        let down = self.price(discount, forward, qd)?;
+        Ok((up - down) / width)
     }
 }
 
@@ -484,6 +474,46 @@ mod tests {
         assert!(payer.vega(&discount, &forward, 0.30).unwrap() > 0.0);
         let receiver = swaption(74.0, PayerReceiver::Receiver);
         assert!(receiver.delta(&discount, &forward, 0.30).unwrap() < 0.0);
+    }
+
+    #[test]
+    fn vega_at_a_zero_vol_quote_uses_the_realized_bump_width() {
+        // bumping down from zero is clamped at zero, so the pair spans
+        // h, not 2h: dividing by 2h would halve the sensitivity
+        let (discount, forward) = market();
+        let h = 1e-4;
+        // struck at the forward par, so a vol bump is pure time value
+        let p0 = swaption(74.0, PayerReceiver::Payer)
+            .forward_par_price(&discount, &forward)
+            .unwrap();
+        let atm = swaption(p0, PayerReceiver::Payer);
+        let vega = atm.vega(&discount, &forward, 0.0).unwrap();
+        let up = atm.price(&discount, &forward, h).unwrap();
+        let down = atm.price(&discount, &forward, 0.0).unwrap();
+        assert_eq!(down, 0.0);
+        assert!(vega > 0.0, "{vega}");
+        assert!((vega - (up - down) / h).abs() < 1e-10, "{vega}");
+        // the nominal 2h would have reported half of it
+        assert!(((up - down) / (2.0 * h) - 0.5 * vega).abs() < 1e-10);
+        // and the same holds for a normal quote
+        let vega_n = atm
+            .vega(&discount, &forward, CommodityVol::Normal(0.0))
+            .unwrap();
+        let up_n = atm
+            .price(&discount, &forward, CommodityVol::Normal(h))
+            .unwrap();
+        let down_n = atm
+            .price(&discount, &forward, CommodityVol::Normal(0.0))
+            .unwrap();
+        assert!(vega_n > 0.0, "{vega_n}");
+        assert!((vega_n - (up_n - down_n) / h).abs() < 1e-10, "{vega_n}");
+        // well away from zero the bump is two-sided again, so nothing
+        // about the ordinary case changed
+        let live = atm.vega(&discount, &forward, 0.30).unwrap();
+        let u = atm.price(&discount, &forward, 0.30 + h).unwrap();
+        let dn = atm.price(&discount, &forward, 0.30 - h).unwrap();
+        let width = (0.30 + h) - (0.30 - h);
+        assert!((live - (u - dn) / width).abs() < 1e-10, "{live}");
     }
 
     #[test]

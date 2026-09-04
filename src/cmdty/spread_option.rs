@@ -34,12 +34,15 @@
 use chrono::NaiveDate;
 
 use crate::cmdty::bachelier;
+use crate::cmdty::expiry_inputs;
 use crate::cmdty::forward_curve::CommodityForwardCurve;
 use crate::cmdty::vol::CommodityVol;
-use crate::core::curves::{Compounding, YieldCurve};
+use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 use crate::core::trade::PutOrCall;
 use crate::equity::black76::{self, FuturesSettlement};
+
+const FIELD: &str = "spread option";
 
 /// A European option on the spread `F_a - F_b`. Premium is quoted for
 /// the whole contract (`quantity` units).
@@ -116,7 +119,6 @@ impl CommoditySpreadOption {
     /// Premium for the whole contract. Bare `f64` vols are Black
     /// (lognormal) leg vols priced with Kirk; both legs must quote the
     /// same [`CommodityVol`] family.
-    #[allow(clippy::too_many_arguments)]
     pub fn price(
         &self,
         discount: &YieldCurve,
@@ -134,21 +136,8 @@ impl CommoditySpreadOption {
                 format!("correlation must be in [-1, 1], got {rho}"),
             ));
         }
-        let valuation = discount.reference_date();
-        if self.expiry_date < valuation {
-            return Err(RustyQLibError::invalid_input(
-                "spread option",
-                format!("option expired {} (valuing {valuation})", self.expiry_date),
-            ));
-        }
-        let t = discount
-            .day_count()
-            .year_fraction(valuation, self.expiry_date);
-        let r = if t > 0.0 {
-            discount.zero_rate_with(t, Compounding::Continuous)
-        } else {
-            0.0
-        };
+        let inputs = expiry_inputs(FIELD, self.expiry_date, discount)?;
+        let (r, t) = (inputs.r, inputs.t);
         let (f_a, f_b) = self.forward_prices(forward_a, forward_b);
         let (k, pc, s) = (self.strike, self.put_or_call, self.settlement);
         let per_unit = match (quote_a, quote_b) {
@@ -181,7 +170,7 @@ impl CommoditySpreadOption {
             }
             (CommodityVol::Normal(v_a), CommodityVol::Normal(v_b)) => {
                 // a difference of joint normals is normal: exact
-                let spread_vol = (v_a * v_a - 2.0 * rho * v_a * v_b + v_b * v_b).sqrt();
+                let spread_vol = composite_vol(v_a, v_b, rho, 1.0);
                 bachelier::price(f_a - f_b, k, r, spread_vol, t, pc, s)
             }
             _ => {
@@ -196,7 +185,6 @@ impl CommoditySpreadOption {
     }
 
     /// Delta of leg A (per $1 of its curve), by central bump.
-    #[allow(clippy::too_many_arguments)]
     pub fn delta_a(
         &self,
         discount: &YieldCurve,
@@ -214,7 +202,6 @@ impl CommoditySpreadOption {
     }
 
     /// Delta of leg B (per $1 of its curve), by central bump.
-    #[allow(clippy::too_many_arguments)]
     pub fn delta_b(
         &self,
         discount: &YieldCurve,
@@ -233,7 +220,6 @@ impl CommoditySpreadOption {
 
     /// Correlation sensitivity (cega): PV change per unit of `rho`, by
     /// central bump clamped to `[-1, 1]`.
-    #[allow(clippy::too_many_arguments)]
     pub fn cega(
         &self,
         discount: &YieldCurve,
@@ -278,8 +264,7 @@ fn kirk(
         ));
     }
     let w = f_b / (f_b + k);
-    // (v_a - rho v_b w)^2 + (v_b w)^2 (1 - rho^2) >= 0 always
-    let sigma = (v_a * v_a - 2.0 * rho * v_a * v_b * w + (v_b * w) * (v_b * w)).sqrt();
+    let sigma = composite_vol(v_a, v_b, rho, w);
     Ok(black76::price(
         f_a,
         f_b + k,
@@ -291,9 +276,31 @@ fn kirk(
     ))
 }
 
+/// The vol of `sigma_a dW_a - w sigma_b dW_b`: the composite vol Kirk
+/// puts into Black-76 (and, at `w = 1`, the spread vol of two normal
+/// legs).
+///
+/// Evaluated as `(v_a - rho v_b w)^2 + (v_b w)^2 (1 - rho^2)`, a sum of
+/// squares, rather than the algebraically equal
+/// `v_a^2 - 2 rho v_a v_b w + (v_b w)^2`. The two agree in exact
+/// arithmetic, but the second cancels catastrophically at `rho = ±1`
+/// with the legs' vols close: the three terms nearly annihilate and
+/// rounding can leave the variance a few ulps **negative**, whose
+/// square root is `NaN` — a silent one that propagates all the way out
+/// as an `Ok(NaN)` premium. In this form each addend is non-negative by
+/// construction, so the variance cannot go below zero by rounding; the
+/// clamp only guards a `1 - rho^2` that rounds below zero just past
+/// `|rho| = 1`.
+fn composite_vol(v_a: f64, v_b: f64, rho: f64, w: f64) -> f64 {
+    let bw = v_b * w;
+    let var = (v_a - rho * bw).powi(2) + bw * bw * (1.0 - rho * rho);
+    var.max(0.0).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::curves::Compounding;
     use crate::core::daycount::DayCountConvention;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -332,14 +339,12 @@ mod tests {
     }
 
     /// Bivariate GBM / arithmetic Monte Carlo for the spread payoff at
-    /// t = 1, discounted on `df`, per unit.
+    /// t = 1, discounted on `df`, per unit. The market is the two
+    /// forwards and the strike; the model is the two vols, their
+    /// correlation, and whether the legs are lognormal.
     fn spread_mc(
-        f_a: f64,
-        f_b: f64,
-        k: f64,
-        v_a: f64,
-        v_b: f64,
-        rho: f64,
+        (f_a, f_b, k): (f64, f64, f64),
+        (v_a, v_b, rho): (f64, f64, f64),
         df: f64,
         lognormal: bool,
     ) -> f64 {
@@ -380,7 +385,7 @@ mod tests {
             .price(&discount, &brent, &wti, 0.32, 0.35, 0.85)
             .unwrap();
         let df = discount.df_date(d(EXPIRY.0, EXPIRY.1, EXPIRY.2));
-        let mc = 1_000.0 * spread_mc(76.0, 72.0, 0.0, 0.32, 0.35, 0.85, df, true);
+        let mc = 1_000.0 * spread_mc((76.0, 72.0, 0.0), (0.32, 0.35, 0.85), df, true);
         assert!((price - mc).abs() < 0.01 * price, "kirk {price} vs MC {mc}");
     }
 
@@ -393,7 +398,7 @@ mod tests {
             .price(&discount, &brent, &wti, 0.32, 0.35, 0.85)
             .unwrap();
         let df = discount.df_date(d(EXPIRY.0, EXPIRY.1, EXPIRY.2));
-        let mc = 1_000.0 * spread_mc(76.0, 72.0, 3.0, 0.32, 0.35, 0.85, df, true);
+        let mc = 1_000.0 * spread_mc((76.0, 72.0, 3.0), (0.32, 0.35, 0.85), df, true);
         // Kirk approximation error + MC noise, both well inside 1.5%
         assert!(
             (price - mc).abs() < 0.015 * price,
@@ -419,7 +424,7 @@ mod tests {
             )
             .unwrap();
         let df = discount.df_date(d(EXPIRY.0, EXPIRY.1, EXPIRY.2));
-        let mc = 1_000.0 * spread_mc(-1.5, 2.75, -4.0, v_a, v_b, rho, df, false);
+        let mc = 1_000.0 * spread_mc((-1.5, 2.75, -4.0), (v_a, v_b, rho), df, false);
         assert!(
             (price - mc).abs() < 0.005 * price,
             "normal {price} vs MC {mc}"
@@ -531,6 +536,52 @@ mod tests {
         let db = option.delta_b(&discount, &a, &b, 0.32, 0.35, 0.85).unwrap();
         // long the received leg, short the paid leg
         assert!(da > 0.0 && db < 0.0, "{da} / {db}");
+    }
+
+    #[test]
+    fn perfect_correlation_never_rounds_the_variance_negative() {
+        // at rho = +-1 the composite variance is a difference of nearly
+        // equal terms: in the cancelling form it rounds negative and
+        // sqrt gives a silent NaN premium. Walk vols either side of
+        // equality, both models, both signs of rho.
+        let discount = flat_discount(0.04);
+        let option = spread_call(0.0);
+        let (a, b) = (flat_curve(76.0), flat_curve(72.0));
+        for rho in [1.0, -1.0] {
+            for eps in [0.0, 1e-9, -1e-9, 1e-15, -1e-15] {
+                let v_b = 0.35;
+                let v_a = v_b * (1.0 + eps);
+                let kirk = option.price(&discount, &a, &b, v_a, v_b, rho).unwrap();
+                assert!(kirk.is_finite() && kirk >= 0.0, "kirk rho={rho} eps={eps}");
+                let normal = option
+                    .price(
+                        &discount,
+                        &a,
+                        &b,
+                        CommodityVol::Normal(25.0 * (1.0 + eps)),
+                        CommodityVol::Normal(25.0),
+                        rho,
+                    )
+                    .unwrap();
+                assert!(
+                    normal.is_finite() && normal >= 0.0,
+                    "normal rho={rho} eps={eps}"
+                );
+            }
+        }
+        // the exactly-degenerate case: identical legs, rho = 1, K = 0 is
+        // a frozen spread worth nothing
+        let same = flat_curve(72.0);
+        let frozen = option
+            .price(&discount, &same, &same, 0.35, 0.35, 1.0)
+            .unwrap();
+        assert_eq!(frozen, 0.0);
+        // and the composite vol itself is exact where it can be checked
+        assert_eq!(composite_vol(0.35, 0.35, 1.0, 1.0), 0.0);
+        assert!((composite_vol(0.3, 0.4, -1.0, 1.0) - 0.7).abs() < 1e-15);
+        // uncorrelated legs: the plain quadrature
+        let root = (0.3f64 * 0.3 + 0.4 * 0.4).sqrt();
+        assert!((composite_vol(0.3, 0.4, 0.0, 1.0) - root).abs() < 1e-15);
     }
 
     #[test]

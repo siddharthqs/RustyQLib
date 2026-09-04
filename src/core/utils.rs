@@ -16,21 +16,42 @@ pub enum ContractStyle {
     Bermudan(Vec<f64>),
 }
 
-/// Map exercise/observation times to 1-based indices on an equally
-/// spaced grid of `steps` steps over `[0, t]`: nearest step, clamped to
-/// `[1, steps]`, strictly increasing so no two times collapse.
-pub fn times_to_grid_steps(times: &[f64], t: f64, steps: usize) -> Vec<usize> {
+/// Map observation times to **0-based path indices** on an equally
+/// spaced grid of `steps` steps over `[0, t]`, keeping each surviving
+/// observation's own time alongside its index: nearest step, clamped to
+/// `[1, steps]`, strictly increasing (a later time that rounds onto an
+/// already-used step is pushed to the next one). A time that cannot get
+/// a step of its own — it collapses onto the last grid step already
+/// taken — is **dropped together with its time**, so a payoff indexing
+/// `dfs[m]` by observation `m` never sees the same step twice (which
+/// would, e.g., pay a phoenix coupon twice on one fixing). The first
+/// time to reach a step is the one kept.
+///
+/// Callers that need matching discount factors map over the returned
+/// times, so indices and discount factors cannot drift apart.
+pub fn observation_steps(times: &[f64], t: f64, steps: usize) -> Vec<(usize, f64)> {
     let mut out = Vec::with_capacity(times.len());
     let mut prev: i64 = 0;
     for &tm in times {
         let i = ((tm / t) * steps as f64).round().max(1.0) as i64;
         let i = i.max(prev + 1).min(steps as i64);
         if i > prev {
-            out.push(i as usize);
+            out.push((i as usize - 1, tm));
             prev = i;
         }
     }
     out
+}
+
+/// Map exercise/observation times to 1-based indices on an equally
+/// spaced grid of `steps` steps over `[0, t]`: nearest step, clamped to
+/// `[1, steps]`, strictly increasing so no two times collapse (the
+/// index-only view of [`observation_steps`]).
+pub fn times_to_grid_steps(times: &[f64], t: f64, steps: usize) -> Vec<usize> {
+    observation_steps(times, t, steps)
+        .into_iter()
+        .map(|(i, _)| i + 1)
+        .collect()
 }
 
 #[derive(strum_macros::Display)]
@@ -411,6 +432,26 @@ pub fn inv_norm_cdf(p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observation_steps_drops_collapsed_observations_with_their_times() {
+        // two times inside the last step round onto step 100 together:
+        // the second cannot get a step of its own and is dropped along
+        // with its time, so index and time stay a matched pair
+        let obs = observation_steps(&[0.25, 0.5, 0.996, 1.0], 1.0, 100);
+        assert_eq!(obs, vec![(24, 0.25), (49, 0.5), (99, 0.996)]);
+        // the index-only view agrees entry for entry
+        assert_eq!(
+            times_to_grid_steps(&[0.25, 0.5, 0.996, 1.0], 1.0, 100),
+            vec![25, 50, 100]
+        );
+        // interior near-collisions are pushed to the next step, not
+        // dropped (both survive, strictly increasing)
+        let obs = observation_steps(&[0.501, 0.504], 1.0, 100);
+        assert_eq!(obs, vec![(49, 0.501), (50, 0.504)]);
+        // clamped to [1, steps]: a time at zero lands on the first step
+        assert_eq!(observation_steps(&[0.0], 1.0, 10), vec![(0, 0.0)]);
+    }
 
     #[test]
     fn bivariate_normal_identities() {

@@ -11,6 +11,18 @@
 //! [`FuturesSettlement`] styles (up-front discounted premium, or
 //! futures-style margined with no discounting), Greeks with respect to
 //! `F`, `sigma`, `r` and calendar time.
+//!
+//! # Degenerate inputs
+//!
+//! At `t <= 0` or `sigma <= 0` the option is worth its (discounted)
+//! intrinsic, and every function here returns that limit rather than
+//! the `0/0` of `d`: price and delta are the payoff's own value and
+//! slope, theta is the decay of the discount factor on the intrinsic,
+//! rho follows from the price, and the second-order Greeks (gamma,
+//! vega, vanna, charm, zomma, gamma_p) are reported as zero — the
+//! payoff is piecewise linear, so they vanish everywhere except at the
+//! kink, where the one-sided limits disagree and no single value is
+//! right.
 
 use crate::core::trade::PutOrCall;
 use crate::core::utils::{norm_cdf, norm_pdf};
@@ -24,6 +36,40 @@ fn intrinsic(f: f64, k: f64, put_or_call: PutOrCall) -> f64 {
     match put_or_call {
         PutOrCall::Call => (f - k).max(0.0),
         PutOrCall::Put => (k - f).max(0.0),
+    }
+}
+
+/// True when the diffusion has collapsed and the option is just its
+/// intrinsic — the guard `price` has always applied, mirrored by every
+/// Greek below.
+fn degenerate(sigma: f64, t: f64) -> bool {
+    t <= 0.0 || sigma <= 0.0
+}
+
+/// The undiscounted delta of the payoff itself: the `sigma -> 0` (or
+/// `t -> 0`) limit of `N(d)`. In the money it is the full unit, out of
+/// the money zero, and exactly at the money one half — where `d = 0`
+/// for every positive vol, so `N(d) = 1/2` all the way down.
+fn limit_delta(f: f64, k: f64, put_or_call: PutOrCall) -> f64 {
+    match put_or_call {
+        PutOrCall::Call => {
+            if f > k {
+                1.0
+            } else if f < k {
+                0.0
+            } else {
+                0.5
+            }
+        }
+        PutOrCall::Put => {
+            if f < k {
+                -1.0
+            } else if f > k {
+                0.0
+            } else {
+                -0.5
+            }
+        }
     }
 }
 
@@ -60,6 +106,9 @@ pub fn delta(
     settlement: FuturesSettlement,
 ) -> f64 {
     let df = settlement.discount_factor(r, t);
+    if degenerate(sigma, t) {
+        return df * limit_delta(f, k, put_or_call);
+    }
     let d = d(f, k, sigma, t);
     match put_or_call {
         PutOrCall::Call => df * norm_cdf(d),
@@ -69,12 +118,18 @@ pub fn delta(
 
 /// Gamma with respect to `F` (same for calls and puts).
 pub fn gamma(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     df * norm_pdf(d(f, k, sigma, t)) / (sigma * t.sqrt())
 }
 
 /// Vega per unit of normal vol (same for calls and puts).
 pub fn vega(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     df * norm_pdf(d(f, k, sigma, t)) * t.sqrt()
 }
@@ -90,6 +145,14 @@ pub fn theta(
     settlement: FuturesSettlement,
 ) -> f64 {
     let df = settlement.discount_factor(r, t);
+    if degenerate(sigma, t) {
+        // no time value left to bleed: only the discount factor on the
+        // intrinsic still decays
+        return match settlement {
+            FuturesSettlement::Margined => 0.0,
+            FuturesSettlement::Discounted => r * df * intrinsic(f, k, put_or_call),
+        };
+    }
     // volatility bleed sigma dN(d) / (2 sqrt(T)), common to calls and puts
     let bleed = df * sigma * norm_pdf(d(f, k, sigma, t)) / (2.0 * t.sqrt());
     match settlement {
@@ -120,6 +183,9 @@ pub fn rho(
 /// Vanna, the change in delta per unit change in normal vol (same for
 /// calls and puts).
 pub fn vanna(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     let d = d(f, k, sigma, t);
     -df * norm_pdf(d) * d / sigma
@@ -135,6 +201,9 @@ pub fn charm(
     put_or_call: PutOrCall,
     settlement: FuturesSettlement,
 ) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     let d = d(f, k, sigma, t);
     let d_dt = -d / (2.0 * t);
@@ -152,6 +221,9 @@ pub fn charm(
 /// Zomma, the change in gamma per unit change in normal vol (same for
 /// calls and puts).
 pub fn zomma(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSettlement) -> f64 {
+    if degenerate(sigma, t) {
+        return 0.0;
+    }
     let df = settlement.discount_factor(r, t);
     let d = d(f, k, sigma, t);
     df * norm_pdf(d) * (d * d - 1.0) / (sigma * sigma * t.sqrt())
@@ -159,17 +231,21 @@ pub fn zomma(f: f64, k: f64, r: f64, sigma: f64, t: f64, settlement: FuturesSett
 
 /// Percentage gamma (Haug's GammaP), `F * gamma / 100`: the change in
 /// delta per 1% move in the futures price.
+///
+/// Under the normal model the scaling runs on the **signed** forward,
+/// as the model itself does — `F` may be zero or negative here, so
+/// this is not the strictly positive elasticity of the lognormal
+/// GammaP, and it flips sign with `F`.
 pub fn gamma_p(
     f: f64,
     k: f64,
     r: f64,
     sigma: f64,
     t: f64,
-    put_or_call: PutOrCall,
+    _put_or_call: PutOrCall,
     settlement: FuturesSettlement,
 ) -> f64 {
     // side kept for signature stability; GammaP is side-free
-    let _ = put_or_call;
     f * gamma(f, k, r, sigma, t, settlement) / 100.0
 }
 
@@ -295,7 +371,7 @@ mod tests {
 
     #[test]
     fn degenerate_inputs_price_intrinsic() {
-        let df = (-R * T as f64).exp();
+        let df = (-R * T).exp();
         assert_eq!(
             price(
                 -2.0,
@@ -320,5 +396,71 @@ mod tests {
             ),
             0.0
         );
+    }
+
+    #[test]
+    fn degenerate_greeks_are_finite_and_take_their_limits() {
+        use FuturesSettlement::{Discounted as D, Margined as M};
+        // both collapses: no time left, and no diffusion
+        for (sigma, t) in [(SIG, 0.0), (0.0, T)] {
+            let df = if t > 0.0 { (-R * t).exp() } else { 1.0 };
+            for s in [D, M] {
+                let sdf = match s {
+                    D => df,
+                    M => 1.0,
+                };
+                for (f, k) in [(-2.0, -5.0), (-5.0, -2.0)] {
+                    let itm_call = f > k;
+                    for pc in [PutOrCall::Call, PutOrCall::Put] {
+                        let delta = delta(f, k, R, sigma, t, pc, s);
+                        let expected = match (pc, itm_call) {
+                            (PutOrCall::Call, true) => sdf,
+                            (PutOrCall::Call, false) => 0.0,
+                            (PutOrCall::Put, true) => 0.0,
+                            (PutOrCall::Put, false) => -sdf,
+                        };
+                        assert!((delta - expected).abs() < 1e-15, "{sigma}/{t} {pc:?}");
+                        // theta: only the discount factor on the intrinsic decays
+                        let theta = theta(f, k, R, sigma, t, pc, s);
+                        let expected_theta = match s {
+                            M => 0.0,
+                            D => R * sdf * intrinsic(f, k, pc),
+                        };
+                        assert!((theta - expected_theta).abs() < 1e-15, "{theta}");
+                        // rho stays the price relation, and everything is finite
+                        let rho = rho(f, k, R, sigma, t, pc, s);
+                        let expected_rho = match s {
+                            M => 0.0,
+                            D => -t * price(f, k, R, sigma, t, pc, s),
+                        };
+                        assert!((rho - expected_rho).abs() < 1e-15);
+                        assert_eq!(gamma_p(f, k, R, sigma, t, pc, s), 0.0);
+                        assert_eq!(charm(f, k, R, sigma, t, pc, s), 0.0);
+                    }
+                    assert_eq!(gamma(f, k, R, sigma, t, s), 0.0);
+                    assert_eq!(vega(f, k, R, sigma, t, s), 0.0);
+                    assert_eq!(vanna(f, k, R, sigma, t, s), 0.0);
+                    assert_eq!(zomma(f, k, R, sigma, t, s), 0.0);
+                }
+                // exactly at the money the delta is the half unit that
+                // d = 0 gives for every positive vol
+                let atm = delta(-3.0, -3.0, R, sigma, t, PutOrCall::Call, s);
+                assert!((atm - 0.5 * sdf).abs() < 1e-15, "{atm}");
+                let atm_put = delta(-3.0, -3.0, R, sigma, t, PutOrCall::Put, s);
+                assert!((atm_put + 0.5 * sdf).abs() < 1e-15, "{atm_put}");
+            }
+        }
+    }
+
+    #[test]
+    fn degenerate_delta_is_the_limit_of_the_diffusive_one() {
+        use FuturesSettlement::Discounted as D;
+        // shrinking the vol toward zero walks the live delta onto the
+        // degenerate one, in and out of the money
+        for (f, k) in [(-2.0, -5.0), (-5.0, -2.0)] {
+            let limit = delta(f, k, R, 0.0, T, PutOrCall::Call, D);
+            let near = delta(f, k, R, 1e-6, T, PutOrCall::Call, D);
+            assert!((limit - near).abs() < 1e-12, "{limit} vs {near}");
+        }
     }
 }

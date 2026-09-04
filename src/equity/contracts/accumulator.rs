@@ -101,16 +101,45 @@ pub struct Accumulator {
 
 impl Accumulator {
     fn validate(&self) -> Result<(), RustyQLibError> {
-        if self.observations < 1 || self.t <= 0.0 || self.sigma <= 0.0 {
+        if self.observations < 1
+            || !(self.t.is_finite() && self.t > 0.0)
+            || !(self.sigma.is_finite() && self.sigma > 0.0)
+        {
             return Err(RustyQLibError::invalid_input(
                 "accumulator",
                 "observations must be >= 1, maturity and volatility must be positive",
+            ));
+        }
+        // the closed form asserts positive levels and the simulation
+        // divides by the path count: reject both here, typed
+        for (name, x) in [
+            ("underlying_price", self.s0),
+            ("strike", self.strike),
+            ("barrier", self.barrier),
+        ] {
+            if !(x.is_finite() && x > 0.0) {
+                return Err(RustyQLibError::invalid_input(
+                    name,
+                    format!("{name} must be finite and positive, got {x}"),
+                ));
+            }
+        }
+        if !(self.r.is_finite() && self.q.is_finite()) {
+            return Err(RustyQLibError::invalid_input(
+                "accumulator",
+                "risk_free_rate and dividend must be finite",
             ));
         }
         if self.gearing < 0.0 || self.shares_per_day <= 0.0 {
             return Err(RustyQLibError::invalid_input(
                 "accumulator",
                 "gearing must be non-negative and shares_per_day positive",
+            ));
+        }
+        if self.pricer == AccumulatorPricer::MonteCarlo && self.paths < 1 {
+            return Err(RustyQLibError::invalid_input(
+                "simulation",
+                "Monte Carlo pricing needs at least one path",
             ));
         }
         match self.side {
@@ -237,6 +266,59 @@ impl Accumulator {
             sum_sq += value * value;
         }
         mean_std_err(sum, sum_sq, self.paths)
+    }
+
+    /// Value on the configured pricer, with the Monte Carlo standard
+    /// error when there is one. No validation: callers do that once.
+    fn value(&self) -> (f64, Option<f64>) {
+        match self.pricer {
+            AccumulatorPricer::Analytical => (self.analytic_npv(), None),
+            AccumulatorPricer::MonteCarlo => {
+                let (pv, se) = self.mc_npv();
+                (pv, Some(se))
+            }
+        }
+    }
+
+    /// Value of a tweaked copy — the bump leg of a finite difference.
+    fn value_with(&self, tweak: impl FnOnce(&mut Accumulator)) -> f64 {
+        let mut bumped = self.clone();
+        tweak(&mut bumped);
+        bumped.value().0
+    }
+
+    /// Central-difference Greeks on the configured pricer around the
+    /// base value `pv`. The Monte Carlo pricer is deterministic per seed,
+    /// so its bumps are common-random-number differences. Theta is the
+    /// calendar `dV/dt` (value gained as maturity approaches), matching
+    /// [`Greeks`](crate::core::results::Greeks).
+    fn bumped_greeks(&self, pv: f64) -> crate::core::results::Greeks {
+        use crate::equity::conventions::{RATE_BUMP, SPOT_REL_BUMP, VOL_BUMP};
+        let ds = self.s0 * SPOT_REL_BUMP;
+        let s_up = self.value_with(|a| a.s0 += ds);
+        let s_dn = self.value_with(|a| a.s0 -= ds);
+        let delta = (s_up - s_dn) / (2.0 * ds);
+        let gamma = (s_up - 2.0 * pv + s_dn) / (ds * ds);
+        // keep the down-bumped vol strictly positive on tiny-vol inputs
+        let dv = VOL_BUMP.min(0.5 * self.sigma);
+        let vega = (self.value_with(|a| a.sigma += dv) - self.value_with(|a| a.sigma -= dv))
+            / (2.0 * dv);
+        let dr = RATE_BUMP;
+        let rho =
+            (self.value_with(|a| a.r += dr) - self.value_with(|a| a.r -= dr)) / (2.0 * dr);
+        // one calendar day either side, shortened near expiry so the
+        // down leg keeps a positive life
+        let dt = (1.0_f64 / 365.0).min(0.5 * self.t);
+        let theta = (self.value_with(|a| a.t -= dt) - self.value_with(|a| a.t += dt)) / (2.0 * dt);
+        crate::core::results::Greeks {
+            delta,
+            gamma,
+            vega,
+            theta,
+            rho,
+            gamma_p: self.s0 * gamma / 100.0,
+            ..Default::default()
+        }
     }
 
     /// Build from contract data, panicking on any invalid field. Fallible
@@ -400,23 +482,20 @@ impl crate::equity::utils::Payoff for AccumulatorPayoff {
 
 impl Instrument for Accumulator {
     fn try_npv(&self) -> Result<f64, RustyQLibError> {
-        Ok(self.price()?.pv)
-    }
-
-    fn price(&self) -> Result<crate::core::results::PricingResult, RustyQLibError> {
         // typed rejection for directly constructed accumulators;
         // try_from_json validates at construction
         self.validate()?;
-        let (pv, std_err) = match self.pricer {
-            AccumulatorPricer::Analytical => (self.analytic_npv(), None),
-            AccumulatorPricer::MonteCarlo => {
-                let (pv, se) = self.mc_npv();
-                (pv, Some(se))
-            }
-        };
+        Ok(self.value().0)
+    }
+
+    /// Value plus bump-and-reprice Greeks (delta, gamma, vega, rho,
+    /// theta) on the configured pricer.
+    fn price(&self) -> Result<crate::core::results::PricingResult, RustyQLibError> {
+        self.validate()?;
+        let (pv, std_err) = self.value();
         Ok(crate::core::results::PricingResult {
             pv,
-            greeks: Default::default(),
+            greeks: self.bumped_greeks(pv),
             std_err,
             asset_greeks: None,
         })
@@ -571,6 +650,91 @@ mod tests {
             vol.analytic_npv() < baseline,
             "accumulator holder is short vol"
         );
+    }
+
+    #[test]
+    fn validation_rejects_degenerate_levels_and_empty_simulations() {
+        let expect_field = |a: &Accumulator, field: &str| {
+            let err = a.price().unwrap_err().to_string();
+            assert!(err.contains(field), "expected '{field}' in: {err}");
+        };
+        // strike 0 used to reach barrier_price's assert as a panic
+        let mut zero_strike = base();
+        zero_strike.strike = 0.0;
+        expect_field(&zero_strike, "strike");
+        let mut zero_spot = base();
+        zero_spot.s0 = 0.0;
+        expect_field(&zero_spot, "underlying_price");
+        let mut nan_barrier = base();
+        nan_barrier.barrier = f64::NAN;
+        expect_field(&nan_barrier, "barrier");
+        let mut nan_rate = base();
+        nan_rate.r = f64::NAN;
+        assert!(nan_rate.price().is_err());
+        // simulation 0 used to yield a NaN standard error
+        let mut no_paths = base();
+        no_paths.pricer = AccumulatorPricer::MonteCarlo;
+        no_paths.paths = 0;
+        expect_field(&no_paths, "simulation");
+        // the analytic pricer does not care about the path count
+        let mut analytic = base();
+        analytic.paths = 0;
+        assert!(analytic.price().is_ok());
+        // and the JSON route reports the same rejection
+        let json = r#"{
+            "symbol": "ACCU", "side": "accumulator", "underlying_price": 100.0,
+            "strike": 0.0, "barrier": 110.0, "observations": 12,
+            "maturity": "2030-01-01", "risk_free_rate": 0.03, "volatility": 0.25
+        }"#;
+        let data: AccumulatorData = serde_json::from_str(json).unwrap();
+        let err = Accumulator::try_from_json(&data).unwrap_err().to_string();
+        assert!(err.contains("strike"), "{err}");
+    }
+
+    #[test]
+    fn standalone_greeks_follow_the_holders_economics() {
+        // the geared holder is long the spot (buys below) and short vol
+        // (short the wings): the same economics `risk_features_move_the_
+        // price_the_right_way` asserts by hand
+        let a = base();
+        let result = a.price().unwrap();
+        assert_eq!(result.pv, a.npv());
+        let g = &result.greeks;
+        // (the delta sign is regime-dependent for a geared holder near
+        // the knock-out, so only the vol exposure is asserted by sign)
+        assert!(g.delta.is_finite() && g.delta != 0.0, "delta {}", g.delta);
+        assert!(g.vega < 0.0, "accumulator holder is short vol: vega {}", g.vega);
+        assert!(g.gamma.is_finite() && g.rho.is_finite() && g.theta.is_finite());
+        // the Greeks are exactly the central differences of the pricer
+        let ds = a.s0 * crate::equity::conventions::SPOT_REL_BUMP;
+        let mut up = a.clone();
+        up.s0 += ds;
+        let mut dn = a.clone();
+        dn.s0 -= ds;
+        let fd_delta = (up.analytic_npv() - dn.analytic_npv()) / (2.0 * ds);
+        assert_eq!(g.delta, fd_delta);
+        let dv = crate::equity::conventions::VOL_BUMP;
+        let mut vup = a.clone();
+        vup.sigma += dv;
+        let mut vdn = a.clone();
+        vdn.sigma -= dv;
+        assert_eq!(g.vega, (vup.analytic_npv() - vdn.analytic_npv()) / (2.0 * dv));
+        assert_eq!(g.gamma_p, a.s0 * g.gamma / 100.0);
+        // the Monte Carlo route is seeded, so its bumps are
+        // common-random-number differences: finite and non-zero
+        let mut mc = base();
+        mc.pricer = AccumulatorPricer::MonteCarlo;
+        mc.paths = 4_000;
+        mc.observations = 12;
+        let result = mc.price().unwrap();
+        assert!(result.std_err.is_some());
+        let g = &result.greeks;
+        assert!(g.delta.is_finite() && g.delta != 0.0, "mc delta {}", g.delta);
+        // (knock-out flips make a bumped MC vega noisy, so only
+        // finiteness is asserted here; the analytic sign is above)
+        for x in [g.gamma, g.vega, g.rho, g.theta] {
+            assert!(x.is_finite(), "mc greek {x}");
+        }
     }
 
     // ── the mainline payoff: EquityOption integration ───────────────────

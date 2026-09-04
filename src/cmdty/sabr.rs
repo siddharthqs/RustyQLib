@@ -99,8 +99,8 @@ impl ShiftedSabr {
 
     /// The quote for a [`CommodityOption`](crate::cmdty::CommodityOption),
     /// resolving the forward and time to expiry exactly as its pricing
-    /// does (the forward curve at the underlying date, the discount
-    /// curve's day count to expiry).
+    /// does (the forward curve at the underlying date, the Act/365 vol
+    /// time to expiry — see the [`crate::cmdty`] conventions).
     pub fn quote_for(
         &self,
         option: &crate::cmdty::CommodityOption,
@@ -108,9 +108,7 @@ impl ShiftedSabr {
         forward: &crate::cmdty::CommodityForwardCurve,
     ) -> Result<CommodityVol, RustyQLibError> {
         let f = option.forward_price(forward);
-        let t = discount
-            .day_count()
-            .year_fraction(discount.reference_date(), option.expiry_date);
+        let t = crate::cmdty::vol_time(discount.reference_date(), option.expiry_date);
         self.vol_quote(f, option.strike, t)
     }
 

@@ -130,7 +130,7 @@ impl<'a> BumpedMarket<'a> {
         (s + self.bump.d_spot).max(base * crate::equity::conventions::MIN_BUMPED_SPOT_FRAC)
     }
 
-    fn base_forward(&self, maturity: NaiveDate) -> f64 {
+    pub(crate) fn base_forward(&self, maturity: NaiveDate) -> f64 {
         let t = self.base_time_to_maturity(maturity);
         let s = self.market.spot.value() - self.pv_cash_dividends(maturity);
         s * ((self.base_rate(maturity) - self.carry_yield()) * t).exp()

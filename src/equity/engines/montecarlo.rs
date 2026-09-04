@@ -39,7 +39,7 @@ use crate::core::fft::Complex;
 use crate::core::montecarlo::process::{StochasticProcess, StochasticProcess1D};
 use crate::core::montecarlo::{path_normals, pseudo_normals, sobol_normals, PathDraws};
 use crate::core::trade::PutOrCall;
-use crate::core::utils::ContractStyle;
+use crate::core::utils::{observation_steps, ContractStyle};
 use crate::equity::accumulator::AccumulatorPayoff;
 use crate::equity::asian::{self, AsianStrikeType, AveragingType};
 use crate::equity::autocallable::AutocallablePayoff;
@@ -61,13 +61,12 @@ use crate::equity::variance_swap::VarianceSwapPayoff;
 /// are defined once against any SDE's drift/diffusion coefficients.
 pub use crate::core::montecarlo::process::DiscretizationScheme;
 
-/// Re-exported from the asset-agnostic path layer. Longstaff-Schwartz
-/// always uses pseudo-random streams.
+/// Re-exported from the asset-agnostic path layer. The sampler choice
+/// reaches only the **GBM / local-vol** routes (terminal and path-wise
+/// Black-Scholes simulation): the stochastic-vol routes (Heston, SABR,
+/// rough Bergomi) and the Longstaff-Schwartz passes always draw seeded
+/// pseudo-random antithetic streams, whatever `mc_sampler` says.
 pub use crate::core::montecarlo::paths::Sampler;
-
-/// Dynamics used for path generation. `Gbm` diffuses at the option's own
-/// (constant) implied vol; `LocalVol` diffuses at the Dupire local
-/// volatility calibrated from the option's vol surface.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MonteCarloConfig {
@@ -76,6 +75,8 @@ pub struct MonteCarloConfig {
     /// Local vol always steps path-wise (at least [`LOCAL_VOL_MIN_STEPS`]).
     pub time_steps: usize,
     pub scheme: DiscretizationScheme,
+    /// Point set for the GBM / local-vol routes only; see [`Sampler`]
+    /// for the routes that ignore it.
     pub sampler: Sampler,
     pub seed: u64,
 }
@@ -170,10 +171,13 @@ impl MonteCarloConfig {
 /// **antithetic pair averages** (pair members are negatively correlated
 /// by construction, so the naive per-path estimator misstates the
 /// error; for independent draws the pair-averaged estimator is equally
-/// unbiased). It is `None` under the low-discrepancy sampler, whose
-/// deterministic points admit no sample-variance error estimate. For
-/// the LSMC it reflects valuation-pass noise only (not regression
-/// uncertainty).
+/// unbiased). It is `None` when the GBM / local-vol routes run on the
+/// low-discrepancy sampler, whose deterministic points admit no
+/// sample-variance error estimate; the stochastic-vol routes (Heston,
+/// SABR, rough Bergomi) and the LSMC always simulate pseudo-random
+/// antithetic streams regardless of `sampler`, so they always report
+/// it. For the LSMC it reflects valuation-pass noise only (not
+/// regression uncertainty).
 #[derive(Debug, Clone, Copy)]
 pub struct McStats {
     pub pv: f64,
@@ -278,12 +282,19 @@ struct MarketParams {
 
 fn market_params(option: &EquityOption, m: &BumpedMarket) -> MarketParams {
     let maturity = option.base.maturity_date;
+    // strike-less payoffs (forward-start, autocallable) read the surface
+    // at their own anchor, the same one `EquityOption::volatility` uses,
+    // so a price and its bumped Greeks cannot land on different points
+    let vol_strike = option
+        .payoff
+        .vol_anchor_strike(m.base_forward(maturity))
+        .unwrap_or(option.base.strike_price);
     MarketParams {
         s0: m.spot(),
         strike: option.base.strike_price,
         r: m.risk_free_rate(maturity),
         q: m.carry_yield(),
-        sigma: m.volatility(option.base.strike_price, maturity),
+        sigma: m.volatility(vol_strike, maturity),
         t: m.time_to_maturity(maturity).max(1e-6),
     }
 }
@@ -716,7 +727,10 @@ fn effective_steps(cfg: &MonteCarloConfig, model: &Model) -> usize {
 const PATH_CHUNK: usize = 4096;
 
 /// Low-discrepancy points are deterministic, so a sample-variance
-/// standard error has no statistical meaning for them.
+/// standard error has no statistical meaning for them. Only the GBM /
+/// local-vol routes honour `cfg.sampler`; the stochastic-vol and LSMC
+/// routes draw pseudo-random streams unconditionally and pass `false`
+/// to [`summarize`] directly.
 fn is_qmc(cfg: &MonteCarloConfig) -> bool {
     matches!(cfg.sampler, Sampler::Sobol)
 }
@@ -746,6 +760,65 @@ where
     partials
         .into_iter()
         .fold(PathAccum::default(), PathAccum::merge)
+}
+
+/// One Black-Scholes (GBM / local-vol) path on the step grid: evolve
+/// under `scheme`, then take the step's cash dividend off the spot
+/// (floored at `1e-8`), in that order — the sequence every
+/// Black-Scholes path route shares. `record(j, s)` receives the spot at
+/// the end of step `j` (the path routes push it, the LSMC fills a slice,
+/// the terminal route ignores it); returns the terminal spot.
+fn simulate_bs_path(
+    process: &BlackScholesProcess,
+    scheme: DiscretizationScheme,
+    s0: f64,
+    dt: f64,
+    dw: &[f64],
+    divs: Option<&Vec<f64>>,
+    mut record: impl FnMut(usize, f64),
+) -> f64 {
+    let mut s = s0;
+    for (i, d) in dw.iter().enumerate() {
+        s = process.evolve(scheme, i as f64 * dt, s, dt, *d);
+        if let Some(divs) = divs {
+            s = (s - divs[i]).max(1e-8);
+        }
+        record(i, s);
+    }
+    s
+}
+
+/// One two-factor path on the seeded antithetic pseudo-random streams
+/// every stochastic-vol route uses: path `i` reads stream `i / 2` into
+/// `z` (`2 * steps` normals) and odd paths negate the draws, so pairs
+/// `(2k, 2k + 1)` are antithetic; each step hands the process
+/// **independent** increments `sign * sqrt(dt) * z` (the process applies
+/// its own correlation). `on_step(j, x, x_next)` runs after step `j`
+/// with the pre-step state `x` and the freshly evolved `x_next`, which
+/// it may adjust in place (cash dividends) and record; the primitive
+/// then commits `x_next` as the next step's state.
+#[allow(clippy::too_many_arguments)]
+fn simulate_two_factor<P: StochasticProcess>(
+    process: &P,
+    seed: u64,
+    i: usize,
+    x0: [f64; 2],
+    steps: usize,
+    dt: f64,
+    z: &mut [f64],
+    mut on_step: impl FnMut(usize, &[f64; 2], &mut [f64; 2]),
+) {
+    path_normals(seed, (i / 2) as u64, z);
+    let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+    let sqrt_dt = dt.sqrt();
+    let mut x = x0;
+    let mut x_next = [0.0; 2];
+    for j in 0..steps {
+        let dw = [sign * sqrt_dt * z[2 * j], sign * sqrt_dt * z[2 * j + 1]];
+        process.evolve(j as f64 * dt, &x, dt, &dw, &mut x_next);
+        on_step(j, &x, &mut x_next);
+        x = x_next;
+    }
 }
 
 // ── European ────────────────────────────────────────────────────────────
@@ -822,13 +895,7 @@ fn european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
     let divs = dividends_per_step(option, p.t, steps);
     let acc = run_paths(cfg.paths, steps, &draws, |dw, _| {
-        let mut s = p.s0;
-        for (i, d) in dw.iter().enumerate() {
-            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
-            if let Some(divs) = &divs {
-                s = (s - divs[i]).max(1e-8);
-            }
-        }
+        let s = simulate_bs_path(&process, cfg.scheme, p.s0, dt, dw, divs.as_ref(), |_, _| {});
         df * option.payoff.payoff(s, p.strike)
     });
     summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
@@ -846,15 +913,10 @@ fn generic_path_npv(option: &EquityOption, p: &MarketParams) -> McStats {
     let divs = dividends_per_step(option, p.t, steps);
     let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
         path.clear();
-        let mut s = p.s0;
-        for (i, d) in dw.iter().enumerate() {
-            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
-            if let Some(divs) = &divs {
-                s = (s - divs[i]).max(1e-8);
-            }
-            path.push(s);
-        }
-        df * option.payoff.path_payoff(path, p.strike)
+        simulate_bs_path(&process, cfg.scheme, p.s0, dt, dw, divs.as_ref(), |_, s| {
+            path.push(s)
+        });
+        df * option.payoff.path_payoff_from(p.s0, path, p.strike)
     });
     summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
@@ -907,6 +969,48 @@ fn asian_npv(option: &EquityOption, asian: &AsianPayoff, p: &MarketParams) -> Mc
     summarize(acc, cfg.paths, steps, geo_closed, is_qmc(cfg))
 }
 
+/// One Brownian-bridge step of a path's barrier survival weight against
+/// a single continuously-monitored level `h`: crossing at the node kills
+/// the path outright, otherwise the bridge crossing probability
+/// `exp(-2ab / (sigma^2 dt))` (`a`, `b` the log-distances of the step's
+/// two nodes from the barrier, `sigma` the vol that drove the step)
+/// discounts the survival. Shared by the GBM / local-vol route
+/// ([`barrier_npv`]) and the stochastic-vol routes ([`bridge_survival`]).
+///
+/// A path absorbed at the origin (a CEV SABR forward, `s_next == 0`)
+/// cannot cross an **up** barrier inside the step, so no bridge factor
+/// is applied there — the log-distance would be infinite and, against a
+/// non-finite vol, the exponent `NaN`. The vol floor guards the
+/// `sigma -> 0` division (the GBM route's vol is already floored well
+/// above it upstream, so it is a no-op there).
+fn bridge_step(
+    survival: &mut f64,
+    s_prev: f64,
+    s_next: f64,
+    sigma: f64,
+    h: f64,
+    down: bool,
+    dt: f64,
+) {
+    if *survival > 0.0 {
+        let crossed = if down { s_next <= h } else { s_next >= h };
+        if crossed {
+            *survival = 0.0;
+        } else if down || s_next > 0.0 {
+            // probability the bridge touched the barrier inside the step
+            let (a, b) = if down {
+                ((s_prev / h).ln(), (s_next / h).ln())
+            } else {
+                ((h / s_prev).ln(), (h / s_next).ln())
+            };
+            let sigma = sigma.max(1e-8);
+            *survival *= 1.0 - (-2.0 * a * b / (sigma * sigma * dt)).exp();
+        }
+        // else: absorbed at zero under an up barrier — it stays below
+        // the level for good, the survival is untouched
+    }
+}
+
 /// Barrier pricing with a Brownian-bridge crossing correction: each path
 /// carries a survival probability that accounts for the chance of touching
 /// the barrier *between* monitoring points, removing the O(sqrt(dt))
@@ -942,20 +1046,7 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
             if let Some(divs) = &divs {
                 s_next = (s_next - divs[i]).max(1e-8);
             }
-            if survival > 0.0 {
-                let crossed = if down { s_next <= h } else { s_next >= h };
-                if crossed {
-                    survival = 0.0;
-                } else {
-                    // probability the bridge touched the barrier inside the step
-                    let (a, b) = if down {
-                        ((s / h).ln(), (s_next / h).ln())
-                    } else {
-                        ((h / s).ln(), (h / s_next).ln())
-                    };
-                    survival *= 1.0 - (-2.0 * a * b / (sigma * sigma * dt)).exp();
-                }
-            }
+            bridge_step(&mut survival, s, s_next, sigma, h, down, dt);
             s = s_next;
         }
         let vanilla_leg = option.payoff.payoff(s, p.strike);
@@ -965,11 +1056,15 @@ fn barrier_npv(option: &EquityOption, barrier: &BarrierPayoff, p: &MarketParams)
     summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
 }
 
-/// Observation grid for an autocallable on a path of `steps` steps over
-/// life `t`: per-observation path indices and discount factors. Explicit
-/// `observation_times` (business-day adjusted call dates as year
-/// fractions) map to the nearest grid step and discount at their exact
-/// times; without them observations are equally spaced.
+/// Observation grid for a scheduled payoff on a path of `steps` steps
+/// over life `t`: per-observation path indices and discount factors.
+/// Explicit `observation_times` (business-day adjusted call dates as
+/// year fractions) map to the nearest grid step through
+/// [`observation_steps`] — strictly increasing, and an observation that
+/// collapses onto an already-used step is dropped **together with its
+/// time**, so `obs_idx[m]` and `dfs[m]` always describe the same fixing
+/// (a repeated index would pay a phoenix coupon twice) — and discount at
+/// their exact times; without them observations are equally spaced.
 fn observation_grid(
     option: &EquityOption,
     n_obs: usize,
@@ -981,19 +1076,7 @@ fn observation_grid(
     let dr = r - option.risk_free_rate();
     let n_obs = n_obs.max(1);
     let (obs_idx, obs_times): (Vec<usize>, Vec<f64>) = match observation_times {
-        Some(times) => {
-            let mut idx = Vec::with_capacity(times.len());
-            let mut prev: i64 = 0;
-            for &tm in times {
-                // nearest grid step, strictly increasing so no two
-                // observations collapse onto one step
-                let i = ((tm / t) * steps as f64).round().max(1.0) as i64;
-                let i = i.max(prev + 1).min(steps as i64);
-                idx.push(i as usize - 1);
-                prev = i;
-            }
-            (idx, times.clone())
-        }
+        Some(times) => observation_steps(times, t, steps).into_iter().unzip(),
         None => {
             let dt = t / steps as f64;
             let idx: Vec<usize> = (1..=n_obs).map(|m| m * steps / n_obs - 1).collect();
@@ -1008,43 +1091,53 @@ fn observation_grid(
     (obs_idx, dfs)
 }
 
+/// GBM / local-vol valuation of a payoff with a fixing schedule — the
+/// Black-Scholes counterpart of the observation-aligned arms of
+/// [`route_sv_paths`]: the step count is rounded up to a multiple of
+/// `n_obs` so every observation lands exactly on a simulation step,
+/// [`observation_grid`] supplies the per-observation path indices and
+/// discount factors, and `eval(path, obs_idx, dfs)` values one path.
+fn observation_aligned_npv(
+    option: &EquityOption,
+    p: &MarketParams,
+    n_obs: usize,
+    observation_times: Option<&Vec<f64>>,
+    eval: impl Fn(&[f64], &[usize], &[f64]) -> f64 + Sync,
+) -> McStats {
+    let cfg = option.mc_cfg();
+    let n_obs = n_obs.max(1);
+    let steps = effective_steps(cfg, &option.model)
+        .max(PATH_DEPENDENT_MIN_STEPS)
+        .div_ceil(n_obs)
+        * n_obs;
+    let dt = p.t / steps as f64;
+    let (obs_idx, dfs) = observation_grid(option, n_obs, observation_times, p.t, p.r, steps);
+    let divs = dividends_per_step(option, p.t, steps);
+    let process = bs_process(option, p);
+    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
+    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
+        path.clear();
+        simulate_bs_path(&process, cfg.scheme, p.s0, dt, dw, divs.as_ref(), |_, s| {
+            path.push(s)
+        });
+        eval(path, &obs_idx, &dfs)
+    });
+    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+}
+
 /// Autocallable valuation: cash flows land on their own call dates, so
 /// each path value is the redemption amount times the discount factor of
 /// its payment date (curve discount factors, shifted consistently under
 /// rho bumps). Steps are aligned so every observation falls exactly on a
 /// simulation step. Runs under GBM and local vol.
 fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketParams) -> McStats {
-    let cfg = option.mc_cfg();
-    let n_obs = auto.observations.max(1);
-    let steps = effective_steps(cfg, &option.model)
-        .max(PATH_DEPENDENT_MIN_STEPS)
-        .div_ceil(n_obs)
-        * n_obs;
-    let dt = p.t / steps as f64;
-    let (obs_idx, dfs) = observation_grid(
+    observation_aligned_npv(
         option,
-        n_obs,
+        p,
+        auto.observations,
         auto.observation_times.as_ref(),
-        p.t,
-        p.r,
-        steps,
-    );
-    let divs = dividends_per_step(option, p.t, steps);
-    let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
-    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
-        path.clear();
-        let mut s = p.s0;
-        for (i, d) in dw.iter().enumerate() {
-            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
-            if let Some(divs) = &divs {
-                s = (s - divs[i]).max(1e-8);
-            }
-            path.push(s);
-        }
-        auto.path_value(path, &obs_idx, &dfs)
-    });
-    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+        |path, obs_idx, dfs| auto.path_value(path, obs_idx, dfs),
+    )
 }
 
 /// Accumulator valuation: daily accruals land on their own observation
@@ -1054,30 +1147,9 @@ fn autocall_npv(option: &EquityOption, auto: &AutocallablePayoff, p: &MarketPara
 /// on a simulation step. Runs under GBM and local vol; the Heston route
 /// lives in `heston_european_npv`.
 fn accumulator_npv(option: &EquityOption, accu: &AccumulatorPayoff, p: &MarketParams) -> McStats {
-    let cfg = option.mc_cfg();
-    let n_obs = accu.observations.max(1);
-    let steps = effective_steps(cfg, &option.model)
-        .max(PATH_DEPENDENT_MIN_STEPS)
-        .div_ceil(n_obs)
-        * n_obs;
-    let dt = p.t / steps as f64;
-    let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
-    let divs = dividends_per_step(option, p.t, steps);
-    let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
-    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
-        path.clear();
-        let mut s = p.s0;
-        for (i, d) in dw.iter().enumerate() {
-            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
-            if let Some(divs) = &divs {
-                s = (s - divs[i]).max(1e-8);
-            }
-            path.push(s);
-        }
-        accu.path_value(path, &obs_idx, &dfs, p.strike)
-    });
-    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+    observation_aligned_npv(option, p, accu.observations, None, |path, obs_idx, dfs| {
+        accu.path_value(path, obs_idx, dfs, p.strike)
+    })
 }
 
 /// Variance-swap valuation on the GBM / local-vol route:
@@ -1085,67 +1157,22 @@ fn accumulator_npv(option: &EquityOption, accu: &AccumulatorPayoff, p: &MarketPa
 /// per path (the discretely monitored contract). The stochastic-vol
 /// models route through [`route_sv_paths`]'s variance-swap arm.
 fn variance_swap_npv(option: &EquityOption, vs: &VarianceSwapPayoff, p: &MarketParams) -> McStats {
-    let cfg = option.mc_cfg();
-    let n_obs = vs.observations.max(1);
-    let steps = effective_steps(cfg, &option.model)
-        .max(PATH_DEPENDENT_MIN_STEPS)
-        .div_ceil(n_obs)
-        * n_obs;
-    let dt = p.t / steps as f64;
-    let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
-    let divs = dividends_per_step(option, p.t, steps);
-    let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
-    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
-        path.clear();
-        let mut s = p.s0;
-        for (i, d) in dw.iter().enumerate() {
-            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
-            if let Some(divs) = &divs {
-                s = (s - divs[i]).max(1e-8);
-            }
-            path.push(s);
-        }
-        vs.path_value(path, &obs_idx, &dfs, p.t)
-    });
-    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+    observation_aligned_npv(option, p, vs.observations, None, |path, obs_idx, dfs| {
+        vs.path_value(path, obs_idx, dfs, p.t)
+    })
 }
 
 /// Cliquet valuation on the GBM / local-vol route: reset-aligned step
 /// grid, [`CliquetPayoff::path_value`] per path. The stochastic-vol
 /// models route through [`route_sv_paths`]'s cliquet arm instead.
 fn cliquet_npv(option: &EquityOption, cliq: &CliquetPayoff, p: &MarketParams) -> McStats {
-    let cfg = option.mc_cfg();
-    let n_obs = cliq.resets.max(1);
-    let steps = effective_steps(cfg, &option.model)
-        .max(PATH_DEPENDENT_MIN_STEPS)
-        .div_ceil(n_obs)
-        * n_obs;
-    let dt = p.t / steps as f64;
-    let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
-    let divs = dividends_per_step(option, p.t, steps);
-    let process = bs_process(option, p);
-    let draws = PathDraws::new(cfg.sampler, cfg.seed, steps, dt);
-    let acc = run_paths(cfg.paths, steps, &draws, |dw, path| {
-        path.clear();
-        let mut s = p.s0;
-        for (i, d) in dw.iter().enumerate() {
-            s = process.evolve(cfg.scheme, i as f64 * dt, s, dt, *d);
-            if let Some(divs) = &divs {
-                s = (s - divs[i]).max(1e-8);
-            }
-            path.push(s);
-        }
-        cliq.path_value(path, &obs_idx, &dfs)
-    });
-    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+    observation_aligned_npv(option, p, cliq.resets, None, |path, obs_idx, dfs| {
+        cliq.path_value(path, obs_idx, dfs)
+    })
 }
 
-// ── Heston stochastic volatility paths ──────────────────────────────────
+// ── Stochastic-vol payoff routing ───────────────────────────────────────
 
-/// Heston simulation on seeded per-path pseudo-random streams. The
-/// default (`Exact`) scheme selects Andersen QE with martingale
-/// correction; `mc_scheme: euler`/`milstein` select full-truncation
 /// One payoff-routing implementation shared by every stochastic-vol
 /// path route (Heston, SABR, rough Bergomi): barriers get the
 /// Brownian-bridge crossing correction, autocallables and accumulators
@@ -1157,6 +1184,11 @@ fn cliquet_npv(option: &EquityOption, cliq: &CliquetPayoff, p: &MarketParams) ->
 /// part. What used to be three ~90-line copies of this block (one per
 /// model) is now one site; a change to the bridge logic or the
 /// observation alignment cannot silently miss a model again.
+///
+/// Every `run` draws seeded pseudo-random antithetic streams whatever
+/// `cfg.sampler` says (see [`Sampler`]), so the standard error is
+/// always statistically meaningful here and [`summarize`] is told so
+/// directly rather than through [`is_qmc`].
 fn route_sv_paths(
     option: &EquityOption,
     p: &MarketParams,
@@ -1167,7 +1199,16 @@ fn route_sv_paths(
     let dt = p.t / steps as f64;
     let df = exp(-p.r * p.t);
 
-    if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
+    // the bridge correction covers one continuously-monitored level with
+    // no rebate — the same filter as the GBM route; double barriers and
+    // rebated barriers fall through to `path_payoff` below, which
+    // monitors both levels discretely and pays the rebate at expiry
+    if let Some(barrier) = option
+        .payoff
+        .as_any()
+        .downcast_ref::<BarrierPayoff>()
+        .filter(|b| b.barrier2.is_none() && b.rebate == 0.0)
+    {
         let down = barrier.direction == BarrierDirection::Down;
         let out = barrier.knock == KnockType::Out;
         let h = barrier.barrier;
@@ -1185,7 +1226,7 @@ fn route_sv_paths(
             df * weight * option.payoff.payoff(*spots.last().unwrap(), p.strike)
         };
         let acc = run(steps, dt, &eval);
-        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+        return summarize(acc, cfg.paths, steps, 0.0, false);
     }
 
     if let Some(auto) = option.payoff.as_any().downcast_ref::<AutocallablePayoff>() {
@@ -1202,7 +1243,7 @@ fn route_sv_paths(
         );
         let eval = |spots: &[f64], _: &[f64]| auto.path_value(spots, &obs_idx, &dfs);
         let acc = run(steps, dt, &eval);
-        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+        return summarize(acc, cfg.paths, steps, 0.0, false);
     }
 
     if let Some(accu) = option.payoff.as_any().downcast_ref::<AccumulatorPayoff>() {
@@ -1212,7 +1253,7 @@ fn route_sv_paths(
         let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
         let eval = |spots: &[f64], _: &[f64]| accu.path_value(spots, &obs_idx, &dfs, p.strike);
         let acc = run(steps, dt, &eval);
-        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+        return summarize(acc, cfg.paths, steps, 0.0, false);
     }
 
     if let Some(cliq) = option.payoff.as_any().downcast_ref::<CliquetPayoff>() {
@@ -1222,7 +1263,7 @@ fn route_sv_paths(
         let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
         let eval = |spots: &[f64], _: &[f64]| cliq.path_value(spots, &obs_idx, &dfs);
         let acc = run(steps, dt, &eval);
-        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+        return summarize(acc, cfg.paths, steps, 0.0, false);
     }
 
     if let Some(vs) = option.payoff.as_any().downcast_ref::<VarianceSwapPayoff>() {
@@ -1232,26 +1273,27 @@ fn route_sv_paths(
         let (obs_idx, dfs) = observation_grid(option, n_obs, None, p.t, p.r, steps);
         let eval = |spots: &[f64], _: &[f64]| vs.path_value(spots, &obs_idx, &dfs, p.t);
         let acc = run(steps, dt, &eval);
-        return summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg));
+        return summarize(acc, cfg.paths, steps, 0.0, false);
     }
 
     let path_dependent = option.payoff.is_path_dependent();
     let eval = |spots: &[f64], _: &[f64]| {
         let v = if path_dependent {
-            option.payoff.path_payoff(spots, p.strike)
+            option.payoff.path_payoff_from(p.s0, spots, p.strike)
         } else {
             option.payoff.payoff(*spots.last().unwrap(), p.strike)
         };
         df * v
     };
     let acc = run(steps, dt, &eval);
-    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+    summarize(acc, cfg.paths, steps, 0.0, false)
 }
 
 /// Brownian-bridge survival weight of one simulated path against a
 /// single continuously-monitored barrier: per step, crossing at the
 /// node kills the path outright, otherwise the bridge crossing
-/// probability `exp(-2ab / (sigma^2 dt))` discounts the survival.
+/// probability `exp(-2ab / (sigma^2 dt))` discounts the survival
+/// ([`bridge_step`], with `vols[i]` the vol that drove step `i`).
 /// Returns the knock-out survival weight, or its complement for
 /// knock-ins.
 #[allow(clippy::too_many_arguments)]
@@ -1268,20 +1310,7 @@ fn bridge_survival(
     let mut survival = if knocked_at_start { 0.0 } else { 1.0 };
     let mut s_prev = s0;
     for (i, &s_next) in spots.iter().enumerate() {
-        if survival > 0.0 {
-            let crossed = if down { s_next <= h } else { s_next >= h };
-            if crossed {
-                survival = 0.0;
-            } else {
-                let (a, b) = if down {
-                    ((s_prev / h).ln(), (s_next / h).ln())
-                } else {
-                    ((h / s_prev).ln(), (h / s_next).ln())
-                };
-                let sigma = vols[i].max(1e-8);
-                survival *= 1.0 - (-2.0 * a * b / (sigma * sigma * dt)).exp();
-            }
-        }
+        bridge_step(&mut survival, s_prev, s_next, vols[i], h, down, dt);
         s_prev = s_next;
     }
     if out {
@@ -1291,6 +1320,11 @@ fn bridge_survival(
     }
 }
 
+// ── Heston stochastic volatility paths ──────────────────────────────────
+
+/// Heston simulation on seeded per-path pseudo-random streams. The
+/// default (`Exact`) scheme selects Andersen QE with martingale
+/// correction; `mc_scheme: euler`/`milstein` select full-truncation
 /// Euler. Vega bumps map to a parallel shift of the instantaneous and
 /// long-run vol.
 fn heston_european_npv(option: &EquityOption, p: &MarketParams) -> McStats {
@@ -1339,7 +1373,6 @@ where
         params: *hp,
         scheme,
     };
-    let sqrt_dt = dt.sqrt();
     let divs = dividends_per_step(option, p.t, steps);
     let chunks = cfg.paths.div_ceil(PATH_CHUNK);
     let partials: Vec<PathAccum> = (0..chunks)
@@ -1350,22 +1383,23 @@ where
             let mut vols = vec![0.0; steps];
             let mut acc = PathAccum::default();
             for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
-                // antithetic pairs share a stream with negated draws
-                path_normals(cfg.seed, (i / 2) as u64, &mut z);
-                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
-                let mut x = [p.s0, hp.v0];
-                let mut x_next = [0.0; 2];
-                for j in 0..steps {
-                    // independent increments; the process applies rho
-                    let dw = [sign * sqrt_dt * z[2 * j], sign * sqrt_dt * z[2 * j + 1]];
-                    vols[j] = x[1].max(0.0).sqrt();
-                    process.evolve(j as f64 * dt, &x, dt, &dw, &mut x_next);
-                    if let Some(divs) = &divs {
-                        x_next[0] = (x_next[0] - divs[j]).max(1e-8);
-                    }
-                    x = x_next;
-                    spots[j] = x[0];
-                }
+                simulate_two_factor(
+                    &process,
+                    cfg.seed,
+                    i,
+                    [p.s0, hp.v0],
+                    steps,
+                    dt,
+                    &mut z,
+                    |j, x, x_next| {
+                        // the vol entering the step, for the barrier bridge
+                        vols[j] = x[1].max(0.0).sqrt();
+                        if let Some(divs) = &divs {
+                            x_next[0] = (x_next[0] - divs[j]).max(1e-8);
+                        }
+                        spots[j] = x_next[0];
+                    },
+                );
                 acc.push(i, eval(&spots, &vols));
             }
             acc
@@ -1377,6 +1411,12 @@ where
 }
 
 // ── SABR stochastic volatility paths ────────────────────────────────────
+
+/// Forward level at which [`SabrProcess::evolve`] absorbs a CEV
+/// (`beta < 1`) path at zero. The bridge vol is evaluated on the
+/// forward floored here, so an absorbed path cannot send
+/// `alpha F^(beta-1)` to infinity and poison the survival weight.
+use crate::equity::processes::CEV_ABSORB as SABR_CEV_ABSORB;
 
 /// SABR valuation: two-factor `(forward, alpha)` simulation of the
 /// **forward to the option's expiry** (driftless under its expiry
@@ -1425,7 +1465,6 @@ where
     let cfg = option.mc_cfg();
     let process = SabrProcess { params: *sp };
     let carry = p.r - p.q;
-    let sqrt_dt = dt.sqrt();
     let divs = dividends_per_step(option, p.t, steps);
     // deterministic-carry factors: spot at each step end from the
     // simulated forward, and the forward value of an ex-date dividend
@@ -1442,24 +1481,30 @@ where
             let mut vols = vec![0.0; steps];
             let mut acc = PathAccum::default();
             for i in chunk * PATH_CHUNK..((chunk + 1) * PATH_CHUNK).min(cfg.paths) {
-                // antithetic pairs share a stream with negated draws
-                path_normals(cfg.seed, (i / 2) as u64, &mut z);
-                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
-                let mut x = [f0, sp.alpha];
-                let mut x_next = [0.0; 2];
-                for j in 0..steps {
-                    // independent increments; the process applies rho
-                    let dw = [sign * sqrt_dt * z[2 * j], sign * sqrt_dt * z[2 * j + 1]];
-                    vols[j] = x[1] * x[0].powf(sp.beta - 1.0);
-                    process.evolve(j as f64 * dt, &x, dt, &dw, &mut x_next);
-                    if let Some(divs) = &divs {
-                        // a cash dividend at the ex-date drops the
-                        // forward by its own forward value
-                        x_next[0] = (x_next[0] - divs[j] / spot_factor[j]).max(1e-8);
-                    }
-                    x = x_next;
-                    spots[j] = x[0] * spot_factor[j];
-                }
+                simulate_two_factor(
+                    &process,
+                    cfg.seed,
+                    i,
+                    [f0, sp.alpha],
+                    steps,
+                    dt,
+                    &mut z,
+                    |j, x, x_next| {
+                        // the lognormal vol entering the step, for the
+                        // barrier bridge; evaluated on the floored
+                        // forward so an absorbed CEV path (`x[0] == 0`
+                        // for `beta < 1`) reports a finite vol instead
+                        // of `+inf` (which turned the bridge exponent
+                        // into NaN)
+                        vols[j] = x[1] * x[0].max(SABR_CEV_ABSORB).powf(sp.beta - 1.0);
+                        if let Some(divs) = &divs {
+                            // a cash dividend at the ex-date drops the
+                            // forward by its own forward value
+                            x_next[0] = (x_next[0] - divs[j] / spot_factor[j]).max(1e-8);
+                        }
+                        spots[j] = x_next[0] * spot_factor[j];
+                    },
+                );
                 acc.push(i, eval(&spots, &vols));
             }
             acc
@@ -1581,7 +1626,8 @@ fn rbergomi_vanilla_mixed(
     let acc = partials
         .into_iter()
         .fold(PathAccum::default(), PathAccum::merge);
-    summarize(acc, cfg.paths, steps, 0.0, is_qmc(cfg))
+    // pseudo-random antithetic streams regardless of `cfg.sampler`
+    summarize(acc, cfg.paths, steps, 0.0, false)
 }
 
 /// Parallel rough Bergomi spot-path generation on the exact scheme:
@@ -1843,14 +1889,9 @@ fn american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         |seed, i, bufs, spots, _aux| {
             let (z, w, dw) = bufs;
             PathDraws::pseudo(seed, dt).fill(i, z, w, dw);
-            let mut s = p.s0;
-            for (j, d) in dw.iter().enumerate() {
-                s = process.evolve(cfg.scheme, j as f64 * dt, s, dt, *d);
-                if let Some(divs) = &divs {
-                    s = (s - divs[j]).max(1e-8);
-                }
-                spots[j] = s;
-            }
+            simulate_bs_path(&process, cfg.scheme, p.s0, dt, dw, divs.as_ref(), |j, s| {
+                spots[j] = s
+            });
         },
         |x, _| lsmc_basis(x),
     )
@@ -1901,7 +1942,6 @@ fn heston_american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         params: hp,
         scheme,
     };
-    let sqrt_dt = dt.sqrt();
     let divs = dividends_per_step(option, p.t, steps);
     lsmc_two_pass(
         option,
@@ -1909,21 +1949,22 @@ fn heston_american_npv(option: &EquityOption, p: &MarketParams) -> McStats {
         steps,
         || vec![0.0; 2 * steps],
         |seed, i, z: &mut Vec<f64>, spots, vars| {
-            // antithetic pairs (2k, 2k+1) share a stream with negated draws
-            path_normals(seed, (i / 2) as u64, z);
-            let sign = if i.is_multiple_of(2) { 1.0 } else { -1.0 };
-            let mut x = [p.s0, hp.v0];
-            let mut x_next = [0.0; 2];
-            for j in 0..steps {
-                let dw = [sign * sqrt_dt * z[2 * j], sign * sqrt_dt * z[2 * j + 1]];
-                process.evolve(j as f64 * dt, &x, dt, &dw, &mut x_next);
-                if let Some(divs) = &divs {
-                    x_next[0] = (x_next[0] - divs[j]).max(1e-8);
-                }
-                x = x_next;
-                spots[j] = x[0];
-                vars[j] = x[1].max(0.0);
-            }
+            simulate_two_factor(
+                &process,
+                seed,
+                i,
+                [p.s0, hp.v0],
+                steps,
+                dt,
+                z,
+                |j, _, x_next| {
+                    if let Some(divs) = &divs {
+                        x_next[0] = (x_next[0] - divs[j]).max(1e-8);
+                    }
+                    spots[j] = x_next[0];
+                    vars[j] = x_next[1].max(0.0);
+                },
+            );
         },
         heston_lsmc_basis,
     )

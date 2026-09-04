@@ -295,33 +295,48 @@ greek!(
 // with continuous payoffs, and the Heston vanilla delta that falls out of
 // the price integration. Fall through to the stencils everywhere else.
 
-fn native_delta(option: &EquityOption) -> Option<f64> {
-    match option.engine {
-        PricingEngine::MonteCarlo(_) => montecarlo::pathwise_delta_vega(option)
-            .map(|(delta, _)| delta)
-            .or_else(|| montecarlo::aad_greeks(option).map(|g| g.delta)),
-        _ if option.analytic_heston() => heston::native_vanilla_delta(option),
-        _ => None,
-    }
+/// The engine-native first-order estimators available for one option,
+/// `None` where the bump stencil applies. The fallback chain is encoded
+/// once: Monte Carlo prefers the one-step pathwise estimator (delta and
+/// vega), then the adjoint sweep (delta, vega and rho — the one-step
+/// terminal route keeps the cheaper bump stencil for rho); the analytic
+/// Heston engine reads delta off the price integration.
+struct NativeGreeks {
+    delta: Option<f64>,
+    vega: Option<f64>,
+    rho: Option<f64>,
 }
 
-fn native_vega(option: &EquityOption) -> Option<f64> {
-    match option.engine {
-        PricingEngine::MonteCarlo(_) => montecarlo::pathwise_delta_vega(option)
-            .map(|(_, vega)| vega)
-            .or_else(|| montecarlo::aad_greeks(option).map(|g| g.vega)),
-        _ => None,
-    }
+impl NativeGreeks {
+    const NONE: NativeGreeks = NativeGreeks {
+        delta: None,
+        vega: None,
+        rho: None,
+    };
 }
 
-fn native_rho(option: &EquityOption) -> Option<f64> {
+fn native_greeks(option: &EquityOption) -> NativeGreeks {
     match option.engine {
-        // the one-step terminal route keeps the (cheaper) bump stencil;
-        // the adjoint sweep covers the path routes
-        PricingEngine::MonteCarlo(_) if montecarlo::pathwise_delta_vega(option).is_none() => {
-            montecarlo::aad_greeks(option).map(|g| g.rho)
+        PricingEngine::MonteCarlo(_) => {
+            let pathwise = montecarlo::pathwise_delta_vega(option);
+            let adjoint = if pathwise.is_none() {
+                montecarlo::aad_greeks(option)
+            } else {
+                None
+            };
+            NativeGreeks {
+                delta: pathwise
+                    .map(|(delta, _)| delta)
+                    .or(adjoint.map(|g| g.delta)),
+                vega: pathwise.map(|(_, vega)| vega).or(adjoint.map(|g| g.vega)),
+                rho: adjoint.map(|g| g.rho),
+            }
         }
-        _ => None,
+        _ if option.analytic_heston() => NativeGreeks {
+            delta: heston::native_vanilla_delta(option),
+            ..NativeGreeks::NONE
+        },
+        _ => NativeGreeks::NONE,
     }
 }
 
@@ -330,9 +345,9 @@ pub fn delta(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::delta(option),
         Route::Tree => binomial::delta(option),
         Route::Analytic => BlackScholesPricer::new().delta(option),
-        Route::Bump(bumps) => {
-            native_delta(option).unwrap_or_else(|| bump_delta(&mut Repricer::new(option), &bumps))
-        }
+        Route::Bump(bumps) => native_greeks(option)
+            .delta
+            .unwrap_or_else(|| bump_delta(&mut Repricer::new(option), &bumps)),
     }
 }
 
@@ -341,9 +356,9 @@ pub fn vega(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::vega(option),
         Route::Tree => binomial::vega(option),
         Route::Analytic => BlackScholesPricer::new().vega(option),
-        Route::Bump(bumps) => {
-            native_vega(option).unwrap_or_else(|| bump_vega(&mut Repricer::new(option), &bumps))
-        }
+        Route::Bump(bumps) => native_greeks(option)
+            .vega
+            .unwrap_or_else(|| bump_vega(&mut Repricer::new(option), &bumps)),
     }
 }
 
@@ -352,9 +367,9 @@ pub fn rho(option: &EquityOption) -> f64 {
         Route::Grid => finite_difference::rho(option),
         Route::Tree => binomial::rho(option),
         Route::Analytic => BlackScholesPricer::new().rho(option),
-        Route::Bump(bumps) => {
-            native_rho(option).unwrap_or_else(|| bump_rho(&mut Repricer::new(option), &bumps))
-        }
+        Route::Bump(bumps) => native_greeks(option)
+            .rho
+            .unwrap_or_else(|| bump_rho(&mut Repricer::new(option), &bumps)),
     }
 }
 greek!(
@@ -382,7 +397,13 @@ greek!(
 /// Percentage gamma (Haug's GammaP), `S * gamma / 100`: the change in
 /// delta per 1% move in the underlying.
 pub fn gamma_p(option: &EquityOption) -> f64 {
-    option.market.spot.value() * gamma(option) / 100.0
+    gamma_p_from(option.market.spot.value(), gamma(option))
+}
+
+/// Percentage gamma from a spot and a spot gamma, `S * gamma / 100` —
+/// the one expression every engine's batch result uses.
+pub(crate) fn gamma_p_from(spot: f64, gamma: f64) -> f64 {
+    spot * gamma / 100.0
 }
 
 // ── The batch entry point ───────────────────────────────────────────────
@@ -425,38 +446,16 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
                     None,
                 ),
             };
-            // one pathwise pass serves delta and vega under MC; one
-            // adjoint sweep serves delta, vega AND rho on the path routes
-            let pathwise = match option.engine {
-                PricingEngine::MonteCarlo(_) => montecarlo::pathwise_delta_vega(option),
-                _ => None,
-            };
-            let adjoint = match option.engine {
-                PricingEngine::MonteCarlo(_) if pathwise.is_none() => {
-                    montecarlo::aad_greeks(option)
-                }
-                _ => None,
-            };
+            // the native estimators are computed once and serve delta,
+            // vega and rho together (one pathwise pass or one adjoint
+            // sweep under MC); the stencils fill in the rest
+            let native = native_greeks(option);
             let repricer = &mut Repricer::new(option);
-            let delta = pathwise
-                .map(|(delta, _)| delta)
-                .or(adjoint.map(|g| g.delta))
-                .or_else(|| {
-                    option
-                        .analytic_heston()
-                        .then(|| heston::native_vanilla_delta(option))
-                        .flatten()
-                })
-                .unwrap_or_else(|| bump_delta(repricer, &bumps));
-            let vega = pathwise
-                .map(|(_, vega)| vega)
-                .or(adjoint.map(|g| g.vega))
-                .unwrap_or_else(|| bump_vega(repricer, &bumps));
-            let rho = adjoint
-                .map(|g| g.rho)
-                .unwrap_or_else(|| bump_rho(repricer, &bumps));
+            let delta = native.delta.unwrap_or_else(|| bump_delta(repricer, &bumps));
+            let vega = native.vega.unwrap_or_else(|| bump_vega(repricer, &bumps));
+            let rho = native.rho.unwrap_or_else(|| bump_rho(repricer, &bumps));
             let gamma = bump_gamma(repricer, &bumps);
-            let gamma_p = option.market.spot.value() * gamma / 100.0;
+            let gamma_p = gamma_p_from(option.market.spot.value(), gamma);
             PricingResult {
                 pv,
                 greeks: Greeks {

@@ -29,6 +29,7 @@ use crate::core::montecarlo::paths::{FactorScratch, MultiDraws};
 use crate::core::montecarlo::process::StochasticProcess;
 use crate::core::results::PricingResult;
 use crate::core::traits::Instrument;
+use crate::core::utils::observation_steps;
 use crate::equity::autocallable::AutocallablePayoff;
 use crate::equity::montecarlo::{McStats, MonteCarloConfig, PATH_DEPENDENT_MIN_STEPS};
 use crate::equity::processes::MultiAssetGbmProcess;
@@ -138,21 +139,14 @@ impl WorstOfAutocallable {
 
     /// Observation grid on a path of `steps` steps over life `t`:
     /// per-observation path indices (strictly increasing) and discount
-    /// factors at the exact observation times.
+    /// factors at the exact observation times. Explicit times map
+    /// through [`observation_steps`], which drops an observation that
+    /// collapses onto an already-used step together with its time, so
+    /// `obs_idx[m]` and `dfs[m]` always describe the same fixing.
     fn observation_grid(&self, t: f64, dr: f64, steps: usize) -> (Vec<usize>, Vec<f64>) {
         let n_obs = self.payoff.observations.max(1);
         let (obs_idx, obs_times): (Vec<usize>, Vec<f64>) = match &self.payoff.observation_times {
-            Some(times) => {
-                let mut idx = Vec::with_capacity(times.len());
-                let mut prev: i64 = 0;
-                for &tm in times {
-                    let i = ((tm / t) * steps as f64).round().max(1.0) as i64;
-                    let i = i.max(prev + 1).min(steps as i64);
-                    idx.push(i as usize - 1);
-                    prev = i;
-                }
-                (idx, times.clone())
-            }
+            Some(times) => observation_steps(times, t, steps).into_iter().unzip(),
             None => {
                 let dt = t / steps as f64;
                 let idx: Vec<usize> = (1..=n_obs).map(|m| m * steps / n_obs - 1).collect();

@@ -9,8 +9,8 @@
 //! Both support seasoned contracts through the running extremum
 //! argument (pass the spot for a fresh option). The formulas take the
 //! usual carry `b = r - q`; the `b = 0` singularity (the `sigma^2/2b`
-//! factor) is handled by nudging `b` by 1e-7, accurate to ~1e-6 in
-//! price and validated against Monte Carlo in the tests.
+//! factor) is handled by nudging `b` by [`CARRY_NUDGE`], accurate to
+//! ~1e-6 in price and validated against Monte Carlo in the tests.
 //!
 //! Monte Carlo pricing of the same payoffs monitors **discretely** on
 //! the simulation grid, so it sits *below* these continuous forms for
@@ -30,6 +30,47 @@ pub enum LookbackType {
     FixedStrike,
 }
 
+/// Smallest carry magnitude the closed forms evaluate at: a carry
+/// `|b| = |r - q|` below this is pushed out to `±CARRY_NUDGE` so the
+/// `sigma^2 / 2b` factor stays finite.
+pub const CARRY_NUDGE: f64 = 1e-7;
+
+/// The carry-dependent prelude both closed forms share.
+struct CarryTerms {
+    /// The (nudged) carry `r - q`.
+    b: f64,
+    /// `sigma sqrt(t)`.
+    sq: f64,
+    /// `2b / sigma^2`.
+    two_b_over_v2: f64,
+    /// `e^{(b - r) t}`: discounts the spot leg.
+    carry_df: f64,
+    /// `e^{-rt}`.
+    df: f64,
+    /// `(2b / sigma) sqrt(t)`: the shift in the reflected normal terms.
+    two_b_sq: f64,
+}
+
+fn carry_terms(r: f64, q: f64, sigma: f64, t: f64) -> CarryTerms {
+    let mut b = r - q;
+    if b.abs() < CARRY_NUDGE {
+        b = if b >= 0.0 { CARRY_NUDGE } else { -CARRY_NUDGE };
+    }
+    let sq = sigma * t.sqrt();
+    let two_b_over_v2 = 2.0 * b / (sigma * sigma);
+    let carry_df = ((b - r) * t).exp();
+    let df = (-r * t).exp();
+    let two_b_sq = (2.0 * b / sigma) * t.sqrt();
+    CarryTerms {
+        b,
+        sq,
+        two_b_over_v2,
+        carry_df,
+        df,
+        two_b_sq,
+    }
+}
+
 /// Floating-strike lookback (Goldman-Sosin-Gatto). `extremum` is the
 /// running minimum for a call, the running maximum for a put; pass the
 /// spot for a freshly issued option.
@@ -43,14 +84,14 @@ pub fn floating_strike_lookback_price(
     put_or_call: PutOrCall,
 ) -> f64 {
     assert!(s > 0.0 && extremum > 0.0 && sigma > 0.0 && t > 0.0);
-    let mut b = r - q;
-    if b.abs() < 1e-7 {
-        b = if b >= 0.0 { 1e-7 } else { -1e-7 };
-    }
-    let sq = sigma * t.sqrt();
-    let two_b_over_v2 = 2.0 * b / (sigma * sigma);
-    let carry_df = ((b - r) * t).exp();
-    let df = (-r * t).exp();
+    let CarryTerms {
+        b,
+        sq,
+        two_b_over_v2,
+        carry_df,
+        df,
+        two_b_sq,
+    } = carry_terms(r, q, sigma, t);
     match put_or_call {
         PutOrCall::Call => {
             let m = extremum; // running minimum <= s
@@ -63,7 +104,7 @@ pub fn floating_strike_lookback_price(
             s * carry_df * norm_cdf(a1) - m * df * norm_cdf(a2)
                 + s * df
                     * (1.0 / two_b_over_v2)
-                    * ((s / m).powf(-two_b_over_v2) * norm_cdf(-a1 + (2.0 * b / sigma) * t.sqrt())
+                    * ((s / m).powf(-two_b_over_v2) * norm_cdf(-a1 + two_b_sq)
                         - (b * t).exp() * norm_cdf(-a1))
         }
         PutOrCall::Put => {
@@ -77,7 +118,7 @@ pub fn floating_strike_lookback_price(
             m * df * norm_cdf(-b2) - s * carry_df * norm_cdf(-b1)
                 + s * df
                     * (1.0 / two_b_over_v2)
-                    * (-(s / m).powf(-two_b_over_v2) * norm_cdf(b1 - (2.0 * b / sigma) * t.sqrt())
+                    * (-(s / m).powf(-two_b_over_v2) * norm_cdf(b1 - two_b_sq)
                         + (b * t).exp() * norm_cdf(b1))
         }
     }
@@ -100,15 +141,14 @@ pub fn fixed_strike_lookback_price(
     put_or_call: PutOrCall,
 ) -> f64 {
     assert!(s > 0.0 && k > 0.0 && extremum > 0.0 && sigma > 0.0 && t > 0.0);
-    let mut b = r - q;
-    if b.abs() < 1e-7 {
-        b = if b >= 0.0 { 1e-7 } else { -1e-7 };
-    }
-    let sq = sigma * t.sqrt();
-    let two_b_over_v2 = 2.0 * b / (sigma * sigma);
-    let carry_df = ((b - r) * t).exp();
-    let df = (-r * t).exp();
-    let two_b_sq = (2.0 * b / sigma) * t.sqrt();
+    let CarryTerms {
+        b,
+        sq,
+        two_b_over_v2,
+        carry_df,
+        df,
+        two_b_sq,
+    } = carry_terms(r, q, sigma, t);
     match put_or_call {
         PutOrCall::Call => {
             let m = extremum; // running maximum
@@ -179,6 +219,8 @@ impl Payoff for LookbackPayoff {
         0.0
     }
     fn path_payoff(&self, path: &[f64], strike: f64) -> f64 {
+        // no initial fixing supplied: the extrema run over the simulated
+        // fixings only (see `path_payoff_from`)
         let terminal = *path.last().expect("empty path");
         let max = path.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let min = path.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -189,6 +231,24 @@ impl Payoff for LookbackPayoff {
             (LookbackType::FixedStrike, PutOrCall::Put) => (strike - min).max(0.0),
         }
     }
+    /// The contractual first fixing is the spot at inception, so the
+    /// running extremum starts at `s0` — matching the closed forms,
+    /// which take the running extremum as an argument and are called
+    /// with the spot for a fresh option. Without it Monte Carlo prices a
+    /// floating-strike call off `min(S_1..S_n) >= min(S_0..S_n)` and so
+    /// undervalues the contract.
+    fn path_payoff_from(&self, s0: f64, path: &[f64], strike: f64) -> f64 {
+        let terminal = *path.last().expect("empty path");
+        let max = path.iter().cloned().fold(s0, f64::max);
+        let min = path.iter().cloned().fold(s0, f64::min);
+        match (self.lookback_type, &self.put_or_call) {
+            (LookbackType::FloatingStrike, PutOrCall::Call) => terminal - min,
+            (LookbackType::FloatingStrike, PutOrCall::Put) => max - terminal,
+            (LookbackType::FixedStrike, PutOrCall::Call) => (max - strike).max(0.0),
+            (LookbackType::FixedStrike, PutOrCall::Put) => (strike - min).max(0.0),
+        }
+    }
+
     fn path_payoff_var<'t>(
         &self,
         path: &[crate::core::aad::Var<'t>],
@@ -238,6 +298,45 @@ mod tests {
     const Q: f64 = 0.02;
     const SIG: f64 = 0.3;
     const T: f64 = 1.0;
+
+    #[test]
+    fn the_initial_spot_counts_as_the_first_fixing() {
+        // `path` excludes S_0 by convention, but a lookback's running
+        // extremum starts there — the closed forms take the running
+        // extremum and are called with the spot for a fresh option. On a
+        // path that never revisits its start, ignoring S_0 shrinks the
+        // realized range and undervalues the contract.
+        let payoff = |lookback_type, put_or_call| LookbackPayoff {
+            put_or_call,
+            exercise_style: ContractStyle::European,
+            lookback_type,
+        };
+        let rising = [110.0, 120.0, 130.0]; // every fixing above S_0 = 100
+        let call = payoff(LookbackType::FloatingStrike, PutOrCall::Call);
+        // seeded: S_T - min(S_0, path) = 130 - 100; unseeded: 130 - 110
+        assert_eq!(call.path_payoff_from(S, &rising, S), 30.0);
+        assert_eq!(call.path_payoff(&rising, S), 20.0);
+
+        let falling = [90.0, 80.0, 70.0];
+        let put = payoff(LookbackType::FloatingStrike, PutOrCall::Put);
+        assert_eq!(put.path_payoff_from(S, &falling, S), 30.0);
+        assert_eq!(put.path_payoff(&falling, S), 20.0);
+
+        // fixed-strike reads the same extrema: seeded, the max is S_0 = 100,
+        // so a 95 call is in the money on a path that only ever falls
+        let fixed_call = payoff(LookbackType::FixedStrike, PutOrCall::Call);
+        assert_eq!(fixed_call.path_payoff_from(S, &falling, 95.0), 5.0);
+        assert_eq!(fixed_call.path_payoff(&falling, 95.0), 0.0);
+        let fixed_put = payoff(LookbackType::FixedStrike, PutOrCall::Put);
+        assert_eq!(fixed_put.path_payoff_from(S, &rising, 105.0), 5.0);
+
+        // and a path that straddles S_0 is unaffected by the seeding
+        let straddle = [90.0, 130.0, 100.0];
+        assert_eq!(
+            call.path_payoff_from(S, &straddle, S),
+            call.path_payoff(&straddle, S)
+        );
+    }
 
     #[test]
     fn floating_lookbacks_dominate_atm_vanillas() {

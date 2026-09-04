@@ -21,9 +21,13 @@
 //!   (ladder vega/volga) read off adjacent rungs: the non-local risk
 //!   view for barrier-heavy books.
 //!
-//! Conventions: confidence levels are one-sided (0.99), VaR/ES are
-//! positive loss amounts, and every simulation is deterministic per
-//! seed.
+//! Conventions: confidence levels are one-sided and live in `(0.5, 1)`,
+//! VaR/ES are positive loss amounts, and every simulation is
+//! deterministic per seed. The statistical estimators validate their
+//! inputs and return
+//! [`Result`](crate::core::errors::RustyQLibError) — an empty or
+//! non-finite sample, a confidence outside the range, or a degenerate
+//! series is an error, never a panic or a silently masked number.
 
 pub mod backtest;
 pub mod ladder;
@@ -33,13 +37,13 @@ pub mod portfolio_risk;
 pub mod stress;
 pub mod volatility;
 
-pub use backtest::{kupiec_pof, KupiecTest};
+pub use backtest::{kupiec_pof, KupiecTest, CHI2_1DOF_95};
 pub use ladder::{
     spot_ladder, symmetric_moves, vol_ladder, LadderPoint, SpotLadder, VolLadder, VolLadderPoint,
 };
 pub use measures::{
     cornish_fisher_var, delta_normal_var, historical_expected_shortfall, historical_var,
-    parametric_expected_shortfall, parametric_var, DeltaNormalVar,
+    historical_var_es, parametric_expected_shortfall, parametric_var, DeltaNormalVar,
 };
 pub use performance::{max_drawdown, sharpe_ratio, sortino_ratio};
 pub use portfolio_risk::{delta_gamma_var, full_revaluation_var, PortfolioRisk, RiskConfig};

@@ -52,7 +52,6 @@ use serde::Deserialize;
 use crate::core::errors::RustyQLibError;
 use crate::core::market::{Discount, Market};
 use crate::equity::portfolio::EquityPortfolio;
-use crate::equity::utils::PayoffType;
 use crate::equity::vanilla_option::EquityOption;
 
 // the shock vocabulary is the market layer's; re-exported here so stress
@@ -136,8 +135,13 @@ impl StressConfig {
         Self::from_toml_str(&text)
     }
 
-    #[cfg(feature = "stress-config")]
-    fn validate(&self) -> Result<(), RustyQLibError> {
+    /// Reject a configuration [`stress_mtm`] cannot run: no scenarios, a
+    /// scenario without shocks, or a malformed shock (relative time
+    /// shock, key-rate tenors on a non-rate or relative shock, empty or
+    /// non-increasing tenors, `shifts` that do not match). Called at the
+    /// top of [`stress_mtm`], so a hand-built config is policed exactly
+    /// like a parsed one.
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
         if self.scenarios.is_empty() {
             return Err(RustyQLibError::ParseError(
                 "stress config has no scenarios".to_string(),
@@ -263,6 +267,7 @@ pub fn stress_mtm(
     book: &EquityPortfolio,
     config: &StressConfig,
 ) -> Result<Vec<ScenarioResult>, RustyQLibError> {
+    config.validate()?;
     let base_market = book.snapshot_market();
     // base MtM is scenario-independent: price the book once, reuse the
     // per-position values across every scenario
@@ -295,9 +300,6 @@ pub fn stress_mtm(
     }
     Ok(results)
 }
-
-// silence the unused-import lint path for PayoffType (used in labels)
-const _: fn(&EquityOption) -> PayoffType = |o| o.payoff.payoff_kind();
 
 #[cfg(test)]
 mod tests {
@@ -397,6 +399,61 @@ mod tests {
             size = 0.01
         "#;
         assert!(StressConfig::from_toml_str(unknown).is_err());
+    }
+
+    /// `validate` is unconditional and `stress_mtm` calls it, so a
+    /// hand-built config (no TOML in sight) is policed like a parsed one.
+    #[test]
+    fn hand_built_configs_are_validated_by_the_runner() {
+        let mut b = EquityPortfolio::new();
+        b.add(option("ACME", PutOrCall::Call, 100.0), 100.0).unwrap();
+        let empty = StressConfig {
+            scenarios: vec![],
+            arbitrage: ArbitrageCheck::default(),
+        };
+        let err = stress_mtm(&b, &empty).unwrap_err().to_string();
+        assert!(err.contains("no scenarios"), "{err}");
+        let no_shocks = StressConfig {
+            scenarios: vec![StressScenario {
+                name: "empty".into(),
+                shocks: vec![],
+            }],
+            arbitrage: ArbitrageCheck::default(),
+        };
+        assert!(stress_mtm(&b, &no_shocks).is_err(), "scenario with no shocks");
+        // a relative time shock never reaches the repricer
+        let bad_time = StressConfig {
+            scenarios: vec![StressScenario {
+                name: "decay".into(),
+                shocks: vec![Shock {
+                    factor: RiskFactor::Time,
+                    mode: BumpMode::Relative,
+                    size: 0.1,
+                    underlying: None,
+                    tenors: None,
+                    shifts: None,
+                }],
+            }],
+            arbitrage: ArbitrageCheck::default(),
+        };
+        let err = stress_mtm(&b, &bad_time).unwrap_err().to_string();
+        assert!(err.contains("must be absolute"), "{err}");
+        // and a well-formed one still runs
+        let good = StressConfig {
+            scenarios: vec![StressScenario {
+                name: "crash".into(),
+                shocks: vec![Shock {
+                    factor: RiskFactor::Spot,
+                    mode: BumpMode::Relative,
+                    size: -0.2,
+                    underlying: None,
+                    tenors: None,
+                    shifts: None,
+                }],
+            }],
+            arbitrage: ArbitrageCheck::default(),
+        };
+        assert_eq!(stress_mtm(&b, &good).unwrap().len(), 1);
     }
 
     #[test]

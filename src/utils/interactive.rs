@@ -245,9 +245,11 @@ fn prompt_engine(product: Product, style: &ContractStyle) -> Result<PricingEngin
     Ok(engine_from_label(choice))
 }
 
-/// Product-specific payoff prompts. Returns the payoff and whether the
-/// strike entered is actually used by the product (floating-strike
-/// products derive their strike from the path).
+/// Product-specific payoff prompts: the side, plus whatever else the
+/// product needs (binary type and cash, barrier level and rebate,
+/// averaging and strike kind, ...). The returned payoff carries the
+/// exercise `style`. Whether the entered strike is actually used is a
+/// separate question, answered by [`uses_strike`].
 fn prompt_payoff(product: Product, style: ContractStyle) -> Result<Box<dyn Payoff>> {
     match product {
         Product::Vanilla | Product::FuturesOption => Ok(Box::new(VanillaPayoff {
@@ -395,8 +397,10 @@ struct MarketTerms {
     maturity: NaiveDate,
 }
 
-/// How an option on a future settles its premium, prompted for
-/// [`Product::FuturesOption`]; `None` for every other product.
+/// Prompt for how an option on a future settles its premium
+/// (discounted up front, or margined futures-style). Only
+/// [`Product::FuturesOption`] asks; every other product skips the
+/// prompt and passes `None` to [`build_option`].
 fn prompt_futures_settlement() -> Result<crate::equity::black76::FuturesSettlement> {
     use crate::equity::black76::FuturesSettlement;
     let choice = Select::new(
@@ -584,7 +588,8 @@ pub fn price_option_wizard() -> Result<()> {
 pub fn implied_vol_wizard() -> Result<()> {
     let terms = prompt_option_terms()?;
     let price = positive_f64("Observed option price:")?;
-    let t = (terms.maturity - Local::now().date_naive()).num_days() as f64 / 365.0;
+    // the maturity prompt already rejects a date at or before today
+    let t = crate::utils::build_cli::years_from_today(terms.maturity);
     let vol = implied_vol_from_price(
         terms.spot,
         terms.strike,

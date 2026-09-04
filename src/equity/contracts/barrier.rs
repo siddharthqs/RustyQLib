@@ -27,6 +27,52 @@ pub enum KnockType {
     Out,
 }
 
+/// The strike-independent Reiner-Rubinstein building blocks of a single
+/// barrier, shared by the option price ([`barrier_price`]) and the rebate
+/// leg ([`barrier_rebate_value`]) so the two cannot drift apart.
+struct RrTerms {
+    /// The spot is already at or through the barrier.
+    knocked_now: bool,
+    /// `+1` for a down barrier, `-1` for an up barrier.
+    eta: f64,
+    /// `sigma sqrt(t)`.
+    st: f64,
+    /// `(r - q - sigma^2/2) / sigma^2`.
+    mu: f64,
+    /// `e^{-rt}`.
+    df_r: f64,
+    /// `h / s`.
+    hs: f64,
+    /// `ln(s/h) / st + (1 + mu) st`.
+    x2: f64,
+    /// `ln(h/s) / st + (1 + mu) st`.
+    y2: f64,
+}
+
+impl RrTerms {
+    fn new(s: f64, h: f64, r: f64, q: f64, sigma: f64, t: f64, direction: BarrierDirection) -> Self {
+        let down = direction == BarrierDirection::Down;
+        let knocked_now = if down { s <= h } else { s >= h };
+        let eta: f64 = if down { 1.0 } else { -1.0 };
+        let st = sigma * t.sqrt();
+        let mu = (r - q - 0.5 * sigma * sigma) / (sigma * sigma);
+        let df_r = (-r * t).exp();
+        let hs = h / s;
+        let x2 = (s / h).ln() / st + (1.0 + mu) * st;
+        let y2 = (h / s).ln() / st + (1.0 + mu) * st;
+        RrTerms {
+            knocked_now,
+            eta,
+            st,
+            mu,
+            df_r,
+            hs,
+            x2,
+            y2,
+        }
+    }
+}
+
 /// Reiner-Rubinstein price of a European barrier option (no rebate).
 ///
 /// If the spot is already at or beyond the barrier the option is treated as
@@ -45,8 +91,16 @@ pub fn barrier_price(
     put_or_call: PutOrCall,
 ) -> f64 {
     assert!(s > 0.0 && k > 0.0 && h > 0.0 && sigma > 0.0 && t > 0.0);
-    let down = direction == BarrierDirection::Down;
-    let knocked_now = if down { s <= h } else { s >= h };
+    let RrTerms {
+        knocked_now,
+        eta,
+        st,
+        mu,
+        df_r,
+        hs,
+        x2,
+        y2,
+    } = RrTerms::new(s, h, r, q, sigma, t, direction);
     if knocked_now {
         return match knock {
             KnockType::Out => 0.0,
@@ -54,19 +108,13 @@ pub fn barrier_price(
         };
     }
 
+    let down = direction == BarrierDirection::Down;
     let call = put_or_call == PutOrCall::Call;
     let phi: f64 = if call { 1.0 } else { -1.0 };
-    let eta: f64 = if down { 1.0 } else { -1.0 };
-    let st = sigma * t.sqrt();
-    let mu = (r - q - 0.5 * sigma * sigma) / (sigma * sigma);
     let df_q = (-q * t).exp();
-    let df_r = (-r * t).exp();
-    let hs = h / s;
 
     let x1 = (s / k).ln() / st + (1.0 + mu) * st;
-    let x2 = (s / h).ln() / st + (1.0 + mu) * st;
     let y1 = (h * h / (s * k)).ln() / st + (1.0 + mu) * st;
-    let y2 = (h / s).ln() / st + (1.0 + mu) * st;
 
     let a = phi * s * df_q * norm_cdf(phi * x1) - phi * k * df_r * norm_cdf(phi * x1 - phi * st);
     let b = phi * s * df_q * norm_cdf(phi * x2) - phi * k * df_r * norm_cdf(phi * x2 - phi * st);
@@ -146,10 +194,16 @@ pub fn barrier_rebate_value(
     if rebate == 0.0 {
         return 0.0;
     }
-    let down = direction == BarrierDirection::Down;
-    let eta: f64 = if down { 1.0 } else { -1.0 };
-    let knocked_now = if down { s <= h } else { s >= h };
-    let df_r = (-r * t).exp();
+    let RrTerms {
+        knocked_now,
+        eta,
+        st,
+        mu,
+        df_r,
+        hs,
+        x2,
+        y2,
+    } = RrTerms::new(s, h, r, q, sigma, t, direction);
     if knocked_now {
         return match knock {
             KnockType::In => 0.0, // knocked in: no rebate
@@ -159,12 +213,7 @@ pub fn barrier_rebate_value(
             },
         };
     }
-    let st = sigma * t.sqrt();
-    let mu = (r - q - 0.5 * sigma * sigma) / (sigma * sigma);
-    let hs = h / s;
     // discounted probability of never touching the barrier (the E term)
-    let x2 = (s / h).ln() / st + (1.0 + mu) * st;
-    let y2 = (h / s).ln() / st + (1.0 + mu) * st;
     let survival_pv =
         rebate * df_r * (norm_cdf(eta * (x2 - st)) - hs.powf(2.0 * mu) * norm_cdf(eta * (y2 - st)));
     match knock {

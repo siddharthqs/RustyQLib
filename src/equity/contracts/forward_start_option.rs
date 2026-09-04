@@ -29,6 +29,13 @@ impl Payoff for ForwardStartPayoff {
     fn payoff(&self, _spot: f64, _strike: f64) -> f64 {
         0.0
     }
+
+    /// The strike is set at `strike_fraction` of the spot on the fixing
+    /// date, so the surface is read at that moneyness off the forward —
+    /// not at the placeholder `strike_price`, which is meaningless here.
+    fn vol_anchor_strike(&self, forward: f64) -> Option<f64> {
+        Some(self.strike_fraction * forward)
+    }
     fn path_payoff(&self, path: &[f64], _strike: f64) -> f64 {
         let n = path.len();
         // step i covers time (i+1) * T/n: the fixing index for t_f

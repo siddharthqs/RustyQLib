@@ -13,6 +13,11 @@ use super::{JacobianFn, OptimConfig, OptimResult, VectorFn};
 /// rejected steps grow it toward small-step gradient descent.
 /// `jacobian` (rows = residuals) falls back to forward finite
 /// differences when absent. `OptimResult::value` is the sum of squares.
+///
+/// A non-finite cost at `x0` (NaN or infinite residuals — bad market
+/// data, a start outside the model's domain) returns immediately with
+/// `converged = false` and `x = x0`: no step can be graded against it,
+/// and the gradient test would otherwise be evaluated on NaN.
 pub fn levenberg_marquardt(
     cfg: &OptimConfig,
     residuals: VectorFn,
@@ -27,6 +32,14 @@ pub fn levenberg_marquardt(
     let mut x = x0.to_vec();
     let mut r = residuals(&x);
     let mut cost: f64 = r.iter().map(|e| e * e).sum();
+    if !cost.is_finite() {
+        return OptimResult {
+            x,
+            value: cost,
+            iterations: 0,
+            converged: false,
+        };
+    }
     let mut lambda = 1e-3;
 
     for it in 0..cfg.max_iter {
@@ -168,6 +181,39 @@ mod tests {
         assert!(with.converged && without.converged);
         assert!((with.x[0] - without.x[0]).abs() < 1e-6);
         assert!((with.x[1] - without.x[1]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_finite_start_reports_no_convergence() {
+        // a NaN residual at the start: nothing to grade steps against,
+        // so the fit must say so instead of "converging" on NaN
+        let residuals = |p: &[f64]| -> Vec<f64> { vec![p[0] - 1.0, f64::NAN] };
+        let r = levenberg_marquardt(&OptimConfig::new(1e-12, 50), &residuals, None, &[0.5]);
+        assert!(!r.converged, "{r:?}");
+        assert!(r.value.is_nan());
+        assert_eq!(r.iterations, 0);
+        assert_eq!(r.x, vec![0.5]);
+        // an infinite residual is refused the same way
+        let residuals = |p: &[f64]| -> Vec<f64> { vec![p[0], f64::INFINITY] };
+        let r = levenberg_marquardt(&OptimConfig::new(1e-12, 50), &residuals, None, &[0.5]);
+        assert!(!r.converged && r.value.is_infinite());
+    }
+
+    #[test]
+    fn nan_gradient_cannot_pass_the_convergence_test() {
+        // residuals finite at the start, NaN in every bumped evaluation:
+        // the numeric Jacobian (hence the gradient) is NaN, which must
+        // not read as "gradient below tolerance"
+        let x0 = [0.3_f64];
+        let residuals = move |p: &[f64]| -> Vec<f64> {
+            if p[0] == x0[0] {
+                vec![1.0]
+            } else {
+                vec![f64::NAN]
+            }
+        };
+        let r = levenberg_marquardt(&OptimConfig::new(1e-8, 20), &residuals, None, &x0);
+        assert!(!r.converged, "{r:?}");
     }
 
     #[test]

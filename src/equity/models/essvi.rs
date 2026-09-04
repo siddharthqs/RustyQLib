@@ -764,6 +764,19 @@ impl SmoothedSurface for EssviSurfaceFit {
 // The multiplicative `p_i` in the theta recursion is what keeps the psi
 // tube non-empty: C_i >= psi_{i-1} theta_i/theta_{i-1} > psi_{i-1} p_i = A_i.
 //
+// Attribution note: Proposition 3.1 of Hendriks & Martini (2019) stated
+// the pairwise calendar condition with a two-sided *squared* inequality,
+// which Pasquazzi (2023, "A Note about Characterization of Calendar
+// Spread Arbitrage in eSSVI Surfaces", Theor. Econ. Lett. 13, 1341-1358;
+// also arXiv:2304.02106) showed to be insufficient — slices satisfying
+// it can still cross. His corrected sufficient set for theta strictly
+// increasing is exactly what the recursion above enforces: the max-ratio
+// lower bound psi_{i-1} p_i <= psi_i (equivalently, both total-variance
+// wing slopes psi(1 +/- rho) non-decreasing in maturity) together with
+// the upper bound psi_i <= psi_{i-1} theta_i/theta_{i-1} (phi
+// non-increasing). Nothing here uses the flawed squared form, so the
+// by-construction guarantee stands on the corrected proposition.
+//
 // Where Mingone places psi_i in the tube with a free coefficient
 // c_i in (0,1) per slice, this implementation ties the psi backbone to
 // SSVI's power-law curvature, psi_hat(theta) = eta (theta/(1+theta))^(1-gamma),

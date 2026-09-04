@@ -250,7 +250,7 @@ pub struct RiskArgs {
     /// Delta-gamma Taylor VaR, full revaluation, or both
     #[arg(long, value_enum, default_value_t = RiskMethod::Both)]
     pub method: RiskMethod,
-    /// One-sided confidence level in (0, 1)
+    /// One-sided confidence level in (0.5, 1)
     #[arg(long, default_value_t = 0.99)]
     pub confidence: f64,
     /// Risk horizon in trading days (252 per year)
@@ -396,6 +396,7 @@ fn price_directory(input_path: &Path, output_path: &Path, format: Option<Format>
     let files = fs::read_dir(input_path)
         .with_context(|| format!("failed to read input directory {}", input_path.display()))?;
 
+    let mut priced = 0usize;
     for file_result in files {
         let dir_entry = file_result
             .with_context(|| format!("failed to read entry in {}", input_path.display()))?;
@@ -417,8 +418,17 @@ fn price_directory(input_path: &Path, output_path: &Path, format: Option<Format>
             let output_file_path = output_path.join(file_name);
 
             parse_contracts::parse_contract(&path, &output_file_path, format)?;
+            priced += 1;
             log::debug!("priced contracts {:?} -> {:?}", path, output_file_path);
         }
+    }
+    if priced == 0 {
+        // exiting 0 in silence looks like success; say the directory held
+        // nothing this command knows how to price
+        log::warn!(
+            "no .json or .xml contract files in {}; nothing written",
+            input_path.display()
+        );
     }
     Ok(())
 }
@@ -475,6 +485,19 @@ pub fn handle_fetch(args: &FetchArgs) -> Result<()> {
                 .with_context(|| format!("--date must be YYYY-MM-DD, got '{s}'"))
         })
         .transpose()?;
+    // --symbol and --normalize only mean anything for the chain source;
+    // silently ignoring them would hand back a document the user did not
+    // ask for (same contract as the chain source's own --date check)
+    if !matches!(args.source, FetchSource::Chain) {
+        for (flag, given) in [
+            ("--symbol", args.symbol.is_some()),
+            ("--normalize", args.normalize),
+        ] {
+            if given {
+                bail!("{flag} only applies to the chain source; omit it");
+            }
+        }
+    }
     measure_time("fetch", || match args.source {
         FetchSource::UstParYields => fetch_ust_par_yields(args, date),
         FetchSource::Sofr => fetch_nyfed_rate(args, date, nyfed::ReferenceRate::Sofr),
@@ -505,29 +528,19 @@ fn fetch_cboe_chain(args: &FetchArgs, date: Option<NaiveDate>) -> Result<()> {
         ),
     };
     if args.normalize {
-        let mut chain = cboe::to_chain(&text)
+        let chain = cboe::to_chain(&text)
             .with_context(|| format!("failed to normalize the chain for {symbol}"))?;
-        if let (Some(serde_json::Value::Object(meta)), serde_json::Value::Object(origin)) =
-            (chain.metadata.as_mut(), origin)
-        {
-            meta.extend(origin);
-        }
         log::info!(
             "option chain for {}: {} quotes as of {}",
             chain.symbol,
             chain.quotes.len(),
             chain.as_of
         );
+        // the chain's own `metadata` block is the same shape every other
+        // fetched document carries, so provenance merging and format
+        // resolution go through the one emitter
         let value = serde_json::to_value(&chain).context("failed to serialize the chain")?;
-        let format = args
-            .format
-            .map(Format::from)
-            .or_else(|| args.output.as_ref().and_then(Format::from_path))
-            .unwrap_or(Format::Json);
-        write_output(
-            args.output.as_ref(),
-            &serialization::render_value(&value, format, "option_chain"),
-        )
+        emit_document(args, value, origin, "option_chain")
     } else {
         let document = cboe::to_document(&text, symbol)
             .with_context(|| format!("failed to read the chain response for {symbol}"))?;
@@ -669,14 +682,22 @@ pub fn handle_stress(args: &StressArgs) -> Result<()> {
 
 /// Handle the "risk" subcommand.
 pub fn handle_risk(args: &RiskArgs) -> Result<()> {
-    if !(0.0..1.0).contains(&args.confidence) || args.confidence == 0.0 {
+    // a one-sided VaR level below 0.5 is not a lower confidence, it is
+    // the wrong tail: the loss quantile would sit in the profit region
+    if !(args.confidence > 0.5 && args.confidence < 1.0) {
         bail!(
-            "--confidence must be strictly between 0 and 1, got {}",
+            "--confidence must be strictly between 0.5 and 1, got {}",
             args.confidence
         );
     }
-    if args.horizon_days <= 0.0 {
-        bail!("--horizon-days must be positive, got {}", args.horizon_days);
+    if !(args.horizon_days.is_finite() && args.horizon_days > 0.0) {
+        bail!(
+            "--horizon-days must be finite and positive, got {}",
+            args.horizon_days
+        );
+    }
+    if args.scenarios == 0 {
+        bail!("--scenarios must be at least 1");
     }
     if !(-1.0..=1.0).contains(&args.corr) {
         bail!("--corr must be in [-1, 1], got {}", args.corr);
@@ -702,11 +723,12 @@ pub fn handle_risk(args: &RiskArgs) -> Result<()> {
         report.insert("spot".into(), serde_json::json!(spot));
         report.insert("config".into(), serde_json::to_value(cfg)?);
         if matches!(args.method, RiskMethod::DeltaGamma | RiskMethod::Both) {
-            let dg = delta_gamma_var(&book, spot, &cfg);
+            let dg = delta_gamma_var(&book, spot, &cfg).context("delta-gamma VaR failed")?;
             report.insert("delta_gamma".into(), serde_json::to_value(&dg)?);
         }
         if matches!(args.method, RiskMethod::Full | RiskMethod::Both) {
-            let full = full_revaluation_var(&book, spot, &cfg);
+            let full =
+                full_revaluation_var(&book, spot, &cfg).context("full-revaluation VaR failed")?;
             report.insert("full_revaluation".into(), serde_json::to_value(&full)?);
         }
         let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(report))
@@ -729,11 +751,22 @@ pub fn handle_implied_vol(args: &ImpliedVolArgs) -> Result<()> {
                         args.maturity
                     )
                 })?;
-            (date - Local::now().date_naive()).num_days() as f64 / 365.0
+            years_from_today(date)
         }
     };
-    if t <= 0.0 {
-        bail!("maturity must be in the future (t = {t:.4} years)");
+    // the solver's bracketing degenerates on these instead of failing,
+    // so it would report the vol cap (or the initial guess) as an answer
+    if !t.is_finite() || t <= 0.0 {
+        bail!("--maturity must be a finite time in the future (t = {t} years)");
+    }
+    for (flag, value) in [
+        ("--spot", args.spot),
+        ("--strike", args.strike),
+        ("--price", args.price),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            bail!("{flag} must be finite and positive, got {value}");
+        }
     }
 
     let vol = implied_vol_from_price(
@@ -826,6 +859,15 @@ pub fn handle_interactive() -> Result<()> {
     }
     println!("Goodbye!");
     Ok(())
+}
+
+/// Time to `date` in years, Act/365 from today — the convention the
+/// non-contract entry points (the `implied-vol` command and the
+/// interactive wizard) measure a bare maturity date with. Negative for a
+/// date in the past; callers reject that themselves.
+pub(crate) fn years_from_today(date: NaiveDate) -> f64 {
+    use crate::core::daycount::DayCountConvention;
+    DayCountConvention::Act365.year_fraction(Local::now().date_naive(), date)
 }
 
 /// Helper function to measure the time taken by a closure.

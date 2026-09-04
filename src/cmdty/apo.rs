@@ -39,14 +39,16 @@ use chrono::NaiveDate;
 
 use crate::cmdty::clewlow_strickland::ClewlowStrickland;
 use crate::cmdty::forward_curve::CommodityForwardCurve;
-use crate::cmdty::swap::PriceFixings;
+use crate::cmdty::swap::{business_days_in, split_realized, PriceFixings};
 use crate::cmdty::vol::CommodityVol;
+use crate::cmdty::vol_time;
 use crate::core::calendar::Calendar;
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 use crate::core::trade::PutOrCall;
 use crate::core::utils::{norm_cdf, norm_pdf};
-use crate::rates::overnight::fixing_on_or_before;
+
+const FIELD: &str = "average price option";
 
 /// An average price option on one averaging period. Premium is quoted
 /// for the whole contract (`quantity` units).
@@ -143,17 +145,11 @@ impl AveragePriceOption {
     }
 
     /// The averaging observations: every business day in
-    /// `[averaging_start, averaging_end)`.
+    /// `[averaging_start, averaging_end)` — the same pricing days a
+    /// [`CommoditySwap`](crate::cmdty::CommoditySwap) period averages
+    /// over.
     pub fn pricing_days(&self) -> Vec<NaiveDate> {
-        let mut days = Vec::new();
-        let mut day = self.averaging_start;
-        while day < self.averaging_end {
-            if self.calendar.is_business_day(day) {
-                days.push(day);
-            }
-            day = day.succ_opt().expect("date in range");
-        }
-        days
+        business_days_in(&self.calendar, self.averaging_start, self.averaging_end)
     }
 
     /// Cash settlement date: `payment_lag` business days after the
@@ -274,17 +270,14 @@ impl AveragePriceOption {
         }
         let n = days.len() as f64;
         let df = discount.df_date(settlement);
-        // realized part, and the still-floating observations
-        let mut fixed_sum = 0.0;
-        let mut unfixed: Vec<(f64, f64)> = Vec::with_capacity(days.len()); // (t_i, F_i)
-        for &day in &days {
-            if day < valuation {
-                fixed_sum += fixing_on_or_before(fixings, day)?;
-            } else {
-                let t = discount.day_count().year_fraction(valuation, day);
-                unfixed.push((t.max(0.0), forward.price(day)));
-            }
-        }
+        // realized part, and the still-floating observations; the
+        // observation times are the vol clock's, not the discount
+        // curve's day count (see the `crate::cmdty` conventions)
+        let (fixed_sum, floating) = split_realized(&days, fixings, valuation)?;
+        let unfixed: Vec<(f64, f64)> = floating // (t_i, F_i)
+            .into_iter()
+            .map(|day| (vol_time(valuation, day).max(0.0), forward.price(day)))
+            .collect();
         Ok(Gathered {
             n,
             df,
@@ -310,6 +303,11 @@ impl AveragePriceOption {
     }
 
     /// Vega per unit of the quote's vol, by central bump.
+    ///
+    /// The down bump is floored at zero vol, so at (or just above) a
+    /// zero quote the pair is one-sided; dividing by the **realized**
+    /// bump width rather than `2h` keeps it a true difference quotient
+    /// instead of halving the forward difference.
     pub fn vega(
         &self,
         discount: &YieldCurve,
@@ -318,9 +316,14 @@ impl AveragePriceOption {
     ) -> Result<f64, RustyQLibError> {
         let quote = vol.into();
         let h = 1e-4;
-        let up = self.price(discount, forward, quote.bumped_vol(h))?;
-        let down = self.price(discount, forward, quote.bumped_vol(-h))?;
-        Ok((up - down) / (2.0 * h))
+        let (qu, qd) = (quote.bumped_vol(h), quote.bumped_vol(-h));
+        let width = qu.vol() - qd.vol();
+        if width <= 0.0 {
+            return Ok(0.0);
+        }
+        let up = self.price(discount, forward, qu)?;
+        let down = self.price(discount, forward, qd)?;
+        Ok((up - down) / width)
     }
 }
 
@@ -378,58 +381,26 @@ pub(crate) fn black_on_lognormal_moments(m1: f64, k: f64, v: f64, put_or_call: P
     }
 }
 
-/// Levy expectation under Clewlow–Strickland dynamics: identical to
-/// [`levy_expectation`] except `E[A^2]` uses the integrated covariance
-/// `model.covariance(t_i, t_i, t_j, t_j)` — each observation is the
-/// forward maturing on its own date — computed O(n^2).
-fn levy_expectation_cs(
+/// Levy moment matching of the arithmetic average of lognormal
+/// observations `(t_i, F_i)`: `E[(A_u - k)^+]` (or the put).
+///
+/// Everything except the second moment is common to the flat-vol and
+/// Clewlow–Strickland variants — the positivity check the lognormal
+/// proxy needs, `E[A]`, the short-circuit when the whole distribution
+/// sits above the adjusted strike, and the Black tail on the matched
+/// moments — so `sum_of_squares` supplies only `sum_ij F_i F_j e^{cov}`
+/// and each caller keeps the shape its covariance allows: an O(n)
+/// suffix-sum fold for the flat model, an O(n^2) double loop for CS.
+fn levy_moment_match(
     unfixed: &[(f64, f64)],
     k_eff: f64,
-    model: &ClewlowStrickland,
     put_or_call: PutOrCall,
+    sum_of_squares: impl Fn(f64) -> f64,
 ) -> Result<f64, RustyQLibError> {
     for &(_, f) in unfixed {
         if f <= 0.0 {
             return Err(RustyQLibError::invalid_input(
-                "average price option",
-                format!("lognormal moment matching needs positive forwards, got {f}"),
-            ));
-        }
-    }
-    let nu = unfixed.len() as f64;
-    let m1 = unfixed.iter().map(|&(_, f)| f).sum::<f64>() / nu;
-    // the whole distribution sits above the adjusted strike
-    if k_eff <= 0.0 {
-        return Ok(match put_or_call {
-            PutOrCall::Call => m1 - k_eff,
-            PutOrCall::Put => 0.0,
-        });
-    }
-    let mut sum2 = 0.0;
-    for &(t_i, f_i) in unfixed {
-        for &(t_j, f_j) in unfixed {
-            sum2 += f_i * f_j * model.covariance(t_i, t_i, t_j, t_j).exp();
-        }
-    }
-    let m2 = sum2 / (nu * nu);
-    let v = (m2.ln() - 2.0 * m1.ln()).max(0.0);
-    Ok(black_on_lognormal_moments(m1, k_eff, v, put_or_call))
-}
-
-/// Levy expectation `E[(A_u - k)^+]` (or the put) of the arithmetic
-/// average of lognormal observations `(t_i, F_i)` under one-factor
-/// dynamics with flat vol. Requires every (possibly displaced)
-/// observation positive.
-fn levy_expectation(
-    unfixed: &[(f64, f64)],
-    k_eff: f64,
-    vol: f64,
-    put_or_call: PutOrCall,
-) -> Result<f64, RustyQLibError> {
-    for &(_, f) in unfixed {
-        if f <= 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "average price option",
+                FIELD,
                 format!(
                     "lognormal moment matching needs positive forwards, got {f} \
                      (after any shift); use a larger shift or a normal vol"
@@ -449,20 +420,56 @@ fn levy_expectation(
         });
     }
 
-    // E[A^2]: with observations sorted by date, min(t_i, t_j) = t_i for
-    // j > i, so sum_ij F_i F_j e^{s^2 min} folds into one pass over
-    // suffix sums
-    let sig2 = vol * vol;
-    let mut suffix = m1 * nu; // sum of F_j for j >= i, walked down
-    let mut sum2 = 0.0;
-    for &(t, f) in unfixed {
-        suffix -= f;
-        sum2 += (sig2 * t).exp() * f * (f + 2.0 * suffix);
-    }
-    let m2 = sum2 / (nu * nu);
+    let m2 = sum_of_squares(m1) / (nu * nu);
     // total variance of the lognormal proxy; clamp numerical noise
     let v = (m2.ln() - 2.0 * m1.ln()).max(0.0);
     Ok(black_on_lognormal_moments(m1, k_eff, v, put_or_call))
+}
+
+/// Levy expectation under Clewlow–Strickland dynamics: identical to
+/// [`levy_expectation`] except `E[A^2]` uses the integrated covariance
+/// `model.covariance(t_i, t_i, t_j, t_j)` — each observation is the
+/// forward maturing on its own date — computed O(n^2).
+fn levy_expectation_cs(
+    unfixed: &[(f64, f64)],
+    k_eff: f64,
+    model: &ClewlowStrickland,
+    put_or_call: PutOrCall,
+) -> Result<f64, RustyQLibError> {
+    levy_moment_match(unfixed, k_eff, put_or_call, |_m1| {
+        let mut sum2 = 0.0;
+        for &(t_i, f_i) in unfixed {
+            for &(t_j, f_j) in unfixed {
+                sum2 += f_i * f_j * model.covariance(t_i, t_i, t_j, t_j).exp();
+            }
+        }
+        sum2
+    })
+}
+
+/// Levy expectation `E[(A_u - k)^+]` (or the put) of the arithmetic
+/// average of lognormal observations `(t_i, F_i)` under one-factor
+/// dynamics with flat vol. Requires every (possibly displaced)
+/// observation positive.
+fn levy_expectation(
+    unfixed: &[(f64, f64)],
+    k_eff: f64,
+    vol: f64,
+    put_or_call: PutOrCall,
+) -> Result<f64, RustyQLibError> {
+    levy_moment_match(unfixed, k_eff, put_or_call, |m1| {
+        // E[A^2]: with observations sorted by date, min(t_i, t_j) = t_i
+        // for j > i, so sum_ij F_i F_j e^{s^2 min} folds into one pass
+        // over suffix sums
+        let sig2 = vol * vol;
+        let mut suffix = m1 * unfixed.len() as f64; // sum of F_j for j >= i, walked down
+        let mut sum2 = 0.0;
+        for &(t, f) in unfixed {
+            suffix -= f;
+            sum2 += (sig2 * t).exp() * f * (f + 2.0 * suffix);
+        }
+        sum2
+    })
 }
 
 /// Exact expectation `E[(A_u - k)^+]` (or the put) under one-factor
@@ -745,6 +752,47 @@ mod tests {
         assert!(call.vega(&discount, &forward, 0.35).unwrap() > 0.0);
         let put = jun27(75.0, PutOrCall::Put);
         assert!(put.delta(&discount, &forward, 0.35).unwrap() < 0.0);
+    }
+
+    #[test]
+    fn vega_at_a_zero_vol_quote_uses_the_realized_bump_width() {
+        // the down bump is clamped at zero vol, so the pair spans h,
+        // not 2h: dividing by 2h would halve the sensitivity
+        let valuation = d(2026, 9, 1);
+        let discount = flat_discount(0.04, valuation);
+        // struck at the flat strip, so a vol bump is pure time value
+        let forward = CommodityForwardCurve::flat(75.0, valuation).unwrap();
+        let apo = jun27(75.0, PutOrCall::Call);
+        let h = 1e-4;
+        let vega = apo.vega(&discount, &forward, 0.0).unwrap();
+        let up = apo.price(&discount, &forward, h).unwrap();
+        let down = apo.price(&discount, &forward, 0.0).unwrap();
+        assert!(vega > 0.0, "{vega}");
+        assert!((vega - (up - down) / h).abs() < 1e-10, "{vega}");
+        // the nominal 2h would have reported half of it
+        assert!(((up - down) / (2.0 * h) - 0.5 * vega).abs() < 1e-10);
+        // the normal quote clamps the same way
+        let vega_n = apo
+            .vega(&discount, &forward, CommodityVol::Normal(0.0))
+            .unwrap();
+        let up_n = apo
+            .price(&discount, &forward, CommodityVol::Normal(h))
+            .unwrap();
+        let down_n = apo
+            .price(&discount, &forward, CommodityVol::Normal(0.0))
+            .unwrap();
+        // struck at the flat strip, the zero-vol normal price is exactly
+        // the (zero) intrinsic
+        assert_eq!(down_n, 0.0);
+        assert!(vega_n > 0.0, "{vega_n}");
+        assert!((vega_n - (up_n - down_n) / h).abs() < 1e-10, "{vega_n}");
+        // away from zero the bump is two-sided, so the ordinary case is
+        // untouched
+        let live = apo.vega(&discount, &forward, 0.35).unwrap();
+        let u = apo.price(&discount, &forward, 0.35 + h).unwrap();
+        let dn = apo.price(&discount, &forward, 0.35 - h).unwrap();
+        let width = (0.35 + h) - (0.35 - h);
+        assert!((live - (u - dn) / width).abs() < 1e-10, "{live}");
     }
 
     #[test]

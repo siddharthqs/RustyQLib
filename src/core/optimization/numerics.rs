@@ -74,8 +74,18 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// Infinity norm `max |v_i|`. A NaN entry yields NaN (rather than being
+/// dropped by `f64::max`), so a convergence test `norm_inf(g) <= tol`
+/// can never pass on a poisoned gradient.
 pub(crate) fn norm_inf(v: &[f64]) -> f64 {
-    v.iter().fold(0.0, |m, x| m.max(x.abs()))
+    v.iter().fold(0.0, |m: f64, x| {
+        let a = x.abs();
+        if a.is_nan() || m.is_nan() {
+            f64::NAN
+        } else {
+            m.max(a)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -93,6 +103,22 @@ mod tests {
         let j = numeric_jacobian(&r, &[2.0, 3.0]);
         assert!((j[0][0] - 3.0).abs() < 1e-5 && (j[0][1] - 2.0).abs() < 1e-5);
         assert!((j[1][0] - 1.0).abs() < 1e-5 && (j[1][1] + 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn norm_inf_propagates_nan_and_takes_the_max_modulus() {
+        assert_eq!(norm_inf(&[]), 0.0);
+        assert_eq!(norm_inf(&[1.0, -3.5, 2.0]), 3.5);
+        assert!(norm_inf(&[1.0, f64::NAN, 2.0]).is_nan());
+        assert!(norm_inf(&[f64::NAN]).is_nan());
+        // NaN sticks regardless of where it sits
+        assert!(norm_inf(&[f64::NAN, 1.0]).is_nan());
+        assert!(norm_inf(&[1.0, f64::NAN]).is_nan());
+        // an infinite entry is a legitimate (huge) norm, not NaN
+        assert_eq!(norm_inf(&[1.0, f64::NEG_INFINITY]), f64::INFINITY);
+        // the convergence test cannot pass on a poisoned gradient: a NaN
+        // norm compares false against any tolerance
+        assert!(norm_inf(&[f64::NAN, 0.0]).is_nan());
     }
 
     #[test]

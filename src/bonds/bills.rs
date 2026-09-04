@@ -11,6 +11,14 @@ use chrono::NaiveDate;
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 
+/// Days to maturity at which the Treasury's bond-equivalent-yield
+/// convention switches from the simple Act/365 yield to the
+/// one-semiannual-period compounding formula. Shared by
+/// [`TreasuryBill::bond_equivalent_yield`] and its inverse
+/// [`TreasuryBill::price_from_bond_equivalent_yield`], so the two can
+/// never drift onto different branches.
+pub const BEY_SIMPLE_CUTOFF_DAYS: f64 = 182.0;
+
 #[derive(Debug, Clone)]
 pub struct TreasuryBill {
     pub face_value: f64,
@@ -85,8 +93,8 @@ impl TreasuryBill {
     /// Bond-equivalent yield (coupon-equivalent yield) for the quoted
     /// discount rate.
     ///
-    /// Up to 182 days this is the simple Act/365 yield
-    /// `365 d / (360 - d n)`. Beyond 182 days the Treasury convention
+    /// Up to [`BEY_SIMPLE_CUTOFF_DAYS`] this is the simple Act/365 yield
+    /// `365 d / (360 - d n)`. Beyond it the Treasury convention
     /// compounds one semiannual period: BEY solves
     /// `(1 + y/2) * (1 + (n/365 - 1/2) y) = 100/P`, the positive root of
     /// a quadratic.
@@ -97,7 +105,7 @@ impl TreasuryBill {
     ) -> Result<f64, RustyQLibError> {
         let n = self.days_to_maturity(settlement)? as f64;
         let price = self.price_from_discount_rate(discount_rate, settlement)?;
-        if n <= 182.0 {
+        if n <= BEY_SIMPLE_CUTOFF_DAYS {
             return Ok(365.0 * discount_rate / (360.0 - discount_rate * n));
         }
         // (x - 1/2)/2 * y^2 + x * y + (1 - R) = 0 with x = n/365, R = 100/P
@@ -113,6 +121,40 @@ impl TreasuryBill {
             )));
         }
         Ok((-b + disc.sqrt()) / (2.0 * a))
+    }
+
+    /// Price per 100 face implied by a **bond-equivalent yield** — the
+    /// inverse of [`bond_equivalent_yield`](Self::bond_equivalent_yield),
+    /// on the same [`BEY_SIMPLE_CUTOFF_DAYS`] branch:
+    ///
+    /// - `n <= 182`: `P = 100 / (1 + y n/365)`;
+    /// - beyond: `P = 100 / ((1 + y/2) (1 + (n/365 - 1/2) y))`, the
+    ///   defining equation of the compounding branch solved for `P`.
+    ///
+    /// This is the conversion a published par yield needs before it can
+    /// be quoted as a bill: the Treasury's sub-year par yields are BEYs,
+    /// and the curve bootstrap restates them on the Act/360 discount
+    /// basis through this price.
+    pub fn price_from_bond_equivalent_yield(
+        &self,
+        bey: f64,
+        settlement: NaiveDate,
+    ) -> Result<f64, RustyQLibError> {
+        let n = self.days_to_maturity(settlement)? as f64;
+        let x = n / 365.0;
+        let growth = if n <= BEY_SIMPLE_CUTOFF_DAYS {
+            1.0 + bey * x
+        } else {
+            (1.0 + bey / 2.0) * (1.0 + (x - 0.5) * bey)
+        };
+        let price = 100.0 / growth;
+        if !price.is_finite() || price <= 0.0 {
+            return Err(RustyQLibError::invalid_input(
+                "treasury bill",
+                format!("bond-equivalent yield {bey} implies a non-positive price"),
+            ));
+        }
+        Ok(price)
     }
 
     /// Present value on `curve`: the face discounted from maturity.
@@ -169,6 +211,43 @@ mod tests {
         let residual = (1.0 + y / 2.0) * (1.0 + (n / 365.0 - 0.5) * y) - 100.0 / price;
         assert!(residual.abs() < 1e-12, "residual {residual}");
         assert!(y > dr);
+    }
+
+    /// The BEY price is the exact inverse of the BEY, on both branches —
+    /// which is what lets the Treasury curve bootstrap call it instead of
+    /// inlining the algebra.
+    #[test]
+    fn bey_price_inverts_the_bond_equivalent_yield() {
+        let settle = d(2026, 8, 5);
+        for (maturity, dr) in [
+            (d(2026, 11, 4), 0.05),  // 91 days: simple branch
+            (d(2026, 12, 1), 0.042), // 118 days: simple branch
+            (d(2027, 8, 4), 0.048),  // 364 days: compounding branch
+            (d(2027, 2, 10), 0.03),  // 189 days: just past the cutoff
+        ] {
+            let bill = TreasuryBill::new(100.0, maturity).unwrap();
+            let price = bill.price_from_discount_rate(dr, settle).unwrap();
+            let bey = bill.bond_equivalent_yield(dr, settle).unwrap();
+            let back = bill.price_from_bond_equivalent_yield(bey, settle).unwrap();
+            assert!((back - price).abs() < 1e-12, "{maturity}: {back} vs {price}");
+        }
+        // exactly at the cutoff the simple branch applies
+        let cutoff = TreasuryBill::new(100.0, settle + chrono::Days::new(182)).unwrap();
+        let simple = 100.0 / (1.0 + 0.04 * 182.0 / 365.0);
+        let priced = cutoff.price_from_bond_equivalent_yield(0.04, settle).unwrap();
+        assert!((priced - simple).abs() < 1e-14, "{priced} vs {simple}");
+        // and one day later it does not
+        let beyond = TreasuryBill::new(100.0, settle + chrono::Days::new(183)).unwrap();
+        assert!(
+            (beyond.price_from_bond_equivalent_yield(0.04, settle).unwrap() - simple).abs() > 1e-9
+        );
+        // a yield that wipes out the price is an error, not a negative one
+        assert!(cutoff
+            .price_from_bond_equivalent_yield(-10.0, settle)
+            .is_err());
+        assert!(cutoff
+            .price_from_bond_equivalent_yield(0.04, d(2027, 6, 1))
+            .is_err());
     }
 
     #[test]

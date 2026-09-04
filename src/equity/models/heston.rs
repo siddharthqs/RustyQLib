@@ -21,63 +21,19 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::quadrature::simpson;
 use crate::core::trade::PutOrCall;
 
-// ── Minimal complex arithmetic (principal branches) ─────────────────────
+// ── Complex arithmetic ──────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Cpx {
-    pub(crate) re: f64,
-    pub(crate) im: f64,
-}
+/// The characteristic-function pricers' complex type: the core's shared
+/// [`Complex`](crate::core::complex::Complex) (principal branches for
+/// `ln` / `sqrt`, which the trap-free formulation relies on), under the
+/// short name the Heston/Bates/COS code is written in.
+pub(crate) type Cpx = crate::core::complex::Complex;
 
+/// The imaginary unit.
 pub(crate) const I: Cpx = Cpx { re: 0.0, im: 1.0 };
-
-impl Cpx {
-    pub(crate) fn new(re: f64, im: f64) -> Self {
-        Cpx { re, im }
-    }
-    pub(crate) fn real(re: f64) -> Self {
-        Cpx { re, im: 0.0 }
-    }
-    pub(crate) fn add(self, o: Cpx) -> Cpx {
-        Cpx::new(self.re + o.re, self.im + o.im)
-    }
-    pub(crate) fn sub(self, o: Cpx) -> Cpx {
-        Cpx::new(self.re - o.re, self.im - o.im)
-    }
-    pub(crate) fn mul(self, o: Cpx) -> Cpx {
-        Cpx::new(
-            self.re * o.re - self.im * o.im,
-            self.re * o.im + self.im * o.re,
-        )
-    }
-    pub(crate) fn div(self, o: Cpx) -> Cpx {
-        let denom = o.re * o.re + o.im * o.im;
-        Cpx::new(
-            (self.re * o.re + self.im * o.im) / denom,
-            (self.im * o.re - self.re * o.im) / denom,
-        )
-    }
-    pub(crate) fn scale(self, x: f64) -> Cpx {
-        Cpx::new(self.re * x, self.im * x)
-    }
-    pub(crate) fn exp(self) -> Cpx {
-        let m = self.re.exp();
-        Cpx::new(m * self.im.cos(), m * self.im.sin())
-    }
-    pub(crate) fn ln(self) -> Cpx {
-        Cpx::new(self.norm().ln(), self.im.atan2(self.re))
-    }
-    pub(crate) fn sqrt(self) -> Cpx {
-        let m = self.norm().sqrt();
-        let half_arg = 0.5 * self.im.atan2(self.re);
-        Cpx::new(m * half_arg.cos(), m * half_arg.sin())
-    }
-    pub(crate) fn norm(self) -> f64 {
-        self.re.hypot(self.im)
-    }
-}
 
 // ── Model parameters ────────────────────────────────────────────────────
 
@@ -96,10 +52,18 @@ pub struct HestonParams {
 
 impl HestonParams {
     pub fn validate(&self) -> Result<(), RustyQLibError> {
-        if self.v0 <= 0.0 || self.theta <= 0.0 || self.kappa <= 0.0 || self.vol_of_vol <= 0.0 {
+        // written as `!(finite && > 0)` so NaN fails too: a NaN v0 would
+        // otherwise price to a finite wrong number through the
+        // `max(1e-6)` floor in `with_vol_shift`
+        let positive = |x: f64| x.is_finite() && x > 0.0;
+        if !(positive(self.v0)
+            && positive(self.theta)
+            && positive(self.kappa)
+            && positive(self.vol_of_vol))
+        {
             return Err(RustyQLibError::invalid_input(
                 "heston params",
-                "Heston v0, kappa, theta, vol_of_vol must be positive".to_string(),
+                "Heston v0, kappa, theta, vol_of_vol must be positive and finite".to_string(),
             ));
         }
         if !(-1.0..=1.0).contains(&self.rho) {
@@ -185,14 +149,19 @@ pub type HestonFit = crate::equity::models::calibration::Fit<HestonParams>;
 /// `start` seeds the search; a poor start on a multimodal quote set can
 /// be globalized first with
 /// [`Method::DifferentialEvolution`](crate::core::optimization::Method).
+///
+/// Invalid input — an invalid `start`, no quotes, or a quote with a
+/// non-positive / non-finite strike or maturity or a negative /
+/// non-finite price — is a returned
+/// [`invalid_input`](RustyQLibError::invalid_input) error.
 pub fn calibrate(
     s: f64,
     r: f64,
     q: f64,
     quotes: &[HestonQuote],
     start: &HestonParams,
-) -> HestonFit {
-    start.validate().expect("invalid starting parameters");
+) -> Result<HestonFit, RustyQLibError> {
+    start.validate()?;
     crate::equity::models::calibration::calibrate_generic(quotes, start, r, 1e-12, |p, u, t| {
         characteristic_fn(u, s, r, q, t, p)
     })
@@ -288,21 +257,26 @@ pub(crate) fn probabilities_with_cf(cf: &dyn Fn(Cpx) -> Cpx, forward: f64, k: f6
     (p(true), p(false))
 }
 
-pub(crate) fn simpson<F: Fn(f64) -> f64>(f: F, a: f64, b: f64, n: usize) -> f64 {
-    let n = if n.is_multiple_of(2) { n } else { n + 1 };
-    let h = (b - a) / n as f64;
-    let mut sum = f(a) + f(b);
-    for i in 1..n {
-        let w = if i % 2 == 1 { 4.0 } else { 2.0 };
-        sum += w * f(a + i as f64 * h);
-    }
-    sum * h / 3.0
+/// The input gate every analytic Heston route passes through: positive
+/// spot, strike and expiry (a zero expiry makes the tail integration
+/// crawl and a non-positive strike feeds `ln K` garbage into the
+/// integrand), and valid parameters — panicking, as [`heston_price`]
+/// always has, since these are programming errors at this level (the
+/// option builder validates market data before it gets here).
+fn check_inputs(s: f64, k: f64, t: f64, hp: &HestonParams) {
+    assert!(
+        s > 0.0 && k > 0.0 && t > 0.0,
+        "Heston pricing needs positive spot, strike and expiry (got s={s}, k={k}, t={t})"
+    );
+    hp.validate().expect("invalid Heston parameters");
 }
 
 /// Price a whole strike strip in one COS pass: the characteristic
 /// function is swept once for the expiry and every strike reuses it, so
 /// a 20-strike smile costs about the same as one option. Agrees with
 /// [`heston_price`] (the independent P1/P2 integration oracle) to ~1e-6.
+/// Panics on non-positive spot, expiry or strikes, or invalid
+/// parameters, exactly as [`heston_price`] does.
 pub fn cos_smile(
     s: f64,
     r: f64,
@@ -312,6 +286,14 @@ pub fn cos_smile(
     strikes: &[f64],
     put_or_call: crate::core::trade::PutOrCall,
 ) -> Vec<f64> {
+    // the strip's smallest strike stands in for `k`: it is positive iff
+    // every strike is (a NaN strike is kept, so it fails the gate too);
+    // an empty strip still validates spot, expiry and parameters
+    let k_min = strikes
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, |m, k| if k < m || k.is_nan() { k } else { m });
+    check_inputs(s, k_min, t, hp);
     let pricer = crate::equity::cos::CosPricer::new(
         &|u| characteristic_fn(u, s, r, q, t, hp),
         r,
@@ -335,8 +317,7 @@ pub fn heston_price(
     hp: &HestonParams,
     put_or_call: PutOrCall,
 ) -> f64 {
-    assert!(s > 0.0 && k > 0.0 && t > 0.0);
-    hp.validate().expect("invalid Heston parameters");
+    check_inputs(s, k, t, hp);
     let (p1, p2) = probabilities(s, k, r, q, t, hp);
     let call = s * (-q * t).exp() * p1 - k * (-r * t).exp() * p2;
     match put_or_call {
@@ -347,7 +328,8 @@ pub fn heston_price(
 }
 
 /// Semi-analytic Heston price of a cash-or-nothing binary
-/// (`cash * e^{-rT} * P(S_T beyond K)`).
+/// (`cash * e^{-rT} * P(S_T beyond K)`). Same input contract (and
+/// panics) as [`heston_price`].
 #[allow(clippy::too_many_arguments)]
 pub fn heston_binary_cash_price(
     s: f64,
@@ -359,6 +341,7 @@ pub fn heston_binary_cash_price(
     cash: f64,
     put_or_call: PutOrCall,
 ) -> f64 {
+    check_inputs(s, k, t, hp);
     let (_, p2) = probabilities(s, k, r, q, t, hp);
     let df = (-r * t).exp();
     match put_or_call {
@@ -368,7 +351,8 @@ pub fn heston_binary_cash_price(
 }
 
 /// Semi-analytic Heston price of an asset-or-nothing binary
-/// (`S e^{-qT} P1` for a call).
+/// (`S e^{-qT} P1` for a call). Same input contract (and panics) as
+/// [`heston_price`].
 pub fn heston_binary_asset_price(
     s: f64,
     k: f64,
@@ -378,6 +362,7 @@ pub fn heston_binary_asset_price(
     hp: &HestonParams,
     put_or_call: PutOrCall,
 ) -> f64 {
+    check_inputs(s, k, t, hp);
     let (p1, _) = probabilities(s, k, r, q, t, hp);
     let leg = s * (-q * t).exp();
     match put_or_call {
@@ -423,9 +408,11 @@ pub(crate) fn analytic_npv(option: &EquityOption, bumped_market: Option<&BumpedM
                 BinaryType::AssetOrNothing => heston_binary_asset_price(s, k, r, q, t, &hp, pc),
             }
         }
-        _ => panic!(
-            "The Heston analytic pricer supports vanilla and binary payoffs; \
-             use the MonteCarlo engine for path-dependent payoffs"
+        // `check_engine_support` refuses every other payoff on this
+        // route before pricing (EquityOption::check_engine_support)
+        _ => unreachable!(
+            "check_engine_support admits only vanilla and binary payoffs on the Heston \
+             analytic route"
         ),
     }
 }
@@ -504,7 +491,7 @@ mod tests {
             vol_of_vol: 0.3,
             rho: -0.3,
         };
-        let fit = calibrate(s, r, q, &quotes, &start);
+        let fit = calibrate(s, r, q, &quotes, &start).unwrap();
 
         assert!(
             fit.rmse < 1e-3,
@@ -527,21 +514,50 @@ mod tests {
     }
 
     #[test]
-    fn complex_arithmetic_sanity() {
-        let z = Cpx::new(3.0, 4.0);
-        assert!((z.norm() - 5.0).abs() < 1e-14);
-        let e = Cpx::new(0.0, std::f64::consts::PI).exp();
-        assert!(
-            (e.re + 1.0).abs() < 1e-12 && e.im.abs() < 1e-12,
-            "e^{{i pi}} = -1"
-        );
-        let s = Cpx::new(-1.0, 0.0).sqrt();
-        assert!(
-            s.re.abs() < 1e-12 && (s.im - 1.0).abs() < 1e-12,
-            "sqrt(-1) = i"
-        );
-        let l = z.ln().exp();
-        assert!((l.re - z.re).abs() < 1e-12 && (l.im - z.im).abs() < 1e-12);
+    fn calibration_rejects_bad_input_instead_of_panicking() {
+        let (s, r, q, t) = (100.0, 0.03, 0.01, 1.0);
+        let truth = params();
+        let good: Vec<HestonQuote> = [90.0, 100.0, 110.0]
+            .iter()
+            .map(|&k| HestonQuote {
+                strike: k,
+                maturity: t,
+                price: heston_price(s, k, r, q, t, &truth, PutOrCall::Call),
+                put_or_call: PutOrCall::Call,
+            })
+            .collect();
+        // no quotes
+        assert!(calibrate(s, r, q, &[], &truth).is_err());
+        // an invalid start
+        let bad_start = HestonParams {
+            v0: f64::NAN,
+            ..truth
+        };
+        assert!(calibrate(s, r, q, &good, &bad_start).is_err());
+        assert!(calibrate(s, r, q, &good, &HestonParams { rho: 1.5, ..truth }).is_err());
+        // a poisoned quote
+        for (strike, maturity, price) in [
+            (0.0, t, 5.0),
+            (f64::NAN, t, 5.0),
+            (100.0, 0.0, 5.0),
+            (100.0, f64::INFINITY, 5.0),
+            (100.0, t, -1.0),
+            (100.0, t, f64::NAN),
+        ] {
+            let mut quotes = good.clone();
+            quotes[1] = HestonQuote {
+                strike,
+                maturity,
+                price,
+                put_or_call: PutOrCall::Call,
+            };
+            assert!(
+                calibrate(s, r, q, &quotes, &truth).is_err(),
+                "K={strike} t={maturity} price={price} should be refused"
+            );
+        }
+        // and the untouched set still calibrates
+        assert!(calibrate(s, r, q, &good, &truth).is_ok());
     }
 
     #[test]
@@ -637,5 +653,125 @@ mod tests {
             ..params()
         }
         .feller_condition_holds());
+    }
+
+    #[test]
+    fn validation_rejects_nan_and_infinite_params() {
+        // plain comparisons let NaN through; every positive parameter
+        // and the correlation must refuse NaN and both infinities
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(HestonParams { v0: bad, ..params() }.validate().is_err(), "v0 = {bad}");
+            assert!(
+                HestonParams {
+                    kappa: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "kappa = {bad}"
+            );
+            assert!(
+                HestonParams {
+                    theta: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "theta = {bad}"
+            );
+            assert!(
+                HestonParams {
+                    vol_of_vol: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "vol_of_vol = {bad}"
+            );
+            assert!(HestonParams { rho: bad, ..params() }.validate().is_err(), "rho = {bad}");
+        }
+        // the finding this closes: a NaN v0 used to price to a finite,
+        // wrong number through with_vol_shift's max(1e-6) floor — the
+        // shifted set is "valid", so the gate has to be on the input
+        let nan_v0 = HestonParams {
+            v0: f64::NAN,
+            ..params()
+        };
+        assert!(nan_v0.with_vol_shift(0.0).validate().is_ok());
+        assert!(nan_v0.validate().is_err());
+    }
+
+    #[test]
+    fn analytic_routes_share_the_input_gate() {
+        // every analytic entry point must refuse what heston_price
+        // refuses: non-positive spot / strike / expiry, invalid params
+        let hp = params();
+        let bad_hp = HestonParams {
+            v0: -0.1,
+            ..params()
+        };
+        let cases: Vec<(&str, Box<dyn Fn() -> f64>)> = vec![
+            (
+                "cash binary, t = 0",
+                Box::new(move || {
+                    heston_binary_cash_price(100.0, 100.0, 0.05, 0.0, 0.0, &hp, 1.0, PutOrCall::Call)
+                }),
+            ),
+            (
+                "cash binary, k <= 0",
+                Box::new(move || {
+                    heston_binary_cash_price(100.0, 0.0, 0.05, 0.0, 1.0, &hp, 1.0, PutOrCall::Call)
+                }),
+            ),
+            (
+                "asset binary, s <= 0",
+                Box::new(move || {
+                    heston_binary_asset_price(0.0, 100.0, 0.05, 0.0, 1.0, &hp, PutOrCall::Call)
+                }),
+            ),
+            (
+                "asset binary, bad params",
+                Box::new(move || {
+                    heston_binary_asset_price(100.0, 100.0, 0.05, 0.0, 1.0, &bad_hp, PutOrCall::Put)
+                }),
+            ),
+            (
+                "cos smile, negative strike in the strip",
+                Box::new(move || {
+                    cos_smile(100.0, 0.05, 0.0, 1.0, &hp, &[90.0, -100.0, 110.0], PutOrCall::Call)
+                        [0]
+                }),
+            ),
+            (
+                "cos smile, NaN strike in the strip",
+                Box::new(move || {
+                    cos_smile(100.0, 0.05, 0.0, 1.0, &hp, &[90.0, f64::NAN], PutOrCall::Call)[0]
+                }),
+            ),
+            (
+                "cos smile, t = 0",
+                Box::new(move || {
+                    cos_smile(100.0, 0.05, 0.0, 0.0, &hp, &[90.0, 110.0], PutOrCall::Call)[0]
+                }),
+            ),
+            (
+                "cos smile, bad params",
+                Box::new(move || {
+                    cos_smile(100.0, 0.05, 0.0, 1.0, &bad_hp, &[90.0, 110.0], PutOrCall::Call)[0]
+                }),
+            ),
+        ];
+        for (name, price) in cases {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(price));
+            assert!(outcome.is_err(), "{name}: must panic like heston_price");
+        }
+        // valid input is untouched: the binaries still replicate the
+        // vanilla and an empty strip prices to nothing
+        let (s, k, r, q, t) = (100.0, 100.0, 0.05, 0.02, 1.0);
+        let vanilla = heston_price(s, k, r, q, t, &hp, PutOrCall::Call);
+        let asset = heston_binary_asset_price(s, k, r, q, t, &hp, PutOrCall::Call);
+        let cash = heston_binary_cash_price(s, k, r, q, t, &hp, k, PutOrCall::Call);
+        assert!((vanilla - (asset - cash)).abs() < 1e-10);
+        assert!(cos_smile(s, r, q, t, &hp, &[], PutOrCall::Call).is_empty());
     }
 }

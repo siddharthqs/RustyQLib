@@ -21,14 +21,18 @@
 //! - [`cmdty`] — commodity swaps (fixed versus the averaged daily index
 //!   price) and Black-76 options on commodity futures, projected on
 //!   commodity forward curves
-//! - `data` *(feature `fetch`)* — free official end-of-day market data:
-//!   the US Treasury daily par yield curve, passed through as published
-//!   with provenance metadata
+//! - `data` *(feature `fetch`)* — free official end-of-day market data,
+//!   passed through as published with provenance metadata: the US
+//!   Treasury daily par yield curve (with a bootstrap into a discount
+//!   curve), the NY Fed SOFR and EFFR reference rates, and Cboe delayed
+//!   listed option chains normalized into an
+//!   [`OptionChain`](equity::option_chain::OptionChain)
 //! - [`validation`] — runtime model-validation checks (martingale
 //!   forward recovery, surface diagnostics, local-vol usability) that
 //!   measure model quality on given data and ship as reports
-//! - [`utils`] — random number generation, stochastic processes and the
-//!   JSON/CLI plumbing used by the `rustyqlib` binary
+//! - [`utils`] — seeded random number generation, interactive Plotly
+//!   HTML figures ([`utils::plot3d`]), and the contract/CLI plumbing
+//!   behind the `rustyqlib` binary (feature `cli`)
 //!
 //! # Example
 //!

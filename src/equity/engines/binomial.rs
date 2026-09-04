@@ -316,7 +316,7 @@ pub fn pricing_result(option: &EquityOption) -> PricingResult {
     );
     let rho = (rate_up - rate_down) / (2.0 * hr);
     let charm = (spot_up.theta - spot_down.theta) / (2.0 * hs);
-    let gamma_p = option.market.spot.value() * base.gamma / 100.0;
+    let gamma_p = crate::equity::greeks::gamma_p_from(option.market.spot.value(), base.gamma);
     PricingResult {
         pv: base.price,
         greeks: Greeks {

@@ -34,9 +34,13 @@
 use crate::core::fd_solvers::adi::{douglas_step, hundsdorfer_verwer_step};
 use crate::core::fd_solvers::axis_operator::{AxisOperator, TensorGrid};
 use crate::core::utils::ContractStyle;
+use crate::equity::conventions::MIN_BUMPED_VOL;
 use crate::equity::utils::PayoffType;
 
-use crate::equity::finite_difference::FdSolution;
+use crate::equity::finite_difference::{
+    bermudan_backward_mask, cell_average_payoff, grid_half_width, grid_solution, rannacher_theta,
+    FdSolution, RANNACHER_STEPS,
+};
 use crate::equity::vanilla_option::EquityOption;
 
 /// Variance-axis nodes, derived from the spot resolution.
@@ -44,11 +48,13 @@ fn var_nodes(spot_steps: usize) -> usize {
     (spot_steps / 8).clamp(30, 80)
 }
 
-/// Fully-implicit starting layers (kink damping), matching the 1-D engine.
-const RANNACHER_STEPS: usize = 4;
-
-/// Sub-samples for the cell-averaged terminal condition.
-const CELL_AVG_POINTS: usize = 16;
+/// Hundsdorfer-Verwer theta, `1/2 + sqrt(3)/6`: the value that keeps the
+/// scheme unconditionally stable with the explicitly treated mixed
+/// derivative (In 't Hout & Foulon); `theta = 1/2` is only conditionally
+/// stable there.
+const HV_THETA: f64 = 0.5 + 0.28867513459481287; // 1/2 + sqrt(3)/6
+/// Hundsdorfer-Verwer mu.
+const HV_MU: f64 = 0.5;
 
 /// Solve the Heston PDE and read value, delta, gamma and calendar theta
 /// at `(S0, v0)`. Bumps mirror [`finite_difference::solve_dispatch`]:
@@ -75,37 +81,37 @@ pub(crate) fn solve(
         option.market.cash_dividends.is_empty(),
         "cash dividends are not supported on the Heston ADI engine; use MonteCarlo"
     );
-    let hp = option.heston_params().with_vol_shift(sigma_bump);
+    // the vega convention shifts sqrt(v0) and sqrt(theta): floor the
+    // shifted vols like every other bumped vol read so a down-bump larger
+    // than the model's vol prices at the floor (`with_vol_shift` squares
+    // the shifted vol, which would otherwise fold a negative shift back
+    // into a positive variance); an unfloored shift passes through
+    // untouched (bit-identical)
+    let base_hp = option.heston_params();
+    let min_model_vol = base_hp.v0.sqrt().min(base_hp.theta.sqrt());
+    let sigma_bump = if min_model_vol + sigma_bump < MIN_BUMPED_VOL {
+        MIN_BUMPED_VOL - min_model_vol
+    } else {
+        sigma_bump
+    };
+    let hp = base_hp.with_vol_shift(sigma_bump);
     let cfg = option.fd_cfg();
     let payoff = option.payoff.as_ref();
     let strike = option.base.strike_price;
     let s0 = option.market.spot.value() + spot_bump;
+    assert!(s0 > 0.0, "underlying price must be positive");
     let t = option.time_to_maturity();
     let r = option.risk_free_rate() + r_bump;
     let q = option.carry_yield();
     let american = matches!(payoff.exercise_style(), ContractStyle::American);
     let steps = cfg.time_steps;
     let dt = t / steps as f64;
-    // Bermudan: backward step `s` covers calendar time t-(s+1)dt
-    let bermudan_backward: Option<Vec<bool>> = match payoff.exercise_style() {
-        ContractStyle::Bermudan(times) => {
-            let mut mask = vec![false; steps];
-            for g in crate::core::utils::times_to_grid_steps(times, t, steps) {
-                if g < steps {
-                    mask[steps - g - 1] = true;
-                }
-            }
-            Some(mask)
-        }
-        _ => None,
-    };
+    let bermudan_backward = bermudan_backward_mask(payoff.exercise_style(), t, steps);
 
     // ── Grid geometry: x centered so S0 is exactly a node; v on [0, v_max]
     let sigma_ref = hp.v0.max(hp.theta).sqrt();
     let x0 = s0.ln();
-    let drift_width = ((r - q - 0.5 * sigma_ref * sigma_ref) * t).abs();
-    let half_width =
-        cfg.grid_stdevs * sigma_ref * t.sqrt() + drift_width + (strike / s0).ln().abs().max(1e-2);
+    let half_width = grid_half_width(cfg.grid_stdevs, sigma_ref, t, r, q, strike, s0);
     let nx = if cfg.spot_steps.is_multiple_of(2) {
         cfg.spot_steps
     } else {
@@ -187,13 +193,7 @@ pub(crate) fn solve(
     let exercise: Vec<f64> = s_grid.iter().map(|&s| payoff.payoff(s, strike)).collect();
     let mut u = vec![0.0; grid.len()];
     for i in 0..=nx {
-        let x = x_min + i as f64 * dx;
-        let mut avg = 0.0;
-        for p in 0..CELL_AVG_POINTS {
-            let xi = x - 0.5 * dx + (p as f64 + 0.5) * dx / CELL_AVG_POINTS as f64;
-            avg += payoff.payoff(xi.exp(), strike);
-        }
-        avg /= CELL_AVG_POINTS as f64;
+        let avg = cell_average_payoff(payoff, strike, x_min + i as f64 * dx, dx);
         for j in 0..=nv {
             u[at(i, j)] = avg;
         }
@@ -207,11 +207,11 @@ pub(crate) fn solve(
             || bermudan_backward
                 .as_ref()
                 .is_some_and(|m| m.get(step).copied().unwrap_or(false));
-        let theta_w = if step < RANNACHER_STEPS { 1.0 } else { 0.5 };
+        let theta_w = rannacher_theta(step);
         u = if exercise_now || step < RANNACHER_STEPS {
             douglas_step(&grid, &ops, Some(&mixed), &u, dt, theta_w)
         } else {
-            hundsdorfer_verwer_step(&grid, &ops, Some(&mixed), &u, dt, 0.5, 0.5)
+            hundsdorfer_verwer_step(&grid, &ops, Some(&mixed), &u, dt, HV_THETA, HV_MU)
         };
 
         // Dirichlet x-boundaries: discounted forward payoff at the new
@@ -247,19 +247,7 @@ pub(crate) fn solve(
     }
 
     let (npv, delta_x, gamma_x) = read_at(&u, ix0, sx, dx, nv, dv, hp.v0);
-    let delta = delta_x / s0;
-    let gamma = (gamma_x - delta_x) / (s0 * s0);
-    let theta = if steps >= 2 {
-        (theta_layer_value - npv) / dt
-    } else {
-        0.0
-    };
-    FdSolution {
-        npv,
-        delta,
-        gamma,
-        theta,
-    }
+    grid_solution(npv, delta_x, gamma_x, s0, theta_layer_value, steps, dt)
 }
 
 /// Value and x-derivatives at the spot node, linearly interpolated in `v`
@@ -386,6 +374,26 @@ mod tests {
             lsmc - fd < 0.10 && fd - lsmc < 0.25,
             "fd {fd:.4} vs lsmc {lsmc:.4}"
         );
+    }
+
+    #[test]
+    fn vol_shifts_past_the_floor_all_price_the_same_solve() {
+        // `with_vol_shift` squares the shifted vol, so a down-bump past
+        // the model's own vol used to fold back into a positive variance
+        // that depended on how far past zero the shift went. Floored at
+        // MIN_BUMPED_VOL, every such bump is the same solve; bumps that
+        // stay above the floor are untouched.
+        let opt = option(PutOrCall::Call, 100.0, Engine::FiniteDifference, false);
+        let solve = |shift: f64| super::solve(&opt, shift, 0.0, 0.0).npv;
+        // sqrt(v0) = 0.3 here, so -0.5 and -1.0 both land on the floor
+        assert_eq!(
+            solve(-0.5).to_bits(),
+            solve(-1.0).to_bits(),
+            "crushing vol bumps must agree bit for bit"
+        );
+        // a bump the floor does not touch still moves the price
+        let live = solve(-0.01);
+        assert!(live.is_finite() && live != solve(-0.5));
     }
 
     #[test]

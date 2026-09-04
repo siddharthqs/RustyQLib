@@ -60,7 +60,38 @@ pub struct Labels<'a> {
     pub z: &'a str,
 }
 
-/// The standard document shell around a Plotly figure.
+/// Escape the five characters that would otherwise reopen markup when a
+/// caller-supplied string lands in element text or an attribute.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Serialize a figure value for embedding inside a `<script>` block.
+///
+/// JSON escaping alone is not enough there: the HTML parser ends the
+/// script at the first `</` sequence regardless of JavaScript syntax, so
+/// a symbol or title containing `</script>` would break out of the
+/// block. `<\/` is the same string to a JSON parser and inert to the
+/// HTML one.
+fn embed_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value)
+        .expect("serde_json::Value always serializes")
+        .replace("</", "<\\/")
+}
+
+/// The standard document shell around a Plotly figure. `title` is
+/// caller-supplied (a ticker, a model name), so it is HTML-escaped
+/// before it reaches the `<title>` element.
 fn html_page(title: &str, data: &serde_json::Value, layout: &serde_json::Value) -> String {
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\"/>\n\
@@ -71,8 +102,9 @@ fn html_page(title: &str, data: &serde_json::Value, layout: &serde_json::Value) 
          </head>\n<body>\n<div id=\"plot\"></div>\n<script>\n\
          Plotly.newPlot('plot', {data}, {layout}, {{responsive:true}});\n\
          </script>\n</body>\n</html>\n",
-        data = serde_json::to_string(data).unwrap_or_default(),
-        layout = serde_json::to_string(layout).unwrap_or_default(),
+        title = escape_html(title),
+        data = embed_json(data),
+        layout = embed_json(layout),
     )
 }
 
@@ -147,22 +179,19 @@ pub fn save_surface_html(
 /// past the ends to show the flat extrapolation. A flat surface renders
 /// as its constant plane.
 pub fn vol_surface_html(surface: &VolSurface, title: &str) -> String {
-    let (expiries, smiles, coordinate) = match surface.to_input() {
+    // pillar times come from the surface itself rather than from
+    // re-resolving `to_input`'s tenors: `expiry_times` is already the
+    // year fractions the surface stores
+    let (times, smiles, coordinate) = match surface.to_input() {
         VolInput::StrikeSmiles {
-            expiries,
-            smiles,
-            coordinate,
-            ..
-        } => (expiries, smiles, coordinate),
+            smiles, coordinate, ..
+        } => (surface.expiry_times().to_vec(), smiles, coordinate),
         // flat (or any grid-only) surface: a constant plane over a
         // nominal window
         _ => {
             let vol = surface.vol(100.0, 100.0, 1.0);
             (
-                vec![
-                    crate::core::curves::Tenor::YearFraction(0.25),
-                    crate::core::curves::Tenor::YearFraction(2.0),
-                ],
+                vec![0.25, 2.0],
                 vec![
                     vec![(50.0, vol), (150.0, vol)],
                     vec![(50.0, vol), (150.0, vol)],
@@ -171,14 +200,6 @@ pub fn vol_surface_html(surface: &VolSurface, title: &str) -> String {
             )
         }
     };
-    let times: Vec<f64> = expiries
-        .iter()
-        .map(|tenor| match tenor {
-            crate::core::curves::Tenor::YearFraction(t) => *t,
-            // to_input never emits dates, but stay total
-            crate::core::curves::Tenor::Date(_) => 0.0,
-        })
-        .collect();
 
     // querying (strike = coordinate mapped back, forward = 1) hits the
     // stored smile coordinate exactly for all three coordinate kinds
@@ -350,6 +371,39 @@ mod tests {
         for vol in ["0.3", "0.27", "0.25", "0.31", "0.28"] {
             assert!(html.contains(vol), "missing pillar vol {vol}");
         }
+    }
+
+    /// Titles are caller data (a ticker, a filename): they must not be
+    /// able to close the `<title>` element, and no embedded JSON string
+    /// may close the `<script>` block.
+    #[test]
+    fn titles_and_embedded_json_cannot_break_out_of_the_page() {
+        let flat = VolSurface::flat(0.2, asof(), DayCountConvention::Act365).unwrap();
+        let html = vol_surface_html(&flat, "</title><script>alert(1)</script> A&B \"x\" <hr>");
+        // the raw markup never appears; the escaped form does
+        assert!(!html.contains("</title><script>"), "title escaped out");
+        assert!(!html.contains("alert(1)</script>"), "script survived");
+        assert!(html.contains("&lt;/title&gt;"), "title is escaped");
+        assert!(html.contains("A&amp;B"), "ampersand is escaped");
+        assert!(html.contains("&quot;x&quot;"), "quote is escaped");
+        // the injected title contributes no script tags of its own: the
+        // page has exactly the ones it always has (the CDN include and
+        // its own inline block)
+        let benign = vol_surface_html(&flat, "implied vol");
+        assert_eq!(
+            html.matches("</script>").count(),
+            benign.matches("</script>").count(),
+            "{html}"
+        );
+
+        // the same title inside the figure JSON is neutralized by the
+        // `</` rewrite, and still reads back as the original string
+        let layout = json!({ "title": { "text": "</script><img src=x>" } });
+        let embedded = embed_json(&layout);
+        assert!(!embedded.contains("</script>"), "{embedded}");
+        assert!(embedded.contains("<\\/script>"), "{embedded}");
+        let back: serde_json::Value = serde_json::from_str(&embedded).expect("still valid JSON");
+        assert_eq!(back["title"]["text"], "</script><img src=x>");
     }
 
     #[test]

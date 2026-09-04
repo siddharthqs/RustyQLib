@@ -59,6 +59,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::errors::RustyQLibError;
 use crate::core::fft::{Complex, RealConvolver};
 use crate::core::linalg::cholesky_factor;
+use crate::core::quadrature::simpson;
 use crate::core::trade::PutOrCall;
 use crate::core::utils::norm_cdf;
 
@@ -88,16 +89,16 @@ pub struct RBergomiParams {
 
 impl RBergomiParams {
     pub fn validate(&self) -> Result<(), RustyQLibError> {
-        if self.xi0 <= 0.0 {
+        if !(self.xi0.is_finite() && self.xi0 > 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "rbergomi params",
-                "rBergomi xi0 (forward variance) must be positive".to_string(),
+                "rBergomi xi0 (forward variance) must be positive and finite".to_string(),
             ));
         }
-        if self.eta < 0.0 {
+        if !(self.eta.is_finite() && self.eta >= 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "rbergomi params",
-                "rBergomi eta (vol-of-vol) must be non-negative".to_string(),
+                "rBergomi eta (vol-of-vol) must be non-negative and finite".to_string(),
             ));
         }
         if !(self.hurst > 0.0 && self.hurst <= 0.5) {
@@ -147,18 +148,6 @@ impl RBergomiParams {
 //   Cov[VH(s), VH(t)] = 2H int_0^s (t-u)^{-gamma} (s-u)^{-gamma} du   (s <= t)
 //   Cov[W^v_s, VH(t)] = sqrt(2H)/alpha * (t^alpha - (t - min(s,t))^alpha)
 
-/// Composite Simpson on `[a, b]` with `n` (even) intervals.
-fn simpson(a: f64, b: f64, n: usize, f: impl Fn(f64) -> f64) -> f64 {
-    debug_assert!(n >= 2 && n.is_multiple_of(2));
-    let h = (b - a) / n as f64;
-    let mut s = f(a) + f(b);
-    for i in 1..n {
-        let w = if i.is_multiple_of(2) { 2.0 } else { 4.0 };
-        s += w * f(a + i as f64 * h);
-    }
-    s * h / 3.0
-}
-
 /// `E[VH(s) VH(t)]` of the `sqrt(2H)`-normalized Riemann-Liouville
 /// Volterra process.
 ///
@@ -187,9 +176,12 @@ pub(crate) fn volterra_cov(hurst: f64, s: f64, t: f64) -> f64 {
     let alpha = hurst + 0.5;
     let m = delta.min(s);
     // near piece u in [0, m]: y = u^alpha
-    let i1 = simpson(0.0, m.powf(alpha), 64, |y| {
-        (delta + y.powf(1.0 / alpha)).powf(-gamma)
-    }) / alpha;
+    let i1 = simpson(
+        |y| (delta + y.powf(1.0 / alpha)).powf(-gamma),
+        0.0,
+        m.powf(alpha),
+        64,
+    ) / alpha;
     // far piece u in [m, s] on a log grid: u = e^y, u^{-gamma} du = e^{(1-gamma) y} dy
     let i2 = if s > m {
         let (a, b) = (m.ln(), s.ln());
@@ -198,10 +190,15 @@ pub(crate) fn volterra_cov(hurst: f64, s: f64, t: f64) -> f64 {
             .clamp(64, 512)
             .div_ceil(2)
             * 2;
-        simpson(a, b, n, |y| {
-            let u = y.exp();
-            (delta + u).powf(-gamma) * u.powf(1.0 - gamma)
-        })
+        simpson(
+            |y| {
+                let u = y.exp();
+                (delta + u).powf(-gamma) * u.powf(1.0 - gamma)
+            },
+            a,
+            b,
+            n,
+        )
     } else {
         0.0
     };
@@ -220,6 +217,23 @@ pub(crate) fn wv_volterra_cov(hurst: f64, s: f64, t: f64) -> f64 {
 }
 
 // ── Exact joint path generation ─────────────────────────────────────────
+
+/// The grid/parameter gate both generators share: `steps >= 1`, a
+/// finite positive horizon, and a Hurst exponent in the model's `(0,
+/// 1/2]` domain — outside it the kernel exponents produce NaN
+/// covariances, which the Cholesky factorization passes through as
+/// all-NaN draws instead of failing.
+fn check_grid(hurst: f64, steps: usize, t: f64) -> Result<(), RustyQLibError> {
+    if steps == 0 || t <= 0.0 || !t.is_finite() || !(hurst > 0.0 && hurst <= 0.5) {
+        return Err(RustyQLibError::invalid_input(
+            "rbergomi grid",
+            "rBergomi path generation needs steps >= 1, finite t > 0 and a Hurst \
+             exponent in (0, 1/2]"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// Exact-scheme generator for rough Bergomi paths on a uniform grid
 /// `t_i = i * dt`, `i = 1..=steps`.
@@ -247,12 +261,7 @@ impl RBergomiPaths {
     // iterator forms would obscure the layout
     #[allow(clippy::needless_range_loop)]
     pub fn new(hurst: f64, steps: usize, t: f64) -> Result<Self, RustyQLibError> {
-        if steps == 0 || t <= 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "rbergomi grid",
-                "rBergomi path generation needs steps >= 1 and t > 0".to_string(),
-            ));
-        }
+        check_grid(hurst, steps, t)?;
         let n = steps;
         let dt = t / n as f64;
         let times: Vec<f64> = (1..=n).map(|i| i as f64 * dt).collect();
@@ -389,12 +398,7 @@ fn hybrid_lag_weight(hurst: f64, dt: f64, l: usize) -> f64 {
 
 impl RBergomiHybrid {
     pub fn new(hurst: f64, steps: usize, t: f64) -> Result<Self, RustyQLibError> {
-        if steps == 0 || t <= 0.0 {
-            return Err(RustyQLibError::invalid_input(
-                "rbergomi grid",
-                "rBergomi path generation needs steps >= 1 and t > 0".to_string(),
-            ));
-        }
+        check_grid(hurst, steps, t)?;
         let n = steps;
         let dt = t / n as f64;
         let alpha = hurst + 0.5;
@@ -748,6 +752,48 @@ mod tests {
         assert!(RBergomiParams { hurst: 0.0, ..good }.validate().is_err());
         assert!(RBergomiParams { hurst: 0.6, ..good }.validate().is_err());
         assert!(RBergomiParams { rho: -1.5, ..good }.validate().is_err());
+        // NaN and infinities slip past plain comparisons
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(RBergomiParams { xi0: bad, ..good }.validate().is_err(), "xi0 = {bad}");
+            assert!(RBergomiParams { eta: bad, ..good }.validate().is_err(), "eta = {bad}");
+            assert!(
+                RBergomiParams { hurst: bad, ..good }.validate().is_err(),
+                "hurst = {bad}"
+            );
+            assert!(RBergomiParams { rho: bad, ..good }.validate().is_err(), "rho = {bad}");
+        }
+        assert!(RBergomiParams { eta: 0.0, ..good }.validate().is_ok());
+    }
+
+    #[test]
+    fn generators_reject_out_of_domain_grids() {
+        // both schemes share one gate: steps, horizon and Hurst exponent
+        for hurst in [0.0, -0.1, 0.51, f64::NAN, f64::INFINITY] {
+            assert!(RBergomiPaths::new(hurst, 8, 1.0).is_err(), "exact H = {hurst}");
+            assert!(RBergomiHybrid::new(hurst, 8, 1.0).is_err(), "hybrid H = {hurst}");
+            assert!(
+                RBergomiGenerator::for_grid(hurst, 8, 1.0).is_err(),
+                "generator H = {hurst}"
+            );
+        }
+        for t in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(RBergomiPaths::new(0.1, 8, t).is_err(), "exact t = {t}");
+            assert!(RBergomiHybrid::new(0.1, 8, t).is_err(), "hybrid t = {t}");
+        }
+        assert!(RBergomiPaths::new(0.1, 0, 1.0).is_err());
+        assert!(RBergomiHybrid::new(0.1, 0, 1.0).is_err());
+        // the domain edges are admitted and produce finite draws
+        for hurst in [0.05, 0.5] {
+            let gen = RBergomiPaths::new(hurst, 4, 1.0).unwrap();
+            let hyb = RBergomiHybrid::new(hurst, 4, 1.0).unwrap();
+            let z = vec![0.7; 8];
+            let (mut dwv, mut vh) = (vec![0.0; 4], vec![0.0; 4]);
+            gen.correlate(&z, &mut dwv, &mut vh);
+            assert!(vh.iter().chain(&dwv).all(|x| x.is_finite()), "exact H = {hurst}");
+            let mut scratch = Vec::new();
+            hyb.correlate(&z, &mut dwv, &mut vh, &mut scratch);
+            assert!(vh.iter().chain(&dwv).all(|x| x.is_finite()), "hybrid H = {hurst}");
+        }
     }
 
     #[test]

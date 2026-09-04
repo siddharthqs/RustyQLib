@@ -14,13 +14,14 @@
 //! Both estimators share scenarios, so their difference is purely the
 //! Taylor truncation — a direct read on how non-linear the book is.
 
+use crate::core::errors::RustyQLibError;
 use crate::core::montecarlo::path_rng;
 use crate::equity::bump::{Bump, BumpedMarket};
 use crate::equity::portfolio::EquityPortfolio;
 use rand::Rng;
 use rand_distr::StandardNormal;
 
-use super::measures::{historical_expected_shortfall, historical_var};
+use super::measures::historical_var_es;
 
 /// Scenario-generation settings for portfolio VaR.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -53,6 +54,62 @@ impl Default for RiskConfig {
     }
 }
 
+impl RiskConfig {
+    /// Reject a configuration the estimators cannot run: no scenarios
+    /// (an empty P&L sample has no quantile), a one-sided confidence
+    /// outside `(0.5, 1)`, a non-positive or non-finite horizon, a
+    /// correlation outside `[-1, 1]`, or a negative / non-finite
+    /// volatility input.
+    pub fn validate(&self) -> Result<(), RustyQLibError> {
+        if self.scenarios == 0 {
+            return Err(RustyQLibError::invalid_input(
+                "scenarios",
+                "need at least one scenario".to_string(),
+            ));
+        }
+        super::measures::validate_confidence(self.confidence)?;
+        if !(self.horizon.is_finite() && self.horizon > 0.0) {
+            return Err(RustyQLibError::invalid_input(
+                "horizon",
+                format!("must be finite and positive, got {}", self.horizon),
+            ));
+        }
+        if !(self.spot_vol_corr.is_finite() && self.spot_vol_corr.abs() <= 1.0) {
+            return Err(RustyQLibError::invalid_input(
+                "spot_vol_corr",
+                format!("must be in [-1, 1], got {}", self.spot_vol_corr),
+            ));
+        }
+        for (name, value) in [("spot_vol", self.spot_vol), ("vol_of_vol", self.vol_of_vol)] {
+            if !(value.is_finite() && value >= 0.0) {
+                return Err(RustyQLibError::invalid_input(
+                    name,
+                    format!("must be finite and non-negative, got {value}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The scenario `spot` is the book's own spot: every position in an
+/// [`EquityPortfolio`] shares one underlying, so a `spot` that disagrees
+/// with the first position's quote would generate moves off one level
+/// and reprice off another. Checked alongside [`RiskConfig::validate`].
+fn validate_spot(book: &EquityPortfolio, spot: f64) -> Result<(), RustyQLibError> {
+    let first = book.positions.first().ok_or_else(|| {
+        RustyQLibError::invalid_input("book", "the portfolio has no positions".to_string())
+    })?;
+    let book_spot = first.option.market.spot.value();
+    if !spot.is_finite() || (spot - book_spot).abs() > 1e-12 {
+        return Err(RustyQLibError::invalid_input(
+            "spot",
+            format!("{spot} disagrees with the book's own spot {book_spot}"),
+        ));
+    }
+    Ok(())
+}
+
 /// VaR / ES output with the scenario P&L retained for inspection.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PortfolioRisk {
@@ -77,7 +134,15 @@ fn scenario_moves(cfg: &RiskConfig, spot: f64, i: u64) -> (f64, f64) {
 
 /// Delta-gamma-vega-theta VaR: scenario P&L from the book's aggregated
 /// Greeks (one Greeks computation, then arithmetic per scenario).
-pub fn delta_gamma_var(book: &EquityPortfolio, spot: f64, cfg: &RiskConfig) -> PortfolioRisk {
+/// Errors on an invalid [`RiskConfig`] or a `spot` that disagrees with
+/// the book's own.
+pub fn delta_gamma_var(
+    book: &EquityPortfolio,
+    spot: f64,
+    cfg: &RiskConfig,
+) -> Result<PortfolioRisk, RustyQLibError> {
+    cfg.validate()?;
+    validate_spot(book, spot)?;
     let g = book.greeks();
     let pnl: Vec<f64> = (0..cfg.scenarios as u64)
         .map(|i| {
@@ -97,8 +162,15 @@ pub fn delta_gamma_var(book: &EquityPortfolio, spot: f64, cfg: &RiskConfig) -> P
 /// whole book via [`EquityOption::price_bumped`]
 /// (crate::equity::vanilla_option::EquityOption::price_bumped) — same
 /// scenarios as [`delta_gamma_var`], so the difference isolates the
-/// Taylor error.
-pub fn full_revaluation_var(book: &EquityPortfolio, spot: f64, cfg: &RiskConfig) -> PortfolioRisk {
+/// Taylor error. Errors on an invalid [`RiskConfig`] or a `spot` that
+/// disagrees with the book's own.
+pub fn full_revaluation_var(
+    book: &EquityPortfolio,
+    spot: f64,
+    cfg: &RiskConfig,
+) -> Result<PortfolioRisk, RustyQLibError> {
+    cfg.validate()?;
+    validate_spot(book, spot)?;
     let base: f64 = book
         .positions
         .iter()
@@ -128,13 +200,14 @@ pub fn full_revaluation_var(book: &EquityPortfolio, spot: f64, cfg: &RiskConfig)
     summarize(&pnl, cfg)
 }
 
-fn summarize(pnl: &[f64], cfg: &RiskConfig) -> PortfolioRisk {
-    PortfolioRisk {
-        var: historical_var(pnl, cfg.confidence),
-        expected_shortfall: historical_expected_shortfall(pnl, cfg.confidence),
+fn summarize(pnl: &[f64], cfg: &RiskConfig) -> Result<PortfolioRisk, RustyQLibError> {
+    let (var, expected_shortfall) = historical_var_es(pnl, cfg.confidence)?;
+    Ok(PortfolioRisk {
+        var,
+        expected_shortfall,
         mean_pnl: pnl.iter().sum::<f64>() / pnl.len() as f64,
         scenarios: pnl.len(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -181,15 +254,108 @@ mod tests {
             scenarios: 10_000,
             ..RiskConfig::default()
         };
-        let full = full_revaluation_var(&b, SPOT, &cfg);
+        let full = full_revaluation_var(&b, SPOT, &cfg).unwrap();
         assert!(
             full.var > 0.0 && full.var < value,
             "var {} value {value}",
             full.var
         );
         assert!(full.expected_shortfall >= full.var);
-        let dg = delta_gamma_var(&b, SPOT, &cfg);
+        let dg = delta_gamma_var(&b, SPOT, &cfg).unwrap();
         assert!(dg.expected_shortfall >= dg.var);
+    }
+
+    #[test]
+    fn invalid_configs_are_rejected_before_any_simulation() {
+        let b = book(&[(PutOrCall::Call, 100.0, 100.0)]);
+        let base = RiskConfig {
+            scenarios: 100,
+            ..RiskConfig::default()
+        };
+        // zero scenarios used to build an empty P&L sample and panic
+        // inside the quantile
+        let cases: [(RiskConfig, &str); 7] = [
+            (
+                RiskConfig {
+                    scenarios: 0,
+                    ..base
+                },
+                "scenarios",
+            ),
+            (
+                RiskConfig {
+                    confidence: 0.4,
+                    ..base
+                },
+                "confidence",
+            ),
+            (
+                RiskConfig {
+                    confidence: 1.0,
+                    ..base
+                },
+                "confidence",
+            ),
+            (
+                RiskConfig {
+                    horizon: 0.0,
+                    ..base
+                },
+                "horizon",
+            ),
+            (
+                RiskConfig {
+                    horizon: f64::INFINITY,
+                    ..base
+                },
+                "horizon",
+            ),
+            (
+                RiskConfig {
+                    spot_vol_corr: -1.5,
+                    ..base
+                },
+                "spot_vol_corr",
+            ),
+            (
+                RiskConfig {
+                    spot_vol: -0.2,
+                    ..base
+                },
+                "spot_vol",
+            ),
+        ];
+        for (cfg, field) in cases {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(field), "expected `{field}` in: {err}");
+            assert!(delta_gamma_var(&b, SPOT, &cfg).is_err(), "{field}");
+            assert!(full_revaluation_var(&b, SPOT, &cfg).is_err(), "{field}");
+        }
+        assert!(RiskConfig {
+            vol_of_vol: f64::NAN,
+            ..base
+        }
+        .validate()
+        .is_err());
+        assert!(base.validate().is_ok());
+    }
+
+    #[test]
+    fn a_spot_disagreeing_with_the_book_is_rejected() {
+        let b = book(&[(PutOrCall::Call, 100.0, 100.0)]);
+        let cfg = RiskConfig {
+            scenarios: 100,
+            ..RiskConfig::default()
+        };
+        // the book's own spot is accepted, a different one is not
+        assert!(delta_gamma_var(&b, SPOT, &cfg).is_ok());
+        for bad in [SPOT + 1e-6, 0.0, f64::NAN] {
+            let err = delta_gamma_var(&b, bad, &cfg).unwrap_err().to_string();
+            assert!(err.contains("spot"), "{bad}: {err}");
+            assert!(full_revaluation_var(&b, bad, &cfg).is_err(), "{bad}");
+        }
+        // an empty book has no spot to agree with
+        assert!(delta_gamma_var(&EquityPortfolio::new(), SPOT, &cfg).is_err());
     }
 
     #[test]
@@ -203,8 +369,8 @@ mod tests {
             vol_of_vol: 0.5,
             ..RiskConfig::default()
         };
-        let dg = delta_gamma_var(&b, SPOT, &cfg);
-        let full = full_revaluation_var(&b, SPOT, &cfg);
+        let dg = delta_gamma_var(&b, SPOT, &cfg).unwrap();
+        let full = full_revaluation_var(&b, SPOT, &cfg).unwrap();
         // one-day moves: the Taylor truncation is small
         assert!(
             (dg.var - full.var).abs() < 0.10 * full.var.max(1.0),
@@ -226,15 +392,15 @@ mod tests {
             (PutOrCall::Call, 100.0, -100.0),
             (PutOrCall::Call, 105.0, 100.0),
         ]);
-        let naked_var = full_revaluation_var(&naked, SPOT, &cfg).var;
-        let hedged_var = full_revaluation_var(&hedged, SPOT, &cfg).var;
+        let naked_var = full_revaluation_var(&naked, SPOT, &cfg).unwrap().var;
+        let hedged_var = full_revaluation_var(&hedged, SPOT, &cfg).unwrap().var;
         assert!(
             hedged_var < naked_var,
             "hedged {hedged_var} vs naked {naked_var}"
         );
         // for the short book the delta-gamma estimate must not report a
         // negative-loss (profit) VaR
-        assert!(delta_gamma_var(&naked, SPOT, &cfg).var > 0.0);
+        assert!(delta_gamma_var(&naked, SPOT, &cfg).unwrap().var > 0.0);
     }
 
     #[test]
@@ -255,8 +421,8 @@ mod tests {
             vol_of_vol: 0.8,
             ..RiskConfig::default()
         };
-        let base = full_revaluation_var(&b, SPOT, &no_vol).var;
-        let vol_aware = full_revaluation_var(&b, SPOT, &with_vol).var;
+        let base = full_revaluation_var(&b, SPOT, &no_vol).unwrap().var;
+        let vol_aware = full_revaluation_var(&b, SPOT, &with_vol).unwrap().var;
         assert!(vol_aware > base, "with vol {vol_aware} vs without {base}");
     }
 }

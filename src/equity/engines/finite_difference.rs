@@ -32,14 +32,95 @@ use crate::core::trade::PutOrCall;
 use crate::core::utils::ContractStyle;
 use crate::equity::barrier::{BarrierDirection, KnockType};
 use crate::equity::bump::BumpedMarket;
-use crate::equity::conventions::{RATE_BUMP, SPOT_REL_BUMP, VOLGA_BUMP, VOL_BUMP};
+use crate::equity::conventions::{
+    MIN_BUMPED_SPOT_FRAC, MIN_BUMPED_VOL, RATE_BUMP, SPOT_REL_BUMP, VOLGA_BUMP, VOL_BUMP,
+};
 use crate::equity::local_vol::{LocalVol, LocalVolGrid};
 use crate::equity::utils::Model;
 use crate::equity::utils::Payoff;
 use crate::equity::vanilla_option::{BarrierPayoff, EquityOption};
 
-const RANNACHER_STEPS: usize = 4;
+/// Fully-implicit starting layers (kink damping); shared with the 2-D
+/// Heston ADI engine.
+pub(crate) const RANNACHER_STEPS: usize = 4;
+/// Sub-samples for the cell-averaged terminal condition.
 const CELL_AVG_POINTS: usize = 16;
+
+/// Time-stepping weight of backward step `step`: fully implicit inside
+/// the Rannacher start, Crank-Nicolson afterwards.
+pub(crate) fn rannacher_theta(step: usize) -> f64 {
+    if step < RANNACHER_STEPS {
+        1.0
+    } else {
+        0.5
+    }
+}
+
+/// Bermudan exercise mask over the backward steps: backward step `s`
+/// covers calendar time `t - (s+1) dt`, so an exercise time (forward,
+/// 1-based grid index `g`) maps to `s = steps - g - 1`. `None` for the
+/// other exercise styles.
+pub(crate) fn bermudan_backward_mask(
+    style: &ContractStyle,
+    t: f64,
+    steps: usize,
+) -> Option<Vec<bool>> {
+    match style {
+        ContractStyle::Bermudan(times) => {
+            let mut mask = vec![false; steps];
+            for g in crate::core::utils::times_to_grid_steps(times, t, steps) {
+                if g < steps {
+                    mask[steps - g - 1] = true;
+                }
+            }
+            Some(mask)
+        }
+        _ => None,
+    }
+}
+
+/// Half-width of the log-spot grid around `ln S0`: `grid_stdevs` standard
+/// deviations plus the drift over the horizon plus the log-distance to
+/// the strike.
+pub(crate) fn grid_half_width(
+    grid_stdevs: f64,
+    sigma_ref: f64,
+    t: f64,
+    r: f64,
+    q: f64,
+    strike: f64,
+    s0: f64,
+) -> f64 {
+    let drift_width = ((r - q - 0.5 * sigma_ref * sigma_ref) * t).abs();
+    grid_stdevs * sigma_ref * t.sqrt() + drift_width + (strike / s0).ln().abs().max(1e-2)
+}
+
+/// Value and grid Greeks from the log-spot reads: chain rule from
+/// log-spot (`V_S = V_x / S`, `V_SS = (V_xx - V_x) / S^2`) and calendar
+/// theta from the last two time layers.
+pub(crate) fn grid_solution(
+    npv: f64,
+    delta_x: f64,
+    gamma_x: f64,
+    s0: f64,
+    theta_layer_value: f64,
+    steps: usize,
+    dt: f64,
+) -> FdSolution {
+    let delta = delta_x / s0;
+    let gamma = (gamma_x - delta_x) / (s0 * s0);
+    let theta = if steps >= 2 {
+        (theta_layer_value - npv) / dt
+    } else {
+        0.0
+    };
+    FdSolution {
+        npv,
+        delta,
+        gamma,
+        theta,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FdConfig {
@@ -222,7 +303,7 @@ pub fn pricing_result(option: &EquityOption) -> crate::core::results::PricingRes
     );
     let rho = (rate_up.npv - rate_down.npv) / (2.0 * hr);
     let charm = (spot_up.theta - spot_down.theta) / (2.0 * hs);
-    let gamma_p = option.market.spot.value() * base.gamma / 100.0;
+    let gamma_p = crate::equity::greeks::gamma_p_from(option.market.spot.value(), base.gamma);
     PricingResult {
         pv: base.npv,
         greeks: Greeks {
@@ -249,7 +330,19 @@ fn solve_dispatch(
 ) -> FdSolution {
     let t = option.time_to_maturity();
     assert!(t >= 0.0, "Option is expired or negative time");
-    let s0 = option.market.spot.value() + spot_bump;
+    // The bumped spot and vol are floored exactly like a `BumpedMarket`
+    // read (a deep spot-down stress, a vega down-bump on a tiny-vol
+    // option) so the stencil legs price at the floor instead of tripping
+    // the positivity asserts. The *effective* shift is what reaches the
+    // solvers, so their own recomputation sees the floored value; an
+    // unfloored shift passes through untouched (bit-identical).
+    let spot = option.market.spot.value();
+    let s0 = (spot + spot_bump).max(spot * MIN_BUMPED_SPOT_FRAC);
+    let spot_bump = if s0 == spot + spot_bump {
+        spot_bump
+    } else {
+        s0 - spot
+    };
     assert!(s0 > 0.0, "underlying price must be positive");
     if t == 0.0 {
         let mut sol = FdSolution::zero();
@@ -258,8 +351,17 @@ fn solve_dispatch(
     }
 
     if option.model.is_heston() {
+        // the ADI engine floors its own vol-parameter shift
         return crate::equity::heston_adi::solve(option, sigma_bump, r_bump, spot_bump);
     }
+
+    let vol = option.volatility();
+    let sigma_ref = (vol + sigma_bump).max(MIN_BUMPED_VOL);
+    let sigma_bump = if sigma_ref == vol + sigma_bump {
+        sigma_bump
+    } else {
+        sigma_ref - vol
+    };
 
     if let Some(barrier) = option.payoff.as_any().downcast_ref::<BarrierPayoff>() {
         assert!(
@@ -326,21 +428,7 @@ fn solve(
     let sigma_ref = option.volatility() + sigma_bump;
     assert!(sigma_ref > 0.0, "volatility must be positive");
     let american = matches!(payoff.exercise_style(), ContractStyle::American);
-    // Bermudan: backward step s covers calendar time t-(s+1)dt, so an
-    // exercise time tm (forward, 1-based grid index g) maps to s = steps-g-1
-    let bermudan_backward: Option<Vec<bool>> = match payoff.exercise_style() {
-        ContractStyle::Bermudan(times) => {
-            let steps_total = cfg.time_steps;
-            let mut mask = vec![false; steps_total];
-            for g in crate::core::utils::times_to_grid_steps(times, t, steps_total) {
-                if g < steps_total {
-                    mask[steps_total - g - 1] = true;
-                }
-            }
-            Some(mask)
-        }
-        _ => None,
-    };
+    let bermudan_backward = bermudan_backward_mask(payoff.exercise_style(), t, cfg.time_steps);
     let put = matches!(payoff.put_or_call(), PutOrCall::Put);
 
     let vol_field = match option.model {
@@ -370,9 +458,7 @@ fn solve(
     // grid edge (absorbing boundary); otherwise the grid centers on x0.
     let x0 = s0.ln();
     let r_flat = option.risk_free_rate() + r_bump;
-    let drift_width = ((r_flat - q - 0.5 * sigma_ref * sigma_ref) * t).abs();
-    let half_width =
-        cfg.grid_stdevs * sigma_ref * t.sqrt() + drift_width + (strike / s0).ln().abs().max(1e-2);
+    let half_width = grid_half_width(cfg.grid_stdevs, sigma_ref, t, r_flat, q, strike, s0);
     let (x_min, x_max, barrier_low, barrier_high) = match knock_out {
         Some(b) if b.direction == BarrierDirection::Down => {
             (b.barrier.ln(), x0 + half_width, true, false)
@@ -408,8 +494,11 @@ fn solve(
         })
         .collect();
 
-    // cash dividend ex-dates as year fractions inside the option's life
-    let cash_divs: Vec<(f64, f64)> = option
+    // cash dividend ex-dates as year fractions inside the option's life;
+    // a dividend going ex on the maturity date is applied to the terminal
+    // condition (the backward march only crosses ex-dates strictly inside
+    // its steps), so it is kept out of the in-loop list
+    let (terminal_divs, cash_divs): (Vec<(f64, f64)>, Vec<(f64, f64)>) = option
         .market
         .cash_dividends
         .iter()
@@ -417,12 +506,25 @@ fn solve(
             let td = crate::equity::conventions::year_fraction(option.market.valuation_date, *date);
             (td > 0.0 && td <= t).then_some((td, *amount))
         })
-        .collect();
+        .partition(|(td, _)| *td >= t - 1e-12);
 
     // terminal condition: cell-averaged payoff
     let mut v: Vec<f64> = (0..=n)
         .map(|i| cell_average_payoff(payoff, strike, x_at(i), dx))
         .collect();
+    // a dividend on the maturity date: the payoff is observed on the
+    // ex-dividend price, V(S, T^-) = payoff(S - D)
+    let terminal_div: f64 = terminal_divs.iter().map(|(_, amount)| *amount).sum();
+    if terminal_div > 0.0 {
+        v = shift_for_dividend(&v, &s_grid, x_min, dx, terminal_div);
+        if american {
+            for i in 0..=n {
+                if v[i] < exercise[i] {
+                    v[i] = exercise[i];
+                }
+            }
+        }
+    }
     if barrier_low {
         v[0] = 0.0;
     }
@@ -453,7 +555,7 @@ fn solve(
             || bermudan_backward
                 .as_ref()
                 .is_some_and(|m| m.get(step).copied().unwrap_or(false));
-        let theta_w = if step < RANNACHER_STEPS { 1.0 } else { 0.5 };
+        let theta_w = rannacher_theta(step);
         let r_step = step_rates[step];
         let calendar_mid = (t - (step as f64 + 0.5) * dt).max(0.0);
         cum_df *= (-r_step * dt).exp();
@@ -520,20 +622,15 @@ fn solve(
                 .map(|(_, amount)| *amount)
                 .sum();
             if crossing > 0.0 {
-                let shifted: Vec<f64> = (0..=n)
-                    .map(|i| {
-                        let s_target = s_grid[i] - crossing;
-                        if s_target <= s_grid[0] {
-                            v[0]
-                        } else {
-                            let x_target = s_target.ln();
-                            let j = (((x_target - x_min) / dx).floor() as usize).min(n - 1);
-                            let w = ((x_target - x_at(j)) / dx).clamp(0.0, 1.0);
-                            v[j] * (1.0 - w) + v[j + 1] * w
-                        }
-                    })
-                    .collect();
-                v = shifted;
+                v = shift_for_dividend(&v, &s_grid, x_min, dx, crossing);
+                // the re-sampling reads interior values into the edge
+                // nodes: an absorbing barrier edge must stay at zero
+                if barrier_low {
+                    v[0] = 0.0;
+                }
+                if barrier_high {
+                    v[n] = 0.0;
+                }
                 if exercise_now {
                     for i in 0..=n {
                         if v[i] < exercise[i] {
@@ -550,20 +647,27 @@ fn solve(
     }
 
     let (npv, delta_x, gamma_x) = read_grid(&v, x_min, dx, x0);
-    // chain rule from log-spot: V_S = V_x / S, V_SS = (V_xx - V_x) / S^2
-    let delta = delta_x / s0;
-    let gamma = (gamma_x - delta_x) / (s0 * s0);
-    let theta = if steps >= 2 {
-        (theta_layer_value - npv) / dt
-    } else {
-        0.0
-    };
-    FdSolution {
-        npv,
-        delta,
-        gamma,
-        theta,
-    }
+    grid_solution(npv, delta_x, gamma_x, s0, theta_layer_value, steps, dt)
+}
+
+/// Cash dividend jump condition `V(S, t_ex^-) = V(S - D, t_ex^+)`: the
+/// layer re-sampled at the ex-dividend spot by linear interpolation in
+/// log-spot (nodes shifted below the grid take the lowest node's value).
+fn shift_for_dividend(v: &[f64], s_grid: &[f64], x_min: f64, dx: f64, crossing: f64) -> Vec<f64> {
+    let n = v.len() - 1;
+    (0..=n)
+        .map(|i| {
+            let s_target = s_grid[i] - crossing;
+            if s_target <= s_grid[0] {
+                v[0]
+            } else {
+                let x_target = s_target.ln();
+                let j = (((x_target - x_min) / dx).floor() as usize).min(n - 1);
+                let w = ((x_target - (x_min + j as f64 * dx)) / dx).clamp(0.0, 1.0);
+                v[j] * (1.0 - w) + v[j + 1] * w
+            }
+        })
+        .collect()
 }
 
 /// Quadratic fit through the three nodes nearest `x0`:
@@ -577,8 +681,9 @@ fn read_grid(v: &[f64], x_min: f64, dx: f64, x0: f64) -> (f64, f64, f64) {
     (v[i] + b * e + c * e * e, b + 2.0 * c * e, 2.0 * c)
 }
 
-/// Average of the payoff over the grid cell `[x - dx/2, x + dx/2]`.
-fn cell_average_payoff(payoff: &dyn Payoff, strike: f64, x: f64, dx: f64) -> f64 {
+/// Average of the payoff over the grid cell `[x - dx/2, x + dx/2]`
+/// (log-spot `x`); shared with the Heston ADI engine.
+pub(crate) fn cell_average_payoff(payoff: &dyn Payoff, strike: f64, x: f64, dx: f64) -> f64 {
     let k = CELL_AVG_POINTS;
     let mut sum = 0.0;
     for j in 0..k {
@@ -586,4 +691,165 @@ fn cell_average_payoff(payoff: &dyn Payoff, strike: f64, x: f64, dx: f64) -> f64
         sum += payoff.payoff(xi.exp(), strike);
     }
     sum / k as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::traits::Instrument;
+    use crate::equity::builder::EquityOptionBuilder;
+    use crate::equity::bump::Bump;
+    use crate::equity::utils::Engine;
+    use chrono::NaiveDate;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    /// A one-year FD call at `vol`.
+    fn call_at_vol(vol: f64) -> EquityOption {
+        EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(vol)
+            .flat_rate(0.03)
+            .valuation_date(date(2026, 1, 1))
+            .maturity_date(date(2027, 1, 1))
+            .vanilla(PutOrCall::Call)
+            .engine(Engine::FiniteDifference)
+            .fd_grid(200, 200)
+            .build()
+            .expect("option must build")
+    }
+
+    #[test]
+    fn degenerate_vol_bumps_price_at_the_floor_instead_of_panicking() {
+        // the FD engine took its bumps as raw scalars, bypassing the
+        // BumpedMarket floors: a vega/volga down-bump larger than a
+        // tiny-vol option's own vol tripped `sigma_ref > 0`
+        let option = call_at_vol(0.005);
+        // VOLGA_BUMP is 1e-2, twice this option's volatility
+        let volga = volga(&option);
+        assert!(volga.is_finite(), "volga must be finite, got {volga}");
+        for greek in [vega(&option), vanna(&option), zomma(&option)] {
+            assert!(greek.is_finite(), "every vol Greek must be finite");
+        }
+
+        // past the floor every bump prices the same solve, bit for bit
+        let crushed =
+            |d_vol: f64| option.price_bumped(&BumpedMarket::new(&option.market, Bump::vol(d_vol)));
+        assert_eq!(crushed(-0.05), crushed(-0.10));
+        // and that solve is the option quoted at the floor volatility
+        let at_floor = call_at_vol(MIN_BUMPED_VOL).npv();
+        assert!(
+            (crushed(-0.05) - at_floor).abs() < 1e-9,
+            "the floored bump must price at MIN_BUMPED_VOL: {} vs {at_floor}",
+            crushed(-0.05)
+        );
+    }
+
+    #[test]
+    fn a_deep_spot_down_stress_prices_at_the_spot_floor() {
+        // the same bypass on the spot axis: a stress below zero used to
+        // trip `s0 > 0` instead of pricing at the floored spot
+        let put = EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.30)
+            .flat_rate(0.03)
+            .valuation_date(date(2026, 1, 1))
+            .maturity_date(date(2027, 1, 1))
+            .vanilla(PutOrCall::Put)
+            .engine(Engine::FiniteDifference)
+            .fd_grid(200, 200)
+            .build()
+            .expect("option must build");
+        let crushed = put.price_bumped(&BumpedMarket::new(&put.market, Bump::spot(-150.0)));
+        assert!(crushed.is_finite(), "the stress must value, got {crushed}");
+        // a put on a spot pinned just above zero is worth ~ the
+        // discounted strike
+        assert!(crushed > 90.0, "deep-crash put must be near max: {crushed}");
+    }
+
+    #[test]
+    fn a_dividend_going_ex_on_the_maturity_date_reaches_the_terminal_condition() {
+        // The backward march only crosses ex-dates strictly inside its
+        // steps, so a dividend dated on the maturity date was filtered in
+        // but never applied — the option priced dividend-free. It belongs
+        // in the terminal condition: payoff(S_T - D), which for a call is
+        // exactly the payoff of a call struck at K + D.
+        let build = |strike: f64, dividend: Option<f64>, engine: Engine| {
+            let mut b = EquityOptionBuilder::new()
+                .spot(100.0)
+                .strike(strike)
+                .flat_vol(0.20)
+                .flat_rate(0.05)
+                .valuation_date(date(2026, 1, 1))
+                .maturity_date(date(2027, 1, 1))
+                .vanilla(PutOrCall::Call)
+                .engine(engine)
+                .fd_grid(800, 400);
+            if let Some(amount) = dividend {
+                b = b.cash_dividend(date(2027, 1, 1), amount);
+            }
+            b.build().expect("option must build")
+        };
+        let with_dividend = build(100.0, Some(5.0), Engine::FiniteDifference).npv();
+        let shifted_strike = build(105.0, None, Engine::FiniteDifference).npv();
+        let analytic = build(105.0, None, Engine::BlackScholes).npv();
+        assert!(
+            (with_dividend - shifted_strike).abs() < 0.05,
+            "K=100 with a 5.00 terminal dividend must price as K=105: \
+             {with_dividend} vs {shifted_strike}"
+        );
+        assert!(
+            (with_dividend - analytic).abs() < 0.05,
+            "and match the closed form: {with_dividend} vs {analytic}"
+        );
+        // the regression itself: the dividend must not be dropped
+        let no_dividend = build(100.0, None, Engine::FiniteDifference).npv();
+        assert!(
+            no_dividend - with_dividend > 2.0,
+            "a 5.00 dividend at expiry must cost ~2.4 of premium: \
+             {no_dividend} vs {with_dividend}"
+        );
+    }
+
+    #[test]
+    fn a_dividend_jump_cannot_revive_the_absorbing_barrier_node() {
+        // The dividend re-samples every node at S - D, which pulls an
+        // interior value into the knocked-out edge node. With the ex-date
+        // inside the last backward step nothing re-imposes the boundary
+        // afterwards, so a spot hugging the barrier was valued as if it
+        // had already jumped D below it.
+        let up_and_out = |spot: f64, dividend: Option<(NaiveDate, f64)>| {
+            let mut b = EquityOptionBuilder::new()
+                .spot(spot)
+                .strike(100.0)
+                .flat_vol(0.25)
+                .flat_rate(0.03)
+                .valuation_date(date(2026, 1, 1))
+                .maturity_date(date(2027, 1, 1))
+                .barrier(PutOrCall::Call, BarrierDirection::Up, KnockType::Out, 120.0)
+                .engine(Engine::FiniteDifference)
+                .fd_grid(200, 200);
+            if let Some((ex_date, amount)) = dividend {
+                b = b.cash_dividend(ex_date, amount);
+            }
+            b.build().expect("option must build").npv()
+        };
+        // the value the leak would import: the same contract valued at
+        // the post-dividend spot, far from the barrier
+        let below = up_and_out(79.9, None);
+        assert!(below > 0.1, "the reference leg must be worth something");
+        // a spot 0.1 below the barrier with a 40.00 dividend going ex
+        // tomorrow: knock-out is all but certain before the jump
+        let hugging = up_and_out(119.9, Some((date(2026, 1, 2), 40.0)));
+        assert!(hugging >= 0.0, "a knock-out value cannot be negative");
+        assert!(
+            hugging < 0.7 * below,
+            "the absorbing edge must survive the dividend jump: {hugging} \
+             against the post-jump value {below}"
+        );
+    }
 }

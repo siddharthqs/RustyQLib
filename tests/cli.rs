@@ -262,12 +262,76 @@ fn risk_method_flag_selects_one_estimator() {
 
 #[test]
 fn risk_rejects_invalid_confidence() {
+    // a one-sided VaR level must sit in (0.5, 1): 0.4 is the wrong tail
+    // and used to reach the estimator and panic in the quantile
+    for confidence in ["1.5", "0.4", "0.5", "0", "1"] {
+        cli()
+            .args(["risk", "--confidence", confidence, "-i"])
+            .arg(fixture("portfolio.json"))
+            .assert()
+            .code(1)
+            .stdout(predicates::str::is_empty())
+            .stderr(contains(
+                "--confidence must be strictly between 0.5 and 1",
+            ));
+    }
+    // just inside the range still runs
     cli()
-        .args(["risk", "--confidence", "1.5", "-i"])
+        .args(["risk", "--confidence", "0.51", "--scenarios", "200", "-i"])
+        .arg(fixture("portfolio.json"))
+        .assert()
+        .success();
+}
+
+#[test]
+fn risk_rejects_zero_scenarios_and_bad_horizons() {
+    // zero scenarios used to build an empty P&L sample and panic
+    cli()
+        .args(["risk", "--scenarios", "0", "-i"])
         .arg(fixture("portfolio.json"))
         .assert()
         .code(1)
-        .stderr(contains("--confidence must be strictly between 0 and 1"));
+        .stdout(predicates::str::is_empty())
+        .stderr(contains("--scenarios must be at least 1"));
+    for horizon in ["0", "inf", "NaN"] {
+        cli()
+            .args(["risk", "--horizon-days", horizon, "-i"])
+            .arg(fixture("portfolio.json"))
+            .assert()
+            .code(1)
+            .stderr(contains("--horizon-days must be finite and positive"));
+    }
+    cli()
+        .args(["risk", "--corr", "-1.5", "-i"])
+        .arg(fixture("portfolio.json"))
+        .assert()
+        .code(1)
+        .stderr(contains("--corr must be in [-1, 1]"));
+}
+
+#[test]
+fn risk_rejects_a_portfolio_that_disagrees_with_itself() {
+    // same underlying, two different spots: the estimators generate
+    // scenarios off one spot and would reprice off another
+    let mixed = std::fs::read_to_string(fixture("portfolio.json"))
+        .unwrap()
+        .replacen("\"underlying_price\": 100.0", "\"underlying_price\": 120.0", 1);
+    cli()
+        .args(["risk", "-i", "-"])
+        .write_stdin(mixed)
+        .assert()
+        .code(1)
+        .stderr(contains("must quote one spot"));
+    // and two valuation dates
+    let dated = std::fs::read_to_string(fixture("portfolio.json"))
+        .unwrap()
+        .replacen("\"valuation_date\": \"2026-01-01\"", "\"valuation_date\": \"2026-01-02\"", 1);
+    cli()
+        .args(["risk", "-i", "-"])
+        .write_stdin(dated)
+        .assert()
+        .code(1)
+        .stderr(contains("must share one valuation date"));
 }
 
 #[test]
@@ -306,6 +370,61 @@ fn implied_vol_round_trips_the_golden_price() {
     ]));
     let vol = report["implied_vol"].as_f64().unwrap();
     assert!((vol - 0.25).abs() < 1e-6, "implied vol {vol}");
+}
+
+/// Degenerate inputs used to sail past the guard and print an answer:
+/// `--maturity inf` reported the solver's vol cap, `--spot 0` its
+/// initial guess.
+#[test]
+fn implied_vol_rejects_degenerate_inputs() {
+    // clap rejects a repeated flag outright, so the degenerate value has
+    // to *replace* the sane one rather than be appended after it
+    let run = |flag: &str, value: &str| {
+        let mut base = vec![
+            "implied-vol",
+            "--spot",
+            "100",
+            "--strike",
+            "100",
+            "--maturity",
+            "1.0",
+            "-p",
+            "C",
+            "--price",
+            "10",
+        ];
+        let at = base
+            .iter()
+            .position(|a| *a == flag)
+            .expect("the flag under test must be in the base command");
+        base[at + 1] = value;
+        cli().args(base).assert()
+    };
+    // negative values would be rejected by clap itself (these flags do
+    // not allow leading hyphens), so the guards are exercised with the
+    // values that do reach them
+    for (flag, value) in [
+        ("--maturity", "inf"),
+        ("--maturity", "NaN"),
+        ("--maturity", "0"),
+    ] {
+        run(flag, value)
+            .code(1)
+            .stdout(predicates::str::is_empty())
+            .stderr(contains("--maturity must be a finite time in the future"));
+    }
+    for (flag, value) in [
+        ("--spot", "0"),
+        ("--spot", "inf"),
+        ("--strike", "0"),
+        ("--strike", "NaN"),
+        ("--price", "0"),
+    ] {
+        run(flag, value)
+            .code(1)
+            .stdout(predicates::str::is_empty())
+            .stderr(contains(format!("{flag} must be finite and positive")));
+    }
 }
 
 #[test]
@@ -698,6 +817,64 @@ fn fetch_chain_requires_a_symbol_and_rejects_date() {
         .assert()
         .code(1)
         .stderr(contains("omit --date"));
+}
+
+/// --symbol and --normalize used to be accepted and silently ignored by
+/// every source but `chain`, quietly handing back a different document.
+#[test]
+fn fetch_rejects_chain_only_flags_on_other_sources() {
+    for source in ["ust", "sofr", "effr"] {
+        let file = if source == "ust" {
+            fixture("ust_par_yields_2026.csv")
+        } else {
+            fixture("nyfed_sofr.json")
+        };
+        cli()
+            .args(["fetch", source, "--symbol", "AAPL", "--from-file"])
+            .arg(&file)
+            .assert()
+            .code(1)
+            .stdout(predicates::str::is_empty())
+            .stderr(contains("--symbol only applies to the chain source"));
+        cli()
+            .args(["fetch", source, "--normalize", "--from-file"])
+            .arg(&file)
+            .assert()
+            .code(1)
+            .stderr(contains("--normalize only applies to the chain source"));
+    }
+    // the chain source still takes both
+    cli()
+        .args([
+            "fetch",
+            "chain",
+            "--symbol",
+            "AAPL",
+            "--normalize",
+            "--from-file",
+        ])
+        .arg(fixture("cboe_chain_sample.json"))
+        .assert()
+        .success();
+}
+
+#[test]
+fn price_directory_without_contract_files_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_dir = dir.path().join("in");
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&in_dir).unwrap();
+    // a file this command does not price, so the directory is "empty"
+    std::fs::write(in_dir.join("notes.txt"), "not a contract").unwrap();
+    cli()
+        .env_remove("RUST_LOG")
+        .args(["price", "-i"])
+        .arg(&in_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .assert()
+        .success()
+        .stderr(contains("no .json or .xml contract files"));
 }
 
 #[test]

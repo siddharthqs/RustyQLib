@@ -19,66 +19,11 @@
 //! (no scaling); `ifft` includes the `1/n` factor, so `ifft(fft(x))`
 //! is the identity.
 
-/// Complex number in rectangular form, the transform's element type.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Complex {
-    pub re: f64,
-    pub im: f64,
-}
-
-impl Complex {
-    pub const ZERO: Complex = Complex { re: 0.0, im: 0.0 };
-
-    pub fn new(re: f64, im: f64) -> Complex {
-        Complex { re, im }
-    }
-
-    /// `e^{i theta}` on the unit circle.
-    pub fn cis(theta: f64) -> Complex {
-        Complex {
-            re: theta.cos(),
-            im: theta.sin(),
-        }
-    }
-
-    pub fn conj(self) -> Complex {
-        Complex {
-            re: self.re,
-            im: -self.im,
-        }
-    }
-
-    pub fn scale(self, s: f64) -> Complex {
-        Complex {
-            re: self.re * s,
-            im: self.im * s,
-        }
-    }
-}
-
-impl std::ops::Add for Complex {
-    type Output = Complex;
-    fn add(self, o: Complex) -> Complex {
-        Complex::new(self.re + o.re, self.im + o.im)
-    }
-}
-
-impl std::ops::Sub for Complex {
-    type Output = Complex;
-    fn sub(self, o: Complex) -> Complex {
-        Complex::new(self.re - o.re, self.im - o.im)
-    }
-}
-
-impl std::ops::Mul for Complex {
-    type Output = Complex;
-    fn mul(self, o: Complex) -> Complex {
-        Complex::new(
-            self.re * o.re - self.im * o.im,
-            self.re * o.im + self.im * o.re,
-        )
-    }
-}
+/// The transform's element type — the core's shared
+/// [`Complex`](crate::core::complex::Complex), re-exported here so FFT
+/// consumers (and the public rough Bergomi scratch-buffer signatures)
+/// keep naming it through this module.
+pub use crate::core::complex::Complex;
 
 /// Forward DFT, in place, any length (radix-2 for powers of two,
 /// Bluestein otherwise). No scaling.

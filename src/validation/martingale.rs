@@ -71,6 +71,13 @@ pub struct MartingaleReport {
     pub worst_relative_error: f64,
     /// All |z| within the configured threshold.
     pub within_threshold: bool,
+    /// Why there is no usable verdict, when `within_threshold` is false
+    /// for a reason other than the z-scores: no usable targets, a
+    /// non-positive spot (every path would be NaN), or a simulation that
+    /// produced a non-finite mean. `None` when the check ran normally —
+    /// a `false` verdict with no reason is a genuine z-score failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub paths: usize,
     pub seed: u64,
 }
@@ -80,6 +87,12 @@ pub struct MartingaleReport {
 /// see the module docs for why the targets are supplied rather than
 /// derived. Targets must have positive times and forwards; they are
 /// checked in time order.
+///
+/// This returns a report rather than a `Result` so it can ride along in
+/// a usability document unconditionally: an input the simulation cannot
+/// run on (no usable targets, a non-positive spot) comes back as
+/// `within_threshold = false` with [`MartingaleReport::reason`] set,
+/// never as a NaN verdict.
 pub fn martingale_report(
     local_vol: &dyn Fn(f64, f64) -> f64,
     curve: &YieldCurve,
@@ -102,11 +115,25 @@ pub fn martingale_report(
         max_abs_z: 0.0,
         worst_relative_error: 0.0,
         within_threshold: true,
+        reason: None,
         paths: pairs * 2,
         seed: config.seed,
     };
+    // a non-positive or non-finite spot makes every log-path NaN, which
+    // used to surface as a z-score of infinity; say so instead of
+    // simulating garbage
+    if !(spot.is_finite() && spot > 0.0) {
+        report.within_threshold = false;
+        report.reason = Some(format!(
+            "spot must be finite and positive, got {spot}; no paths were simulated"
+        ));
+        report.paths = 0;
+        return report;
+    }
     if targets.is_empty() {
         report.within_threshold = false;
+        report.reason =
+            Some("no usable targets: each needs a positive time and forward".to_string());
         return report;
     }
 
@@ -173,12 +200,18 @@ pub fn martingale_report(
     }
 
     let n = pairs as f64;
+    let mut non_finite: Vec<String> = Vec::new();
     for (i, &(t, target)) in targets.iter().enumerate() {
         let mean = sums[i] / n;
         let variance = (sum_squares[i] / n - mean * mean).max(0.0);
         let standard_error = (variance / n).sqrt() / target;
         let relative_error = mean / target - 1.0;
-        let z_score = if standard_error > 0.0 {
+        // a simulation that blew up has no meaningful z-score: record it
+        // as a reason rather than reporting an infinite surprise
+        let z_score = if !mean.is_finite() {
+            non_finite.push(format!("t = {t}: simulated mean {mean}"));
+            f64::NAN
+        } else if standard_error > 0.0 {
             relative_error / standard_error
         } else if relative_error.abs() < 1e-12 {
             0.0
@@ -188,7 +221,7 @@ pub fn martingale_report(
         if z_score.abs() > report.max_abs_z {
             report.max_abs_z = z_score.abs();
         }
-        if relative_error.abs() > report.worst_relative_error.abs() {
+        if relative_error.is_finite() && relative_error.abs() > report.worst_relative_error.abs() {
             report.worst_relative_error = relative_error;
         }
         report.checks.push(MartingaleCheck {
@@ -201,6 +234,15 @@ pub fn martingale_report(
         });
     }
     report.within_threshold = report.max_abs_z <= config.z_threshold;
+    if !non_finite.is_empty() {
+        // NaN comparisons are all false, so a blown-up run would
+        // otherwise leave max_abs_z at 0 and "pass"
+        report.within_threshold = false;
+        report.reason = Some(format!(
+            "the simulation produced non-finite means ({})",
+            non_finite.join("; ")
+        ));
+    }
     report
 }
 
@@ -283,14 +325,75 @@ mod tests {
         assert!(!report.within_threshold);
         assert!(report.max_abs_z > 5.0, "z = {}", report.max_abs_z);
         assert!(report.worst_relative_error < -0.015, "{report:?}");
+        // a genuine z-score failure carries no reason: the numbers speak
+        assert_eq!(report.reason, None, "{report:?}");
         // determinism: same seed, same numbers
         let again = martingale_report(&|_, _| 0.2, &curve, 100.0, &bad_targets, &config);
         assert_eq!(
             report.checks[0].simulated_mean,
             again.checks[0].simulated_mean
         );
-        // no usable targets = no verdict
+        // no usable targets = no verdict, and it says why
         let empty = martingale_report(&|_, _| 0.2, &curve, 100.0, &[], &config);
         assert!(!empty.within_threshold);
+        assert!(
+            empty.reason.as_deref().unwrap().contains("no usable targets"),
+            "{:?}",
+            empty.reason
+        );
+        // targets with a non-positive time or forward are filtered out
+        let unusable = martingale_report(
+            &|_, _| 0.2,
+            &curve,
+            100.0,
+            &[(0.0, 100.0), (0.5, -1.0)],
+            &config,
+        );
+        assert!(!unusable.within_threshold && unusable.reason.is_some());
+    }
+
+    /// A non-positive spot makes every path NaN and used to report
+    /// `z = inf`; now it returns early with an explicit reason.
+    #[test]
+    fn a_non_positive_spot_returns_a_reason_not_an_infinite_z() {
+        let curve = curve(0.04);
+        let config = MartingaleConfig::default();
+        let targets = [(0.5, 100.0)];
+        for bad_spot in [0.0, -100.0, f64::NAN, f64::INFINITY] {
+            let report = martingale_report(&|_, _| 0.2, &curve, bad_spot, &targets, &config);
+            assert!(!report.within_threshold, "spot {bad_spot}");
+            let reason = report.reason.as_deref().expect("a reason is set");
+            assert!(reason.contains("spot must be finite and positive"), "{reason}");
+            assert!(report.checks.is_empty(), "nothing was simulated");
+            assert_eq!(report.paths, 0);
+            assert_eq!(report.max_abs_z, 0.0, "no infinite z-score");
+        }
+        // a good spot still runs and reports no reason
+        let ok = martingale_report(
+            &|_, _| 0.2,
+            &curve,
+            100.0,
+            &[(0.5, 100.0 * (0.04_f64 * 0.5).exp())],
+            &config,
+        );
+        assert!(ok.within_threshold && ok.reason.is_none(), "{ok:?}");
+    }
+
+    /// A local vol that poisons the paths cannot pass by leaving
+    /// `max_abs_z` at zero: NaN comparisons are all false.
+    #[test]
+    fn a_non_finite_simulation_fails_with_a_reason() {
+        let curve = curve(0.03);
+        let report = martingale_report(
+            &|_, _| f64::NAN,
+            &curve,
+            100.0,
+            &[(0.5, 100.0)],
+            &MartingaleConfig::default(),
+        );
+        assert!(!report.within_threshold, "{report:?}");
+        let reason = report.reason.as_deref().expect("a reason is set");
+        assert!(reason.contains("non-finite means"), "{reason}");
+        assert!(!report.checks[0].simulated_mean.is_finite());
     }
 }

@@ -18,11 +18,15 @@
 use chrono::NaiveDate;
 
 use crate::cmdty::forward_curve::CommodityForwardCurve;
-use crate::cmdty::swap::{business_days_in, period_average, PriceFixings};
+use crate::cmdty::swap::{
+    business_days_in, period_average, positive_annuity, PeriodSchedule, PriceFixings,
+};
 use crate::core::calendar::{BusinessDayConvention, Calendar, Frequency};
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
-use crate::rates::leg::{accrual_periods, AccrualPeriod};
+use crate::rates::leg::AccrualPeriod;
+
+const FIELD: &str = "commodity basis swap";
 
 /// A commodity basis swap from the point of view of the party
 /// **receiving index A plus the spread** and paying index B.
@@ -80,6 +84,12 @@ impl CommodityBasisSwap {
                 format!("maturity {maturity_date} must be after effective {effective_date}"),
             ));
         }
+        if payment_lag < 0 {
+            return Err(RustyQLibError::invalid_input(
+                "commodity basis swap",
+                format!("payment lag must be non-negative, got {payment_lag}"),
+            ));
+        }
         Ok(CommodityBasisSwap {
             quantity,
             spread,
@@ -118,17 +128,23 @@ impl CommodityBasisSwap {
         )
     }
 
+    /// The quantity-free calculation-period schedule (on `calendar_a`).
+    fn schedule(&self) -> PeriodSchedule<'_> {
+        PeriodSchedule {
+            field: FIELD,
+            effective: self.effective_date,
+            maturity: self.maturity_date,
+            frequency: self.frequency,
+            calendar: &self.calendar_a,
+            convention: self.convention,
+            payment_lag: self.payment_lag,
+        }
+    }
+
     /// The shared calculation periods, each with its lagged settlement
     /// date (schedule on `calendar_a`).
     pub fn periods(&self) -> Result<Vec<AccrualPeriod>, RustyQLibError> {
-        accrual_periods(
-            self.effective_date,
-            self.maturity_date,
-            self.frequency,
-            &self.calendar_a,
-            self.convention,
-            self.payment_lag,
-        )
+        self.schedule().periods()
     }
 
     /// One leg's averaging observations in a period: the business days
@@ -137,8 +153,10 @@ impl CommodityBasisSwap {
         business_days_in(calendar, period.start, period.end)
     }
 
-    /// Swap PV, both legs fully projected: per period,
-    /// `quantity * (avg_a + spread - avg_b) * df(payment)`.
+    /// Swap PV as of the discount curve's reference date, both legs
+    /// fully projected: per period,
+    /// `quantity * (avg_a + spread - avg_b) * df(payment)`. A seasoned
+    /// swap needs [`pv_with_fixings`](Self::pv_with_fixings).
     pub fn pv(
         &self,
         discount: &YieldCurve,
@@ -151,13 +169,14 @@ impl CommodityBasisSwap {
             forward_b,
             &PriceFixings::new(),
             &PriceFixings::new(),
-            self.effective_date,
+            discount.reference_date(),
         )
     }
 
     /// Swap PV mid-life: each leg blends its own realized fixings with
-    /// its forward curve, and periods already settled (payment before
-    /// `asof`) drop out.
+    /// its forward curve, and periods already settled (payment on or
+    /// before `asof`) drop out. `asof` may not precede the discount
+    /// curve's reference date.
     #[allow(clippy::too_many_arguments)]
     pub fn pv_with_fixings(
         &self,
@@ -169,8 +188,9 @@ impl CommodityBasisSwap {
         asof: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
         let mut pv = 0.0;
-        for period in self.unsettled_periods(asof)? {
+        for period in self.unsettled_periods(discount, asof)? {
             let avg_a = period_average(
+                FIELD,
                 &self.calendar_a,
                 period.start,
                 period.end,
@@ -179,6 +199,7 @@ impl CommodityBasisSwap {
                 asof,
             )?;
             let avg_b = period_average(
+                FIELD,
                 &self.calendar_b,
                 period.start,
                 period.end,
@@ -192,7 +213,8 @@ impl CommodityBasisSwap {
     }
 
     /// The fair spread on leg A: the differential that makes the PV
-    /// zero — the discount-weighted average of `avg_b - avg_a`.
+    /// zero — the discount-weighted average of `avg_b - avg_a` — as of
+    /// the discount curve's reference date.
     pub fn fair_spread(
         &self,
         discount: &YieldCurve,
@@ -205,7 +227,7 @@ impl CommodityBasisSwap {
             forward_b,
             &PriceFixings::new(),
             &PriceFixings::new(),
-            self.effective_date,
+            discount.reference_date(),
         )
     }
 
@@ -220,12 +242,7 @@ impl CommodityBasisSwap {
         fixings_b: &PriceFixings,
         asof: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
-        let annuity = self.settlement_annuity(discount, asof)?;
-        if annuity <= 0.0 {
-            return Err(RustyQLibError::NumericalError(format!(
-                "non-positive settlement annuity {annuity}"
-            )));
-        }
+        let annuity = positive_annuity(FIELD, self.discount_annuity(discount, asof)?)?;
         // PV is linear in the spread with slope quantity * annuity
         let mut zero_spread = self.clone();
         zero_spread.spread = 0.0;
@@ -239,7 +256,7 @@ impl CommodityBasisSwap {
     /// bump moves every period average one-for-one, whatever the day
     /// count). Exact, by linearity.
     pub fn delta_a(&self, discount: &YieldCurve) -> Result<f64, RustyQLibError> {
-        Ok(self.quantity * self.settlement_annuity(discount, self.effective_date)?)
+        Ok(self.quantity * self.discount_annuity(discount, discount.reference_date())?)
     }
 
     /// PV change per one-unit parallel increase of index B's forward
@@ -249,25 +266,23 @@ impl CommodityBasisSwap {
         Ok(-self.delta_a(discount)?)
     }
 
-    fn unsettled_periods(&self, asof: NaiveDate) -> Result<Vec<AccrualPeriod>, RustyQLibError> {
-        Ok(self
-            .periods()?
-            .into_iter()
-            .filter(|p| p.payment >= asof)
-            .collect())
+    fn unsettled_periods(
+        &self,
+        discount: &YieldCurve,
+        asof: NaiveDate,
+    ) -> Result<Vec<AccrualPeriod>, RustyQLibError> {
+        self.schedule().unsettled_periods(discount, asof)
     }
 
-    /// `sum df(pay_i)` over unsettled periods.
-    fn settlement_annuity(
+    /// `sum df(pay_i)` over unsettled periods — per unit of quantity,
+    /// unlike [`CommoditySwap::settlement_annuity`], which folds the
+    /// notional in.
+    fn discount_annuity(
         &self,
         discount: &YieldCurve,
         asof: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
-        Ok(self
-            .unsettled_periods(asof)?
-            .iter()
-            .map(|p| discount.df_date(p.payment))
-            .sum::<f64>())
+        self.schedule().discount_annuity(discount, asof)
     }
 }
 
@@ -349,7 +364,7 @@ mod tests {
         // September 2026: Labor Day (Sep 7) is a US holiday, so the NYSE
         // leg observes one day fewer than the weekends-only leg
         let swap = six_month_basis(0.0, Calendar::UsNyse);
-        let first = swap.periods().unwrap()[0].clone();
+        let first = swap.periods().unwrap()[0];
         let days_a = swap.pricing_days(&first, &swap.calendar_a);
         let days_b = swap.pricing_days(&first, &swap.calendar_b);
         assert_eq!(days_a.len(), 22);
@@ -395,7 +410,7 @@ mod tests {
         // 11 of September's 22 weekdays realized on each side
         let avg_a = (11.0 * 80.0 + 11.0 * 76.0) / 22.0;
         let avg_b = (11.0 * 71.0 + 11.0 * 72.0) / 22.0;
-        let period = swap.periods().unwrap()[0].clone();
+        let period = swap.periods().unwrap()[0];
         let expected = 10_000.0 * (avg_a - avg_b) * discount.df_date(period.payment);
         assert!((pv - expected).abs() < 1e-8, "{pv} vs {expected}");
         // valued after settlement the swap has nothing left
@@ -441,6 +456,46 @@ mod tests {
         assert!(
             CommodityBasisSwap::monthly(1e4, f64::NAN, e, m, cal.clone(), cal.clone()).is_err()
         );
-        assert!(CommodityBasisSwap::monthly(1e4, 0.0, e, e, cal.clone(), cal).is_err());
+        assert!(CommodityBasisSwap::monthly(1e4, 0.0, e, e, cal.clone(), cal.clone()).is_err());
+        // a negative payment lag is rejected at construction
+        assert!(CommodityBasisSwap::new(
+            1e4,
+            0.0,
+            e,
+            m,
+            Frequency::Monthly,
+            cal.clone(),
+            cal,
+            BusinessDayConvention::Unadjusted,
+            -1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn seasoned_valuation_needs_fixings_and_respects_the_reference_date() {
+        let asof = d(2026, 9, 16);
+        let discount = flat_discount(0.04, asof);
+        let forward = CommodityForwardCurve::flat(72.0, asof).unwrap();
+        let swap = six_month_basis(0.0, Calendar::WeekendsOnly);
+        // September's realized days cannot be read off the curve
+        assert!(swap.pv(&discount, &forward, &forward).is_err());
+        assert!(swap.fair_spread(&discount, &forward, &forward).is_err());
+        // an as-of before the curve's reference is rejected outright
+        let (fa, fb) = (PriceFixings::new(), PriceFixings::new());
+        assert!(swap
+            .pv_with_fixings(&discount, &forward, &forward, &fa, &fb, d(2026, 9, 1))
+            .is_err());
+        // a period paying exactly on the valuation date has settled
+        let settled = d(2026, 10, 8);
+        let late = flat_discount(0.04, settled);
+        let periods = swap.periods().unwrap();
+        assert_eq!(periods[0].payment, settled);
+        let annuity: f64 = periods
+            .iter()
+            .filter(|p| p.payment > settled)
+            .map(|p| late.df_date(p.payment))
+            .sum();
+        assert!((swap.delta_a(&late).unwrap() - 10_000.0 * annuity).abs() < 1e-10);
     }
 }

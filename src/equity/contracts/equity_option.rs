@@ -314,11 +314,16 @@ impl EquityOption {
     /// Black volatility for this option's strike and expiry, read off the
     /// surface (a flat surface returns its single vol).
     pub fn volatility(&self) -> f64 {
-        self.market.vol_surface.vol(
-            self.base.strike_price,
-            self.forward_price(),
-            self.time_to_maturity(),
-        )
+        let forward = self.forward_price();
+        // strike-less payoffs (forward-start, autocallable) name their own
+        // point on the surface; see `Payoff::vol_anchor_strike`
+        let strike = self
+            .payoff
+            .vol_anchor_strike(forward)
+            .unwrap_or(self.base.strike_price);
+        self.market
+            .vol_surface
+            .vol(strike, forward, self.time_to_maturity())
     }
     pub fn d1(&self) -> f64 {
         // Black-Scholes-Merton d1 on the escrowed spot and total carry
@@ -349,6 +354,29 @@ impl EquityOption {
     /// Implied Black-Scholes volatility for `option_price` (safeguarded
     /// Newton with arbitrage-bound checks); does not modify the option.
     pub fn try_imp_vol(&self, option_price: f64) -> Result<f64, RustyQLibError> {
+        if let Some(settlement) = self.base.futures_settlement {
+            // Black-76: the market spot IS the futures price F, and the
+            // discounted form is spot Black-Scholes with q = r (zero drift).
+            // A margined premium is the discounted one grown at r, so the
+            // target handed to the spot inverter is scaled back by e^{-rT}.
+            use crate::equity::black76::FuturesSettlement;
+            let f = self.market.spot.value();
+            let r = self.risk_free_rate();
+            let t = self.time_to_maturity();
+            let target = match settlement {
+                FuturesSettlement::Discounted => option_price,
+                FuturesSettlement::Margined => option_price * (-r * t).exp(),
+            };
+            return blackscholes::implied_vol_from_price(
+                f,
+                self.base.strike_price,
+                r,
+                r,
+                t,
+                target,
+                *self.payoff.put_or_call(),
+            );
+        }
         blackscholes::implied_vol_from_price(
             self.effective_spot(),
             self.base.strike_price,
@@ -401,6 +429,17 @@ impl EquityOption {
             }
             if american {
                 return unsupported("Black-76 supports European exercise only");
+            }
+            if !matches!(self.model, Model::Gbm) {
+                return unsupported(
+                    "Options on futures price with Black-76 under constant-vol dynamics \
+                     (Model::Gbm); Heston/SABR futures options are not supported",
+                );
+            }
+            if !matches!(self.payoff.payoff_kind(), PayoffType::Vanilla) {
+                return unsupported(
+                    "options on futures (Black-76) support the vanilla payoff only",
+                );
             }
         }
         if matches!(self.payoff.payoff_kind(), PayoffType::Chooser) {
@@ -532,6 +571,12 @@ impl EquityOption {
                          use MonteCarlo for path-dependent payoffs",
                     );
                 }
+                if !self.market.cash_dividends.is_empty() {
+                    return unsupported(
+                        "cash dividends are not supported on the Heston ADI engine; \
+                         use MonteCarlo",
+                    );
+                }
             }
             (Model::Heston(_), PricingEngine::BlackScholes) => {
                 if matches!(self.payoff.payoff_kind(), PayoffType::VarianceSwap) {
@@ -539,6 +584,15 @@ impl EquityOption {
                         "variance swaps under Heston dynamics price on the MonteCarlo \
                          engine; the Analytical engine replicates off the bound surface \
                          under Black-Scholes dynamics (Model::Gbm)",
+                    );
+                }
+                if !matches!(
+                    self.payoff.payoff_kind(),
+                    PayoffType::Vanilla | PayoffType::Binary
+                ) {
+                    return unsupported(
+                        "The Heston analytic pricer covers vanilla and binary payoffs; \
+                         use MonteCarlo for path-dependent payoffs",
                     );
                 }
             }
@@ -766,5 +820,135 @@ impl EquityOption {
             PricingEngine::Binomial(_) => binomial::npv(self, Some(m)),
             _ => BlackScholesPricer::price_bumped(self, m),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::trade::PutOrCall;
+    use crate::core::traits::Instrument;
+    use crate::equity::black76::FuturesSettlement;
+    use crate::equity::builder::EquityOptionBuilder;
+    use crate::equity::utils::Engine;
+
+    const VOL: f64 = 0.30;
+
+    #[test]
+    fn strikeless_payoffs_read_the_surface_at_their_own_anchor() {
+        // a skewed surface: 20% at the 80 strike down to 16% at 120, so
+        // reading at the placeholder strike (0 from JSON, 100 from the
+        // builder) instead of the contract's real anchor picks up a
+        // visibly different vol
+        use crate::core::curves::Tenor;
+        use crate::core::daycount::DayCountConvention;
+        use crate::core::vols::VolSurface;
+        let reference = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let maturity = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
+        let surface = VolSurface::from_strike_smiles(
+            &[Tenor::YearFraction(1.0)],
+            &[vec![(80.0, 0.20), (100.0, 0.18), (120.0, 0.16)]],
+            reference,
+            DayCountConvention::Act365,
+        )
+        .expect("surface must build");
+        let build = |b: EquityOptionBuilder, engine: Engine| {
+            b.symbol("SKEW")
+                .spot(100.0)
+                .flat_rate(0.0)
+                .vol_surface(surface.clone())
+                .valuation_date(reference)
+                .maturity_date(maturity)
+                .engine(engine)
+                .build()
+                .expect("option must build")
+        };
+
+        // forward-start at 105% of the fixing spot: the anchor is
+        // 1.05 * forward = 105, between the 100 and 120 pillars
+        let fwd_start = build(
+            EquityOptionBuilder::new().forward_start(PutOrCall::Call, 1.05, 0.5),
+            Engine::BlackScholes,
+        );
+        let expected = surface.vol(105.0, 100.0, 1.0);
+        assert!(
+            (fwd_start.volatility() - expected).abs() < 1e-12,
+            "forward-start read {} , expected the 105 anchor {expected}",
+            fwd_start.volatility()
+        );
+        // and it is genuinely different from the far put wing the
+        // placeholder strike would have selected
+        assert!((expected - surface.vol(0.0, 100.0, 1.0)).abs() > 0.01);
+
+        // an autocallable anchors at the ATM forward
+        // autocallables price on Monte Carlo only; the anchor is read the
+        // same way whatever the engine
+        let auto = build(
+            EquityOptionBuilder::new().autocallable(110.0, 70.0, 0.05, 4, 100.0),
+            Engine::MonteCarlo,
+        );
+        let atm = surface.vol(100.0, 100.0, 1.0);
+        assert!(
+            (auto.volatility() - atm).abs() < 1e-12,
+            "autocallable read {} , expected the ATM {atm}",
+            auto.volatility()
+        );
+    }
+
+    fn futures_option(settlement: FuturesSettlement, put_or_call: PutOrCall) -> EquityOption {
+        EquityOptionBuilder::new()
+            .symbol("FUT")
+            .spot(100.0) // the futures price F
+            .strike(110.0)
+            .flat_vol(VOL)
+            .flat_rate(0.05)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+            .vanilla(put_or_call)
+            .on_future(settlement)
+            .engine(Engine::BlackScholes)
+            .build()
+            .expect("futures option must build")
+    }
+
+    #[test]
+    fn implied_vol_round_trips_on_futures_options() {
+        // the solver used to invert *spot* Black-Scholes on the escrowed
+        // spot for a Black-76 contract: same S and K, but the wrong carry
+        // (q = 0 instead of q = r) and, for a margined premium, an
+        // undiscounted target — so it recovered a vol that was not the
+        // one that priced the option (or failed the arbitrage bounds).
+        for settlement in [FuturesSettlement::Discounted, FuturesSettlement::Margined] {
+            for pc in [PutOrCall::Call, PutOrCall::Put] {
+                let option = futures_option(settlement, pc);
+                let price = option.npv();
+                let vol = option
+                    .try_imp_vol(price)
+                    .unwrap_or_else(|e| panic!("{settlement:?} {pc:?} solve failed: {e}"));
+                assert!(
+                    (vol - VOL).abs() < 1e-6,
+                    "{settlement:?} {pc:?}: recovered {vol} from {price}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn futures_implied_vol_is_settlement_aware() {
+        // the two styles quote the same contract at premiums that differ
+        // by e^{-rT}: feeding one style's premium to the other must not
+        // return the same vol
+        let disc = futures_option(FuturesSettlement::Discounted, PutOrCall::Call);
+        let marg = futures_option(FuturesSettlement::Margined, PutOrCall::Call);
+        let marg_price = marg.npv();
+        assert!(marg_price > disc.npv(), "margined premium is undiscounted");
+        // the margined premium read as a discounted one implies a higher vol
+        let crossed = disc
+            .try_imp_vol(marg_price)
+            .expect("the margined premium is still inside the discounted bounds");
+        assert!(
+            crossed > VOL + 1e-3,
+            "a premium quoted futures-style implies a higher discounted vol: {crossed}"
+        );
     }
 }

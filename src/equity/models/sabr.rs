@@ -77,10 +77,10 @@ pub struct SabrParams {
 
 impl SabrParams {
     pub fn validate(&self) -> Result<(), RustyQLibError> {
-        if self.alpha <= 0.0 {
+        if !(self.alpha.is_finite() && self.alpha > 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "sabr params",
-                "SABR alpha must be positive".to_string(),
+                "SABR alpha must be positive and finite".to_string(),
             ));
         }
         if !(0.0..=1.0).contains(&self.beta) {
@@ -95,10 +95,10 @@ impl SabrParams {
                 "SABR rho must lie in (-1, 1)".to_string(),
             ));
         }
-        if self.nu < 0.0 {
+        if !(self.nu.is_finite() && self.nu >= 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "sabr params",
-                "SABR nu (vol-of-vol) must be non-negative".to_string(),
+                "SABR nu (vol-of-vol) must be non-negative and finite".to_string(),
             ));
         }
         Ok(())
@@ -1155,6 +1155,52 @@ mod tests {
         }
         .validate()
         .is_err());
+        // NaN and infinities slip past plain comparisons; the gate must
+        // catch them explicitly
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                SabrParams {
+                    alpha: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "alpha = {bad}"
+            );
+            assert!(
+                SabrParams {
+                    nu: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "nu = {bad}"
+            );
+            assert!(
+                SabrParams {
+                    beta: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "beta = {bad}"
+            );
+            assert!(
+                SabrParams {
+                    rho: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "rho = {bad}"
+            );
+        }
+        assert!(SabrParams {
+            nu: 0.0,
+            ..params()
+        }
+        .validate()
+        .is_ok());
         assert!(params().validate().is_ok());
     }
 

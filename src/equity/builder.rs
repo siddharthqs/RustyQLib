@@ -1491,20 +1491,11 @@ impl EquityOptionBuilder {
             }
             None => self.exercise_style.clone(),
         };
-        if self.futures_settlement.is_some() {
-            if !matches!(spec, PayoffSpec::Vanilla { .. }) {
-                return invalid(
-                    "on_future",
-                    "options on futures (Black-76) support the vanilla payoff only".to_string(),
-                );
-            }
-            if matches!(self.exercise_style, ContractStyle::American) {
-                return invalid(
-                    "on_future",
-                    "Black-76 supports European exercise only".to_string(),
-                );
-            }
-        }
+        // Options on futures (payoff, exercise, engine and model) are
+        // ruled on by `check_engine_support` at the end of build(), with
+        // the rest of the engine/model/payoff table — the checks used to
+        // be duplicated here, and covered only the payoff spec and the
+        // American flag.
 
         // ── model configuration ─────────────────────────────────────────
         match &self.model {
@@ -1904,6 +1895,157 @@ mod tests {
             matches!(result, Err(RustyQLibError::UnsupportedEngine(_))),
             "at-hit rebate on Monte Carlo must be refused at build()"
         );
+    }
+
+    /// The `UnsupportedEngine` message, or a panic naming what built.
+    fn refusal(result: Result<EquityOption, RustyQLibError>) -> String {
+        match result {
+            Err(RustyQLibError::UnsupportedEngine(msg)) => msg,
+            other => panic!(
+                "expected UnsupportedEngine, got {:?}",
+                other.map(|_| "an option")
+            ),
+        }
+    }
+
+    fn heston_params() -> HestonParams {
+        HestonParams {
+            v0: 0.09,
+            kappa: 2.0,
+            theta: 0.09,
+            vol_of_vol: 0.4,
+            rho: -0.7,
+        }
+    }
+
+    /// A builder carrying everything but the payoff, engine and model.
+    fn market() -> EquityOptionBuilder {
+        EquityOptionBuilder::new()
+            .spot(100.0)
+            .strike(100.0)
+            .flat_vol(0.2)
+            .flat_rate(0.05)
+            .valuation_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .maturity_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap())
+    }
+
+    #[test]
+    fn heston_analytic_refuses_path_dependent_payoffs() {
+        // the analytic Heston pricer integrates the vanilla/binary
+        // characteristic function; every other payoff used to reach the
+        // pricer's `_ => panic!` arm at pricing time (only variance swaps
+        // were refused here)
+        let with_payoff: Vec<(&str, EquityOptionBuilder)> = vec![
+            (
+                "barrier",
+                market().barrier(PutOrCall::Call, BarrierDirection::Up, KnockType::Out, 130.0),
+            ),
+            (
+                "asian",
+                market().asian(
+                    PutOrCall::Call,
+                    AveragingType::Arithmetic,
+                    AsianStrikeType::FixedStrike,
+                ),
+            ),
+            (
+                "lookback",
+                market().lookback(
+                    PutOrCall::Call,
+                    crate::equity::vanilla_option::LookbackType::FloatingStrike,
+                ),
+            ),
+            (
+                "forward start",
+                market().forward_start(PutOrCall::Call, 1.0, 0.5),
+            ),
+        ];
+        for (name, builder) in with_payoff {
+            let msg = refusal(
+                builder
+                    .heston(heston_params())
+                    .engine(Engine::BlackScholes)
+                    .build(),
+            );
+            assert!(
+                msg.contains("Heston analytic pricer"),
+                "{name} under Heston must name the analytic pricer: {msg}"
+            );
+        }
+        // the payoffs the characteristic function does cover still build
+        for builder in [
+            market().vanilla(PutOrCall::Call),
+            market().binary(PutOrCall::Call, BinaryType::CashOrNothing, 1.0),
+        ] {
+            builder
+                .heston(heston_params())
+                .engine(Engine::BlackScholes)
+                .build()
+                .expect("vanilla and binary price on the analytic Heston engine");
+        }
+    }
+
+    #[test]
+    fn heston_adi_refuses_cash_dividends() {
+        // the 2-D ADI grid has no dividend jump condition; the engine
+        // asserted at pricing time instead of refusing at build
+        let msg = refusal(
+            market()
+                .cash_dividend(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), 2.0)
+                .vanilla(PutOrCall::Call)
+                .heston(heston_params())
+                .engine(Engine::FiniteDifference)
+                .build(),
+        );
+        assert!(
+            msg.contains("cash dividends") && msg.contains("MonteCarlo"),
+            "the refusal must point at MonteCarlo: {msg}"
+        );
+        // without dividends the same option prices on the ADI engine
+        market()
+            .vanilla(PutOrCall::Call)
+            .heston(heston_params())
+            .engine(Engine::FiniteDifference)
+            .build()
+            .expect("dividend-free Heston vanilla must build on the FD engine");
+    }
+
+    #[test]
+    fn futures_options_are_constant_vol_vanillas_only() {
+        use crate::equity::black76::FuturesSettlement::Discounted;
+        // Black-76 has no stochastic-vol variant here: the model was
+        // silently ignored, pricing a Heston/SABR contract at the
+        // surface vol
+        let msg = refusal(
+            market()
+                .vanilla(PutOrCall::Call)
+                .heston(heston_params())
+                .on_future(Discounted)
+                .build(),
+        );
+        assert!(
+            msg.contains("constant-vol dynamics"),
+            "a Heston futures option must be refused: {msg}"
+        );
+        // and the kernel is the vanilla closed form only (the binary
+        // payoff would have been priced as a vanilla)
+        let msg = refusal(
+            market()
+                .binary(PutOrCall::Call, BinaryType::CashOrNothing, 1.0)
+                .on_future(Discounted)
+                .build(),
+        );
+        assert!(
+            msg.contains("vanilla payoff only"),
+            "a binary futures option must be refused: {msg}"
+        );
+        // European vanillas on futures still build and price
+        let option = market()
+            .vanilla(PutOrCall::Call)
+            .on_future(Discounted)
+            .build()
+            .expect("a European vanilla on a future must build");
+        assert!(option.npv() > 0.0);
     }
 
     #[test]

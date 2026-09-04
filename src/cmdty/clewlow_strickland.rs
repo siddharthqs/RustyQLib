@@ -83,8 +83,23 @@ impl ClewlowStrickland {
     /// the common observation window `[0, min(t_i, t_j)]` — the entry
     /// every moment-matching pricer needs. At `alpha = 0` this is the
     /// flat-vol `sigma^2 min(t_i, t_j)`.
+    ///
+    /// # Preconditions
+    ///
+    /// Each contract must still be alive over the whole window: both
+    /// maturities at or after `min(t_i, t_j)`. A maturity inside the
+    /// window integrates the vol of a contract that has already
+    /// expired and inflates the covariance without bound as `alpha`
+    /// grows. Checked by `debug_assert` only — this is the inner term
+    /// of an O(n^2) loop inside a calibration closure, and every caller
+    /// in this module builds the arguments from a schedule that
+    /// satisfies it by construction.
     pub fn covariance(&self, t_i: f64, cap_ti: f64, t_j: f64, cap_tj: f64) -> f64 {
         let m = t_i.min(t_j);
+        debug_assert!(
+            cap_ti >= m && cap_tj >= m,
+            "covariance window [0, {m}] runs past a maturity (T_i = {cap_ti}, T_j = {cap_tj})"
+        );
         if m <= 0.0 {
             return 0.0;
         }
@@ -128,16 +143,16 @@ impl ClewlowStrickland {
 
     /// The quote for a [`CommodityOption`](crate::cmdty::CommodityOption),
     /// resolving expiry and underlying maturity exactly as its pricing
-    /// does (the discount curve's day count from its reference date).
+    /// does (the Act/365 vol time from the discount curve's reference
+    /// date — see the [`crate::cmdty`] conventions).
     pub fn quote_for(
         &self,
         option: &crate::cmdty::CommodityOption,
         discount: &crate::core::curves::YieldCurve,
     ) -> Result<CommodityVol, RustyQLibError> {
-        let dc = discount.day_count();
         let valuation = discount.reference_date();
-        let t = dc.year_fraction(valuation, option.expiry_date);
-        let cap_t = dc.year_fraction(valuation, option.underlying_date);
+        let t = crate::cmdty::vol_time(valuation, option.expiry_date);
+        let cap_t = crate::cmdty::vol_time(valuation, option.underlying_date);
         self.vol_quote(t, cap_t)
     }
 

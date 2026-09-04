@@ -1,6 +1,7 @@
 pub mod aad;
 pub mod bump;
 pub mod calendar;
+pub mod complex;
 pub mod curves;
 pub mod data_models;
 pub mod daycount;
@@ -14,6 +15,7 @@ pub mod linalg;
 pub mod market;
 pub mod montecarlo;
 pub mod optimization;
+pub mod quadrature;
 pub mod quotes;
 pub mod results;
 pub mod serialization;

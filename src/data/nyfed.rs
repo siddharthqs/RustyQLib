@@ -85,10 +85,6 @@ pub struct RateObservation {
     pub record: serde_json::Value,
 }
 
-/// Reject percent rates outside this band: a value above 50 almost
-/// certainly means the feed changed units and must not pass through.
-const PERCENT_BOUNDS: (f64, f64) = (-5.0, 50.0);
-
 /// Parse an API response (a `{"refRates": [...]}` document) into
 /// observations, validating only what selection and sanity require:
 /// each record must carry a parseable `effectiveDate` and a plausible
@@ -125,12 +121,7 @@ pub fn parse_response(text: &str) -> Result<Vec<RateObservation>, RustyQLibError
                     "the {date} record has no numeric `percentRate`"
                 ))
             })?;
-        if !(rate > PERCENT_BOUNDS.0 && rate < PERCENT_BOUNDS.1) {
-            return Err(RustyQLibError::ParseError(format!(
-                "{date}: percentRate {rate} is outside the plausible percent range — \
-                 refusing to guess the feed's units"
-            )));
-        }
+        super::plausible_percent(rate, &format!("{date}: percentRate"))?;
         observations.push(RateObservation {
             date,
             record: record.clone(),
@@ -147,33 +138,7 @@ pub fn select_observation(
     observations: &[RateObservation],
     date: Option<NaiveDate>,
 ) -> Result<&RateObservation, RustyQLibError> {
-    let latest = observations.iter().max_by_key(|o| o.date).ok_or_else(|| {
-        RustyQLibError::ParseError("the response contains no observations".to_string())
-    })?;
-    let Some(date) = date else {
-        return Ok(latest);
-    };
-    if let Some(observation) = observations.iter().find(|o| o.date == date) {
-        return Ok(observation);
-    }
-    let nearest_earlier = observations
-        .iter()
-        .filter(|o| o.date < date)
-        .max_by_key(|o| o.date);
-    Err(match nearest_earlier {
-        Some(observation) => RustyQLibError::invalid_input(
-            "date",
-            format!(
-                "no rate published for {date} (weekend or holiday?); \
-                 the nearest earlier published date is {}",
-                observation.date
-            ),
-        ),
-        None => RustyQLibError::invalid_input(
-            "date",
-            format!("no rate published for {date} in the fetched window"),
-        ),
-    })
+    super::select_dated(observations, date, |o| o.date, "rate")
 }
 
 /// Render one observation as a plain document: the feed's record
