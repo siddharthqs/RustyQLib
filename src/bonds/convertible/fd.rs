@@ -39,8 +39,10 @@
 //! of share price and time. Local vol enters the PDE node by node, so
 //! the skew reshapes the conversion option while the credit treatment
 //! is untouched. Under jump to default the field is the diffusion
-//! *conditional on survival*; a surface that already embeds the
-//! default jump would need de-jumping first, which is not done here.
+//! *conditional on survival*, so a listed surface must be de-jumped
+//! first ([`dejump_surface`](super::dejump_surface), or
+//! [`JumpToDefaultMarket::dejump_surface`](super::JumpToDefaultMarket::dejump_surface))
+//! before its Dupire local vol is sampled.
 //! With a non-flat model the market struct's `volatility` only sizes the
 //! grid and anchors the vega bump, which shifts the whole field in
 //! parallel.

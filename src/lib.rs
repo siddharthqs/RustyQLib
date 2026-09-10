@@ -59,6 +59,7 @@ pub use crate::bonds::{
     CreditModel, CurveInstrument, DeliverableBond, Deposit, FactorRounding, FdVolModel,
     FixedRateBond, FloatingRateNote, Fra, Frequency, FundamentalChangeMakeWhole,
     JumpToDefaultMarket, MakeWholeCall, MandatoryConversion, PutOption, TreasuryBill,
+    dejump_implied_vol, dejump_surface,
 };
 pub use crate::cmdty::{
     AveragePriceOption, ClewlowStrickland, ClewlowStricklandFit, CommodityBasisSwap,

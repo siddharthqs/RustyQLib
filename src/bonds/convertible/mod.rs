@@ -105,6 +105,7 @@
 //!   `V(S) = V(S - D)`, by interpolation on the engine's spot ladder.
 
 pub mod credit;
+pub mod dejump;
 pub mod events;
 pub mod fd;
 pub mod features;
@@ -121,6 +122,7 @@ mod tests;
 pub use credit::{
     ConvertibleMarket, CreditModel, EquityInputs, JumpToDefaultMarket, NodeValue, Split,
 };
+pub use dejump::{dejump_implied_vol, dejump_surface};
 pub use events::EventGrid;
 pub use fd::{ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, FdVolModel};
 pub use features::{

@@ -64,7 +64,7 @@ pub use convertible::{
     CashDividend, ContingentConversion, ConvertibleBond, ConvertibleFdGreeks, ConvertibleFdGrid,
     ConvertibleFdValuation, ConvertibleInstrument, ConvertibleMarket, ConvertiblePricing,
     CouponMakeWhole, CreditModel, FdVolModel, FundamentalChangeMakeWhole, JumpToDefaultMarket,
-    MandatoryConversion,
+    MandatoryConversion, dejump_implied_vol, dejump_surface,
 };
 pub use credit::{bootstrap_credit_curve, CreditCurve};
 pub use deposit::Deposit;

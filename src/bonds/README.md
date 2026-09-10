@@ -49,7 +49,9 @@ and everything bootstraps into the library-wide `YieldCurve`.
   price, delta and gamma from one solve, and vega, theta, parallel and
   key-rate DV01s and the spread or hazard DV01 by bumping. The volatility
   is pluggable: flat, a Dupire local-vol grid from an implied surface, or
-  any custom function of share price and time.
+  any custom function of share price and time; `dejump.rs` strips the
+  default jump out of listed implied vols so a surface can feed the
+  jump-to-default model consistently.
 
 ## Credit and optionality
 

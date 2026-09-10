@@ -6,6 +6,7 @@ use chrono::NaiveDate;
 use super::*;
 use crate::core::curves::{Compounding, RateShift, YieldCurve};
 use crate::core::daycount::DayCountConvention;
+use crate::core::errors::RustyQLibError;
 use crate::core::utils::norm_cdf;
 use crate::core::vols::VolSurface;
 
@@ -599,6 +600,86 @@ fn skewed_local_volatility_moves_the_price_and_the_greeks_run() {
         .fd_greeks_with_vol(&jtd_market(48.0), &curve, settlement, GRID, &[], &model)
         .unwrap();
     assert!(greeks.vega > 0.1, "{greeks:?}");
+}
+
+#[test]
+fn dejumping_removes_the_default_from_an_implied_vol() {
+    // the survival vol reproduces the listed call under jump to default
+    let (spot, r, q, b) = (48.0, 0.04, 0.01, 0.0);
+    // no hazard, no change
+    assert!(
+        (dejump_implied_vol(0.30, spot, spot, 5.0, r, q, b, 0.0).unwrap() - 0.30).abs() < 1e-12
+    );
+    // 30% at the money, five years: 3% hazard leaves about 20.6% of
+    // diffusion, and the skew a flat implied vol hides
+    let atm = dejump_implied_vol(0.30, spot, spot, 5.0, r, q, b, 0.03).unwrap();
+    assert!((atm - 0.206).abs() < 0.005, "{atm}");
+    let low = dejump_implied_vol(0.30, spot, 40.0, 5.0, r, q, b, 0.03).unwrap();
+    let high = dejump_implied_vol(0.30, spot, 80.0, 5.0, r, q, b, 0.03).unwrap();
+    assert!(low < atm && atm < high, "{low} {atm} {high}");
+    // shorter and safer, less to remove
+    let short = dejump_implied_vol(0.30, spot, spot, 1.0, r, q, b, 0.03).unwrap();
+    let safer = dejump_implied_vol(0.30, spot, spot, 5.0, r, q, b, 0.01).unwrap();
+    assert!(short > atm && safer > atm);
+    // the jump alone exceeds the option: no diffusion fits
+    assert!(matches!(
+        dejump_implied_vol(0.30, spot, spot, 5.0, r, q, b, 0.10),
+        Err(RustyQLibError::CalibrationFailed { .. })
+    ));
+    assert!(dejump_implied_vol(-0.1, spot, spot, 5.0, r, q, b, 0.03).is_err());
+}
+
+#[test]
+fn dejumped_surface_feeds_a_consistent_local_vol() {
+    let cv = convertible();
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    let m = jtd_market(48.0);
+    let listed = VolSurface::flat(0.30, d(2026, 8, 13), DayCountConvention::Act365).unwrap();
+    // a flat surface prices deep out-of-the-money puts near zero, below
+    // the default leg a 3% hazard implies, so the grid stays where a
+    // flat quote and the hazard are consistent (a listed surface carries
+    // that value in its put skew)
+    let strikes = [40.0, 48.0, 60.0, 80.0, 120.0];
+    let expiries = [1.0, 2.0, 3.0, 5.0];
+    let dejumped = m
+        .dejump_surface(&listed, &curve, &strikes, &expiries)
+        .unwrap();
+    // the surface holds the de-jumped vols: lower, and rising in strike
+    let at = |k: f64, t: f64| dejumped.vol(k, 48.0, t);
+    assert!(
+        at(48.0, 5.0) < 0.25 && at(48.0, 5.0) > 0.15,
+        "{}",
+        at(48.0, 5.0)
+    );
+    assert!(at(40.0, 5.0) < at(48.0, 5.0) && at(48.0, 5.0) < at(80.0, 5.0));
+    // its local vol prices the convertible below the flat 30% under jump
+    // to default, and the engine runs end to end
+    let local = cv
+        .local_vol_grid(&dejumped, &curve, settlement, m.spot, m.dividend_yield)
+        .unwrap();
+    let with_local = cv
+        .fd_valuation_with_vol(&m, &curve, settlement, GRID, &FdVolModel::Local(&local))
+        .unwrap();
+    let flat_value = cv.fd_valuation(&m, &curve, settlement, GRID).unwrap();
+    assert!(
+        with_local.dirty_price < flat_value.dirty_price - 1.0,
+        "{} vs {}",
+        with_local.dirty_price,
+        flat_value.dirty_price
+    );
+    // a hazard the quotes cannot carry fails, naming the point; so does
+    // a strike whose flat-vol put is worth less than the default leg
+    let hot = JumpToDefaultMarket {
+        hazard_rate: 0.10,
+        ..m
+    };
+    assert!(hot
+        .dejump_surface(&listed, &curve, &strikes, &expiries)
+        .is_err());
+    assert!(m
+        .dejump_surface(&listed, &curve, &[20.0, 48.0], &[0.5])
+        .is_err());
 }
 
 #[test]

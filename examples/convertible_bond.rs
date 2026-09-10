@@ -9,9 +9,10 @@ use chrono::NaiveDate;
 use rustyqlib::core::curves::{Compounding, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::{
-    CallOption, CashDividend, ContingentConversion, ConvertibleBond, ConvertibleFdGrid,
-    ConvertibleMarket, ConvertiblePreferred, ConvertiblePricing, CouponMakeWhole, FdVolModel,
-    FixedRateBond, FundamentalChangeMakeWhole, JumpToDefaultMarket, MandatoryConversion, PutOption,
+    dejump_implied_vol, CallOption, CashDividend, ContingentConversion, ConvertibleBond,
+    ConvertibleFdGrid, ConvertibleMarket, ConvertiblePreferred, ConvertiblePricing,
+    CouponMakeWhole, FdVolModel, FixedRateBond, FundamentalChangeMakeWhole, JumpToDefaultMarket,
+    MandatoryConversion, PutOption,
 };
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -135,6 +136,13 @@ jump to default, hazard 300bp, recovery 40%, borrow 50bp:"
         "
 quoted {quoted:.4} vs model at 300bp hazard: implied hazard rate {:.0} bp",
         implied * 10_000.0
+    );
+    // a listed 30% implied vol already carries the default jump: the
+    // diffusion the model should be given is lower
+    let survival_vol = dejump_implied_vol(0.30, 48.0, 48.0, 4.75, 0.04, 0.01, 0.005, 0.03)?;
+    println!(
+        "a listed 30% at-the-money vol de-jumps to {:.1}% at 300bp hazard over the bond's life",
+        survival_vol * 100.0
     );
 
     // --- finite differences ------------------------------------------

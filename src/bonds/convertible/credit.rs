@@ -24,6 +24,7 @@ use chrono::NaiveDate;
 use super::ConvertibleBond;
 use crate::core::curves::{RateShift, YieldCurve};
 use crate::core::errors::RustyQLibError;
+use crate::core::vols::VolSurface;
 
 /// The equity inputs every credit model carries.
 #[derive(Debug, Clone, Copy)]
@@ -366,6 +367,29 @@ pub struct JumpToDefaultMarket {
 }
 
 impl JumpToDefaultMarket {
+    /// `surface` de-jumped for this market's hazard, carry and spot,
+    /// sampled on a strike x expiry grid: the input for a Dupire local
+    /// vol that is consistent with the jump (see
+    /// [`dejump_surface`](super::dejump_surface)).
+    pub fn dejump_surface(
+        &self,
+        surface: &VolSurface,
+        curve: &YieldCurve,
+        strikes: &[f64],
+        expiries: &[f64],
+    ) -> Result<VolSurface, RustyQLibError> {
+        super::dejump::dejump_surface(
+            surface,
+            curve,
+            self.spot,
+            self.dividend_yield,
+            self.borrow_cost,
+            self.hazard_rate,
+            strikes,
+            expiries,
+        )
+    }
+
     pub(crate) fn validate(&self) -> Result<(), RustyQLibError> {
         validate_equity_inputs(self.spot, self.volatility)?;
         if !self.dividend_yield.is_finite() || !self.borrow_cost.is_finite() {
