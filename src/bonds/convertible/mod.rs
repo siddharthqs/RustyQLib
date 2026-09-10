@@ -102,7 +102,9 @@
 //!   between a maximum and a minimum ratio with no cash principal, and
 //!   any early conversion is at the minimum ratio;
 //! - [`CashDividend`]s on the underlying: the exact ex-date jump
-//!   `V(S) = V(S - D)`, by interpolation on the engine's spot ladder.
+//!   `V(S) = V(S - D)`, by interpolation on the engine's spot ladder;
+//! - [`DividendProtection`]: the ratio adjustment for dividends above a
+//!   threshold, applied by letting only the unprotected part jump.
 
 pub mod credit;
 pub mod dejump;
@@ -126,7 +128,8 @@ pub use dejump::{dejump_implied_vol, dejump_surface};
 pub use events::EventGrid;
 pub use fd::{ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, FdVolModel};
 pub use features::{
-    ContingentConversion, CouponMakeWhole, FundamentalChangeMakeWhole, MandatoryConversion,
+    ContingentConversion, CouponMakeWhole, DividendProtection, FundamentalChangeMakeWhole,
+    MandatoryConversion,
 };
 pub use instrument::{CashDividend, ConvertibleInstrument};
 pub use pricing::{ConvertiblePricing, DEFAULT_TREE_STEPS};
@@ -170,6 +173,8 @@ pub struct ConvertibleBond {
     /// Discrete cash dividends on the underlying share over the bond's
     /// life, on top of the market's continuous yield.
     pub cash_dividends: Vec<CashDividend>,
+    /// Conversion-ratio adjustment for dividends above a threshold.
+    pub dividend_protection: Option<DividendProtection>,
 }
 
 impl ConvertibleBond {
@@ -193,6 +198,7 @@ impl ConvertibleBond {
             fundamental_change: None,
             mandatory: None,
             cash_dividends: Vec::new(),
+            dividend_protection: None,
         })
     }
 
@@ -218,6 +224,7 @@ impl ConvertibleBond {
     /// Validates the contractual extras (the chassis validates itself).
     fn validate_features(&self) -> Result<(), RustyQLibError> {
         instrument::validate_cash_dividends(&self.cash_dividends)?;
+        features::validate_dividend_protection(self.dividend_protection)?;
         if let Some(coco) = &self.contingent_conversion {
             if !(coco.trigger > 0.0 && coco.trigger.is_finite()) {
                 return Err(RustyQLibError::invalid_input(

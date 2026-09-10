@@ -123,6 +123,47 @@ impl FundamentalChangeMakeWhole {
     }
 }
 
+/// Dividend protection: when a cash dividend exceeds `threshold` per
+/// share, the conversion ratio is adjusted by `S / (S - (D - threshold))`
+/// at the ex-date so that parity is preserved for the excess. A zero
+/// threshold is full protection.
+///
+/// On the engines the adjustment is applied through the ex-date jump:
+/// the protected part of a dividend no longer moves the holder's claim,
+/// so only `min(D, threshold)` jumps, and full protection means no
+/// jump at all (the holder effectively owns the total-return share).
+/// This neglects the scaling of the unprotected amount by the ratio
+/// factors accumulated so far, an error of order `threshold * (ratio
+/// growth - 1)`. Protection applies to [`CashDividend`]s only; a
+/// continuous yield in the market struct is never protected, so under
+/// full protection express the dividends as cash entries or set the
+/// yield to zero.
+///
+/// [`CashDividend`]: super::CashDividend
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DividendProtection {
+    /// Per share, per dividend; dividends up to this amount are not
+    /// protected. Zero is full protection.
+    pub threshold: f64,
+}
+
+pub(crate) fn validate_dividend_protection(
+    protection: Option<DividendProtection>,
+) -> Result<(), RustyQLibError> {
+    if let Some(p) = protection {
+        if !(p.threshold.is_finite() && p.threshold >= 0.0) {
+            return Err(RustyQLibError::invalid_input(
+                "convertible",
+                format!(
+                    "the dividend protection threshold must be non-negative, got {}",
+                    p.threshold
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Mandatory conversion (PEPS / DECS / ACES): at maturity the bond
 /// converts into shares whatever the share price, with the number of
 /// shares set by the terminal price between two ratios:

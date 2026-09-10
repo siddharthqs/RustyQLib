@@ -63,7 +63,7 @@ pub use callable::{BondOptionality, MakeWholeCall};
 pub use convertible::{
     dejump_implied_vol, dejump_surface, CashDividend, ContingentConversion, ConvertibleBond,
     ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, ConvertibleInstrument,
-    ConvertibleMarket, ConvertiblePricing, CouponMakeWhole, CreditModel, FdVolModel,
+    ConvertibleMarket, ConvertiblePricing, CouponMakeWhole, CreditModel, DividendProtection, FdVolModel,
     FundamentalChangeMakeWhole, JumpToDefaultMarket, MandatoryConversion,
 };
 pub use credit::{bootstrap_credit_curve, CreditCurve};

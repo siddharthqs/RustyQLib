@@ -43,7 +43,8 @@ and everything bootstraps into the library-wide `YieldCurve`.
   puts, contingent conversion, a coupon make-whole on calls, a
   fundamental-change make-whole table with the par put, mandatory
   conversion (PEPS/DECS share schedules), discrete cash dividends as the
-  exact ex-date jump on either engine, parity/premium
+  exact ex-date jump on either engine with threshold dividend protection,
+  parity/premium
   analytics, and implied credit spreads, hazard rates and volatilities. `convertible/fd.rs` solves the same two models by finite
   differences (Crank-Nicolson in log-spot on the tree's event grid), giving
   price, delta and gamma from one solve, and vega, theta, parallel and

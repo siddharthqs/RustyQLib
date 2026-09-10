@@ -40,8 +40,11 @@
 use chrono::{Months, NaiveDate};
 
 use crate::bonds::convertible::events::cash_dividends_at_steps;
+use crate::bonds::convertible::features::validate_dividend_protection;
 use crate::bonds::convertible::instrument::validate_cash_dividends;
-use crate::bonds::convertible::{CashDividend, ConvertibleInstrument, CreditModel, EventGrid};
+use crate::bonds::convertible::{
+    CashDividend, ConvertibleInstrument, CreditModel, DividendProtection, EventGrid,
+};
 use crate::bonds::schedule::coupon_dates;
 use crate::bonds::CallOption;
 use crate::core::calendar::Frequency;
@@ -83,6 +86,9 @@ pub struct ConvertiblePreferred {
     /// Discrete cash dividends on the common share, on top of the
     /// market's continuous yield.
     pub cash_dividends: Vec<CashDividend>,
+    /// Conversion-ratio adjustment for common dividends above a
+    /// threshold.
+    pub dividend_protection: Option<DividendProtection>,
 }
 
 impl ConvertiblePreferred {
@@ -122,6 +128,7 @@ impl ConvertiblePreferred {
             calls: Vec::new(),
             soft_call_trigger: None,
             cash_dividends: Vec::new(),
+            dividend_protection: None,
         })
     }
 
@@ -306,6 +313,7 @@ impl ConvertibleInstrument for ConvertiblePreferred {
 
     fn validate(&self) -> Result<(), RustyQLibError> {
         validate_cash_dividends(&self.cash_dividends)?;
+        validate_dividend_protection(self.dividend_protection)?;
         if let Some(trigger) = self.soft_call_trigger {
             if !(trigger > 0.0 && trigger.is_finite()) {
                 return Err(RustyQLibError::invalid_input(
@@ -442,8 +450,12 @@ impl ConvertibleInstrument for ConvertiblePreferred {
             self.perpetuity_tail(credit_rate, curve, horizon)
         };
 
-        let cash_dividend_at_step =
-            cash_dividends_at_steps(&self.cash_dividends, &times, year_fraction);
+        let cash_dividend_at_step = cash_dividends_at_steps(
+            &self.cash_dividends,
+            self.dividend_protection.map(|p| p.threshold),
+            &times,
+            year_fraction,
+        );
         Ok(EventGrid {
             dt,
             times,

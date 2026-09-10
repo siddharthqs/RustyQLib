@@ -11,8 +11,8 @@ use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::{
     dejump_implied_vol, CallOption, CashDividend, ContingentConversion, ConvertibleBond,
     ConvertibleFdGrid, ConvertibleMarket, ConvertiblePreferred, ConvertiblePricing,
-    CouponMakeWhole, FdVolModel, FixedRateBond, FundamentalChangeMakeWhole, JumpToDefaultMarket,
-    MandatoryConversion, PutOption,
+    CouponMakeWhole, DividendProtection, FdVolModel, FixedRateBond, FundamentalChangeMakeWhole,
+    JumpToDefaultMarket, MandatoryConversion, PutOption,
 };
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -234,13 +234,17 @@ finite differences (400 x 400 grid) against the 800-step trees:"
         dividend_yield: 0.0,
         ..with_yield
     };
+    let mut protected = paying.clone();
+    protected.dividend_protection = Some(DividendProtection { threshold: 0.25 });
     println!(
-        "\ndividends at spot 48: 1% yield {:.4}, ten cash dividends of 0.48 {:.4} (tree) / {:.4} (grid)",
+        "
+dividends at spot 48: 1% yield {:.4}, ten cash dividends of 0.48 {:.4} (tree) / {:.4} (grid), protected above 0.25 {:.4}",
         convertible.clean_price(&with_yield, &curve, settlement)?,
         paying.clean_price(&with_cash, &curve, settlement)?,
         paying
             .fd_valuation(&with_cash, &curve, settlement, ConvertibleFdGrid::default())?
-            .clean_price
+            .clean_price,
+        protected.clean_price(&with_cash, &curve, settlement)?
     );
 
     // --- bump greeks on the grid -------------------------------------

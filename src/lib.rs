@@ -57,7 +57,7 @@ pub use crate::bonds::{
     g_spread, BillQuote, BondFuture, BondOptionality, BondQuote, CallOption, CashDividend,
     ContingentConversion, ConvertibleBond, ConvertibleFdGreeks, ConvertibleFdGrid,
     ConvertibleFdValuation, ConvertibleInstrument, ConvertibleMarket, ConvertiblePreferred,
-    ConvertiblePricing, CouponMakeWhole, CreditCurve, CreditModel, CurveInstrument,
+    ConvertiblePricing, CouponMakeWhole, CreditCurve, CreditModel, DividendProtection, CurveInstrument,
     DeliverableBond, Deposit, FactorRounding, FdVolModel, FixedRateBond, FloatingRateNote, Fra,
     Frequency, FundamentalChangeMakeWhole, JumpToDefaultMarket, MakeWholeCall, MandatoryConversion,
     PutOption, TreasuryBill,

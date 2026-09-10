@@ -79,9 +79,12 @@ pub struct EventGrid {
 }
 
 /// Cash dividends mapped to the step nearest their ex-date; dividends
-/// outside `(settlement, horizon)` do not touch the holder.
+/// outside `(settlement, horizon)` do not touch the holder. With a
+/// protection threshold only the unprotected part, `min(D, threshold)`,
+/// jumps (see [`DividendProtection`](super::DividendProtection)).
 pub(crate) fn cash_dividends_at_steps(
     dividends: &[CashDividend],
+    protection_threshold: Option<f64>,
     times: &[f64],
     year_fraction: impl Fn(NaiveDate) -> f64,
 ) -> Vec<f64> {
@@ -95,7 +98,11 @@ pub(crate) fn cash_dividends_at_steps(
             continue;
         }
         let index = ((time - t0) / dt).round() as usize;
-        at_step[index.min(steps)] += dividend.amount;
+        let unprotected = match protection_threshold {
+            Some(threshold) => dividend.amount.min(threshold),
+            None => dividend.amount,
+        };
+        at_step[index.min(steps)] += unprotected;
     }
     at_step
 }
@@ -468,8 +475,12 @@ pub(crate) fn event_grid(
         }
     }
 
-    let cash_dividend_at_step =
-        cash_dividends_at_steps(&convertible.cash_dividends, &times, year_fraction);
+    let cash_dividend_at_step = cash_dividends_at_steps(
+        &convertible.cash_dividends,
+        convertible.dividend_protection.map(|p| p.threshold),
+        &times,
+        year_fraction,
+    );
     Ok(EventGrid {
         dt,
         times,

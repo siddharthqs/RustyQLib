@@ -386,6 +386,62 @@ fn cash_dividends_lower_the_price_and_only_before_maturity() {
 }
 
 #[test]
+fn dividend_protection_shields_the_excess_over_the_threshold() {
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    let m = market(48.0);
+    let price = |cv: &ConvertibleBond| cv.dirty_price(&m, &curve, settlement).unwrap();
+    let free = price(&convertible());
+    let mut paying = convertible();
+    paying.cash_dividends = vec![
+        CashDividend {
+            ex_date: d(2027, 3, 1),
+            amount: 1.0,
+        },
+        CashDividend {
+            ex_date: d(2029, 3, 1),
+            amount: 1.0,
+        },
+    ];
+    let unprotected = price(&paying);
+    // full protection: the dividends no longer touch the holder at all
+    let mut full = paying.clone();
+    full.dividend_protection = Some(DividendProtection { threshold: 0.0 });
+    assert!((price(&full) - free).abs() < 1e-12);
+    // a threshold inside the dividend shields the excess only
+    let mut partial = paying.clone();
+    partial.dividend_protection = Some(DividendProtection { threshold: 0.4 });
+    let shielded = price(&partial);
+    assert!(
+        unprotected < shielded && shielded < free,
+        "{unprotected} < {shielded} < {free}"
+    );
+    // and the same as dividends of 0.4 with no protection
+    let mut clipped = paying.clone();
+    for dividend in &mut clipped.cash_dividends {
+        dividend.amount = 0.4;
+    }
+    assert!((price(&clipped) - shielded).abs() < 1e-12);
+    // a threshold above the dividend protects nothing
+    let mut loose = paying.clone();
+    loose.dividend_protection = Some(DividendProtection { threshold: 5.0 });
+    assert!((price(&loose) - unprotected).abs() < 1e-12);
+    // the grid agrees under full protection
+    let fd_free = convertible()
+        .fd_valuation(&m, &curve, settlement, ConvertibleFdGrid::default())
+        .unwrap()
+        .dirty_price;
+    let fd_full = full
+        .fd_valuation(&m, &curve, settlement, ConvertibleFdGrid::default())
+        .unwrap()
+        .dirty_price;
+    assert!((fd_full - fd_free).abs() < 1e-12);
+    let mut bad = paying.clone();
+    bad.dividend_protection = Some(DividendProtection { threshold: -1.0 });
+    assert!(bad.dirty_price(&m, &curve, settlement).is_err());
+}
+
+#[test]
 fn deep_in_the_money_conversion_forgoes_the_discounted_dividends() {
     // with conversion at maturity only, no yield and no credit, a bond
     // far in the money is the coupons (bar the final one, forfeited on
