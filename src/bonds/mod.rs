@@ -23,9 +23,17 @@
 //!   hazard-rate credit pricing and curve bootstrapping ([`credit`]),
 //!   and the Hull-White option model for calls, puts and make-wholes
 //!   ([`callable`]);
-//! - convertible bonds ([`ConvertibleBond`]): Tsiveriotis-Fernandes
-//!   pricing on an equity tree with soft calls, puts, parity/premium
-//!   analytics and implied credit spreads.
+//! - convertible bonds ([`ConvertibleBond`]) and preferreds
+//!   ([`ConvertiblePreferred`]), both [`ConvertibleInstrument`]s priced
+//!   through [`ConvertiblePricing`]: Tsiveriotis-Fernandes and
+//!   jump-to-default pricing on an equity tree or by finite differences
+//!   ([`convertible::fd`], value plus delta and gamma from one solve, and
+//!   vega, theta, parallel/key-rate and credit DV01s by bumping; flat,
+//!   Dupire local or custom volatility), with
+//!   soft calls, puts, contingent conversion, coupon and
+//!   fundamental-change make-wholes, mandatory conversion,
+//!   parity/premium analytics, and
+//!   implied credit spreads, hazard rates and volatilities.
 //!
 //! Conventions follow the rest of the library: instruments carry their own
 //! [`DayCountConvention`](crate::core::daycount::DayCountConvention) for
@@ -52,7 +60,12 @@ pub mod spreads;
 pub use bills::TreasuryBill;
 pub use bootstrap::bootstrap_curve;
 pub use callable::{BondOptionality, MakeWholeCall};
-pub use convertible::{ConvertibleBond, ConvertibleMarket};
+pub use convertible::{
+    CashDividend, ContingentConversion, ConvertibleBond, ConvertibleFdGreeks, ConvertibleFdGrid,
+    ConvertibleFdValuation, ConvertibleInstrument, ConvertibleMarket, ConvertiblePricing,
+    CouponMakeWhole, CreditModel, FdVolModel, FundamentalChangeMakeWhole, JumpToDefaultMarket,
+    MandatoryConversion,
+};
 pub use credit::{bootstrap_credit_curve, CreditCurve};
 pub use deposit::Deposit;
 pub use fixed_rate_bond::{CallOption, Cashflow, FixedRateBond, PutOption};

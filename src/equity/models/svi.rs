@@ -879,6 +879,11 @@ impl SmoothedSurface for SviSurfaceFit {
 
 // ── SSVI: the whole surface ─────────────────────────────────────────────
 
+/// Upper bound imposed on the SSVI power-law exponent during
+/// calibration. The Gatheral--Jacquier butterfly conditions are
+/// sufficient for this curvature family only on `(0, 1/2]`, so fitting
+/// inside that interval keeps every fitted surface certifiable.
+pub const SSVI_GAMMA_MAX: f64 = 0.5;
 /// SSVI surface: ATM total-variance pillars plus global `(rho, eta,
 /// gamma)` with the power-law curvature.
 #[derive(Debug, Clone)]
@@ -1131,18 +1136,24 @@ impl Ssvi {
                 "theta pillars must have positive finite times and finite variances",
             ));
         }
+        // The Gatheral-Jacquier butterfly conditions are sufficient for the
+        // power-law curvature only while gamma <= 1/2: sup_theta
+        // theta*phi(theta)^2 equals eta^2 at gamma = 1/2 and is unbounded
+        // above it. Calibrating gamma inside (0, 1/2] therefore keeps the
+        // surface certifiable by construction rather than by inspection.
         let make = |u: &[f64]| Ssvi {
             rho: u[0].tanh(),
             eta: u[1].exp(),
-            gamma: 1.0 / (1.0 + (-u[2]).exp()),
+            gamma: SSVI_GAMMA_MAX / (1.0 + (-u[2]).exp()),
             theta_pillars: theta_pillars.to_vec(),
         };
         let (rho0, eta0, gamma0) = start;
-        let x0 = vec![
-            rho0.clamp(-0.999, 0.999).atanh(),
-            eta0.ln(),
-            (gamma0.clamp(1e-3, 1.0 - 1e-9) / (1.0 - gamma0.clamp(1e-3, 1.0 - 1e-9))).ln(),
-        ];
+        let x0 = vec![rho0.clamp(-0.999, 0.999).atanh(), eta0.ln(), {
+            // Stay off the saturated tails of the logistic: a start at
+            // the cap has gradient ~0 in u and would freeze gamma there.
+            let g = (gamma0 / SSVI_GAMMA_MAX).clamp(0.02, 0.98);
+            (g / (1.0 - g)).ln()
+        }];
         let residuals = |u: &[f64]| -> Vec<f64> {
             let s = make(u);
             quotes
@@ -1860,7 +1871,7 @@ mod tests {
                 quotes.push((t, k, (truth.total_variance(k, t) / t).sqrt()));
             }
         }
-        let start = (-0.2, 0.5, 0.5);
+        let start = (-0.2, 0.5, 0.5 * SSVI_GAMMA_MAX);
         // too few quotes (three parameters)
         assert!(Ssvi::calibrate(&quotes[..2], &truth.theta_pillars, start).is_err());
         // non-finite or non-positive quote entries

@@ -254,7 +254,7 @@ impl FixedRateBond {
 
     /// Principal repaid at a scheduled coupon date (absolute): the sink
     /// amount, plus the remaining outstanding when the date is maturity.
-    fn principal_at(&self, coupon_date: NaiveDate) -> f64 {
+    pub(crate) fn principal_at(&self, coupon_date: NaiveDate) -> f64 {
         let sink: f64 = self
             .sinking_fund
             .iter()

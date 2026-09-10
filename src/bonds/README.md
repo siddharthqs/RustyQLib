@@ -34,9 +34,22 @@ and everything bootstraps into the library-wide `YieldCurve`.
   margins.
 - **`BondFuture`** (`futures.rs`) — CME conversion factors, invoice prices,
   gross and net basis, implied repo, and the cheapest-to-deliver.
-- **`ConvertibleBond`** (`convertible.rs`) — Tsiveriotis-Fernandes on an
-  equity tree, with soft calls, puts, parity/premium analytics and implied
-  credit spreads.
+- **`ConvertibleBond`** (`convertible/`) and **`ConvertiblePreferred`**
+  (`preferred.rs`) — both `ConvertibleInstrument`s priced through the
+  blanket `ConvertiblePricing` trait; two credit treatments behind one
+  `CreditModel` trait, on one equity tree: Tsiveriotis-Fernandes (equity/cash split, flat credit
+  spread) and jump to default (hazard rate, stock absorbed at zero on
+  default, recovery on face, borrow cost in the drift), with soft calls,
+  puts, contingent conversion, a coupon make-whole on calls, a
+  fundamental-change make-whole table with the par put, mandatory
+  conversion (PEPS/DECS share schedules), discrete cash dividends as the
+  exact ex-date jump on either engine, parity/premium
+  analytics, and implied credit spreads, hazard rates and volatilities. `convertible/fd.rs` solves the same two models by finite
+  differences (Crank-Nicolson in log-spot on the tree's event grid), giving
+  price, delta and gamma from one solve, and vega, theta, parallel and
+  key-rate DV01s and the spread or hazard DV01 by bumping. The volatility
+  is pluggable: flat, a Dupire local-vol grid from an implied surface, or
+  any custom function of share price and time.
 
 ## Credit and optionality
 

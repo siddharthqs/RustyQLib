@@ -1,37 +1,47 @@
-//! Convertible preferred stock (CPS) under the Tsiveriotis-Fernandes
-//! split.
+//! Convertible preferred stock (CPS).
 //!
 //! A convertible preferred is the convertible bond's equity-capital
 //! sibling: a fixed dividend on a liquidation preference instead of a
 //! coupon on face, **perpetual** unless a mandatory redemption date is
 //! set, convertible into common at a fixed ratio, and callable by the
-//! issuer (typically to force conversion). It prices on the same
-//! equity-tree split as [`ConvertibleBond`](crate::bonds::ConvertibleBond)
-//! — the dividend/cash part discounted at risk-free plus the credit
-//! spread, the conversion part risk-free — with two structural changes:
+//! issuer (typically to force conversion). It is a
+//! [`ConvertibleInstrument`], so it prices on the same engines and
+//! credit models as [`ConvertibleBond`](crate::bonds::ConvertibleBond)
+//! — Tsiveriotis-Fernandes or jump to default, tree or finite
+//! differences, with the greeks, implied solves and pluggable
+//! volatility of [`ConvertiblePricing`](crate::bonds::ConvertiblePricing)
+//! — mapping its own conventions
+//! onto the shared event grid:
 //!
-//! - **the perpetuity tail**: with no maturity, the tree truncates at
-//!   [`PERPETUAL_HORIZON_YEARS`] and the cash part carries a terminal
-//!   continuing value — the remaining dividend perpetuity discounted at
-//!   the curve's own long forward plus the spread (the same tail the
-//!   analytic [`preferred_floor`](ConvertiblePreferred::preferred_floor)
-//!   uses, so the busted limit matches it);
+//! - **the perpetuity tail**: with no maturity, the schedule truncates
+//!   at [`PERPETUAL_HORIZON_YEARS`] and the terminal value is the
+//!   remaining dividend perpetuity discounted at the curve's own long
+//!   forward plus the credit rate (the same tail the analytic
+//!   [`preferred_floor`](ConvertiblePreferred::preferred_floor) uses,
+//!   so the busted limit matches it); a standing call still caps that
+//!   continuing value at the horizon;
 //! - **preferred dividends** are fixed periodic amounts
 //!   (`rate * preference / frequency`), not day-count accruals, and a
 //!   **non-cumulative** preferred trades flat (no accrued, none in the
-//!   call strike); a cumulative one accrues within the period;
+//!   call strike); a cumulative one accrues linearly within the period;
 //! - **calls are American**: unlike the discrete-date convertible-bond
-//!   calls, each schedule entry applies at every tree step from its
-//!   date onward (superseded by the next entry), matching how preferred
-//!   call schedules actually work.
+//!   calls, each schedule entry applies at every step from its date
+//!   onward (superseded by the next entry), matching how preferred
+//!   call schedules actually work, and the soft-call trigger is
+//!   smoothed across the one grid cell it falls in (a hard indicator
+//!   makes a lattice price sawtooth in spot as the node ladder slides
+//!   past the fixed trigger).
 //!
-//! Dividend deferral risk is folded into the credit spread — the
+//! Dividend deferral risk is folded into the credit input — the
 //! standard practical treatment (a preferred's spread trades well wide
-//! of the same issuer's senior debt for exactly this reason).
+//! of the same issuer's senior debt for exactly this reason). Prices
+//! are per preferred share.
 
 use chrono::{Months, NaiveDate};
 
-use crate::bonds::convertible::{solve_implied_credit_spread, spot_bump_delta, ConvertibleMarket};
+use crate::bonds::convertible::events::cash_dividends_at_steps;
+use crate::bonds::convertible::instrument::validate_cash_dividends;
+use crate::bonds::convertible::{CashDividend, ConvertibleInstrument, CreditModel, EventGrid};
 use crate::bonds::schedule::coupon_dates;
 use crate::bonds::CallOption;
 use crate::core::calendar::Frequency;
@@ -41,9 +51,6 @@ use crate::core::errors::RustyQLibError;
 /// Tree truncation horizon for perpetual preferreds, in years; the
 /// dividend stream beyond it is carried as an exact perpetuity tail.
 pub const PERPETUAL_HORIZON_YEARS: u32 = 40;
-
-/// Default number of tree steps.
-pub const DEFAULT_TREE_STEPS: usize = 800;
 
 /// A convertible preferred share.
 #[derive(Debug, Clone)]
@@ -73,6 +80,9 @@ pub struct ConvertiblePreferred {
     pub calls: Vec<CallOption>,
     /// Calls exercisable only at or above this common-share price.
     pub soft_call_trigger: Option<f64>,
+    /// Discrete cash dividends on the common share, on top of the
+    /// market's continuous yield.
+    pub cash_dividends: Vec<CashDividend>,
 }
 
 impl ConvertiblePreferred {
@@ -111,6 +121,7 @@ impl ConvertiblePreferred {
             convert_from: None,
             calls: Vec::new(),
             soft_call_trigger: None,
+            cash_dividends: Vec::new(),
         })
     }
 
@@ -217,73 +228,84 @@ impl ConvertiblePreferred {
     }
 
     /// The straight-preferred floor per share: the dividend stream (and
-    /// mandatory redemption, or the perpetuity tail) discounted at the
-    /// curve plus the credit spread — the value ignoring conversion.
-    pub fn preferred_floor(
+    /// mandatory redemption, or the perpetuity tail) under the market's
+    /// credit model — the value ignoring conversion. Under
+    /// Tsiveriotis-Fernandes that is the stream discounted at the curve
+    /// plus the spread; under jump to default the survival-weighted
+    /// stream plus the recovery on the preference.
+    pub fn preferred_floor<M: CreditModel>(
         &self,
-        market: &ConvertibleMarket,
+        market: &M,
         curve: &YieldCurve,
         settlement: NaiveDate,
     ) -> Result<f64, RustyQLibError> {
-        let year_fraction = |date: NaiveDate| {
-            curve
-                .day_count()
-                .year_fraction(curve.reference_date(), date)
-        };
+        let day_count = curve.day_count();
+        let year_fraction = |date: NaiveDate| day_count.year_fraction(curve.reference_date(), date);
         let t0 = year_fraction(settlement);
-        let df_risky =
-            |t: f64| curve.df(t) / curve.df(t0) * (-market.credit_spread * (t - t0)).exp();
         let dividend = self.periodic_dividend();
-        let dates = self.dividend_dates(settlement)?;
-        let mut value = 0.0;
-        for &date in &dates {
-            value += dividend * df_risky(year_fraction(date));
-        }
+        let mut flows: Vec<(f64, f64)> = self
+            .dividend_dates(settlement)?
+            .iter()
+            .map(|&date| (year_fraction(date) - t0, dividend))
+            .collect();
         let horizon = year_fraction(self.horizon_date(settlement));
-        if self.mandatory_redemption.is_some() {
-            value += self.preference * df_risky(horizon);
+        let terminal = if self.mandatory_redemption.is_some() {
+            self.preference
         } else {
-            value += self.perpetuity_tail(market, curve, horizon) * df_risky(horizon);
-        }
-        Ok(value)
+            self.perpetuity_tail(market.credit_rate(), curve, horizon)
+        };
+        flows.push((horizon - t0, terminal));
+        Ok(market.value_of_flows(curve, settlement, &flows, self.preference))
     }
 
     /// Continuing value at the horizon of the perpetual dividend
     /// stream: a discrete perpetuity at the curve's one-year forward
-    /// plus the credit spread.
-    fn perpetuity_tail(&self, market: &ConvertibleMarket, curve: &YieldCurve, horizon: f64) -> f64 {
-        let tail_yield = (curve.df(horizon) / curve.df(horizon + 1.0)).ln() + market.credit_spread;
+    /// plus the credit rate.
+    fn perpetuity_tail(&self, credit_rate: f64, curve: &YieldCurve, horizon: f64) -> f64 {
+        let tail_yield = (curve.df(horizon) / curve.df(horizon + 1.0)).ln() + credit_rate;
         let per_period = (-tail_yield / self.frequency.per_year() as f64).exp();
         self.periodic_dividend() * per_period / (1.0 - per_period)
     }
+}
 
-    /// Price per preferred share (dividend-accrual inclusive) on a
-    /// Tsiveriotis-Fernandes tree with `steps` time steps.
-    pub fn dirty_price_with_steps(
-        &self,
-        market: &ConvertibleMarket,
-        curve: &YieldCurve,
-        settlement: NaiveDate,
-        steps: usize,
-    ) -> Result<f64, RustyQLibError> {
-        if steps < 10 {
+impl ConvertibleInstrument for ConvertiblePreferred {
+    fn conversion_ratio(&self) -> f64 {
+        self.conversion_ratio
+    }
+
+    fn maturity_shares(&self, _spot: f64) -> f64 {
+        self.conversion_ratio
+    }
+
+    fn is_mandatory(&self) -> bool {
+        false
+    }
+
+    fn soft_call_trigger(&self) -> Option<f64> {
+        self.soft_call_trigger
+    }
+
+    fn conversion_price(&self) -> f64 {
+        ConvertiblePreferred::conversion_price(self)
+    }
+
+    fn accrued(&self, settlement: NaiveDate) -> Result<f64, RustyQLibError> {
+        self.accrued_dividend(settlement)
+    }
+
+    fn final_payment_date(&self, settlement: NaiveDate) -> Result<NaiveDate, RustyQLibError> {
+        let horizon = self.horizon_date(settlement);
+        if horizon <= settlement {
             return Err(RustyQLibError::invalid_input(
                 "preferred",
-                format!("the tree needs at least 10 steps, got {steps}"),
+                format!("redemption {horizon} is not after settlement {settlement}"),
             ));
         }
-        if !(market.spot > 0.0
-            && market.spot.is_finite()
-            && market.volatility > 0.0
-            && market.volatility.is_finite()
-            && market.dividend_yield.is_finite()
-            && market.credit_spread.is_finite())
-        {
-            return Err(RustyQLibError::invalid_input(
-                "preferred",
-                "market inputs must be finite with positive spot and volatility",
-            ));
-        }
+        Ok(horizon)
+    }
+
+    fn validate(&self) -> Result<(), RustyQLibError> {
+        validate_cash_dividends(&self.cash_dividends)?;
         if let Some(trigger) = self.soft_call_trigger {
             if !(trigger > 0.0 && trigger.is_finite()) {
                 return Err(RustyQLibError::invalid_input(
@@ -292,275 +314,179 @@ impl ConvertiblePreferred {
                 ));
             }
         }
-        tf_tree_value(self, market, curve, settlement, steps)
-    }
-
-    /// Price per preferred share with [`DEFAULT_TREE_STEPS`].
-    pub fn dirty_price(
-        &self,
-        market: &ConvertibleMarket,
-        curve: &YieldCurve,
-        settlement: NaiveDate,
-    ) -> Result<f64, RustyQLibError> {
-        self.dirty_price_with_steps(market, curve, settlement, DEFAULT_TREE_STEPS)
-    }
-
-    /// Price net of the accrued dividend (equal to the dirty price for
-    /// a non-cumulative preferred).
-    pub fn clean_price(
-        &self,
-        market: &ConvertibleMarket,
-        curve: &YieldCurve,
-        settlement: NaiveDate,
-    ) -> Result<f64, RustyQLibError> {
-        Ok(self.dirty_price(market, curve, settlement)? - self.accrued_dividend(settlement)?)
-    }
-
-    /// Equity delta per preferred share from a symmetric 1% spot bump.
-    pub fn delta(
-        &self,
-        market: &ConvertibleMarket,
-        curve: &YieldCurve,
-        settlement: NaiveDate,
-    ) -> Result<f64, RustyQLibError> {
-        spot_bump_delta(market, |m| self.dirty_price(m, curve, settlement))
-    }
-
-    /// The credit spread implied by a market price, holding the equity
-    /// inputs fixed.
-    pub fn implied_credit_spread(
-        &self,
-        dirty_price: f64,
-        market: &ConvertibleMarket,
-        curve: &YieldCurve,
-        settlement: NaiveDate,
-    ) -> Result<f64, RustyQLibError> {
-        if !(dirty_price > 0.0 && dirty_price.is_finite()) {
-            return Err(RustyQLibError::invalid_input(
-                "preferred",
-                format!("price must be positive, got {dirty_price}"),
-            ));
-        }
-        solve_implied_credit_spread(dirty_price, market, |m| {
-            self.dirty_price(m, curve, settlement)
-        })
-    }
-}
-
-/// The Tsiveriotis-Fernandes backward induction for the preferred.
-fn tf_tree_value(
-    preferred: &ConvertiblePreferred,
-    market: &ConvertibleMarket,
-    curve: &YieldCurve,
-    settlement: NaiveDate,
-    steps: usize,
-) -> Result<f64, RustyQLibError> {
-    let year_fraction = |date: NaiveDate| {
-        curve
-            .day_count()
-            .year_fraction(curve.reference_date(), date)
-    };
-    let t0 = year_fraction(settlement);
-    let horizon_date = preferred.horizon_date(settlement);
-    let horizon = year_fraction(horizon_date);
-    if horizon <= t0 {
-        return Err(RustyQLibError::invalid_input(
-            "preferred",
-            "the horizon is not after settlement",
-        ));
-    }
-    let dividend_dates = preferred.dividend_dates(settlement)?;
-    let dt = (horizon - t0) / steps as f64;
-    let up = (market.volatility * dt.sqrt()).exp();
-    let down = 1.0 / up;
-
-    let times: Vec<f64> = (0..=steps).map(|i| t0 + i as f64 * dt).collect();
-    let spread_df = (-market.credit_spread * dt).exp();
-    let mut riskfree_df = Vec::with_capacity(steps);
-    let mut risky_df = Vec::with_capacity(steps);
-    let mut probability = Vec::with_capacity(steps);
-    for i in 0..steps {
-        let df_step = curve.df(times[i + 1]) / curve.df(times[i]);
-        let growth = (-market.dividend_yield * dt).exp() / df_step;
-        let p = (growth - down) / (up - down);
-        if !(0.0..=1.0).contains(&p) {
-            return Err(RustyQLibError::NumericalError(format!(
-                "risk-neutral probability {p} outside [0, 1] at step {i}; \
-                 increase the tree steps or check the inputs"
-            )));
-        }
-        riskfree_df.push(df_step);
-        risky_df.push(df_step * spread_df);
-        probability.push(p);
-    }
-
-    // dividends assigned to their step interval, discounted to its edge
-    let dividend = preferred.periodic_dividend();
-    let mut dividend_at_step = vec![0.0_f64; steps];
-    for &date in &dividend_dates {
-        let time = year_fraction(date).clamp(t0, horizon);
-        let index = (((time - t0) / dt).ceil() as usize).clamp(1, steps) - 1;
-        let forward = -(riskfree_df[index].ln()) / dt;
-        dividend_at_step[index] +=
-            dividend * (-(forward + market.credit_spread) * (time - times[index])).exp();
-    }
-
-    // calls apply from their date onward — a preferred is continuously
-    // callable once its first call date passes — with a later schedule
-    // entry superseding the earlier one; the strike carries the accrued
-    // of the step's position in the dividend cycle
-    let mut call_at_step: Vec<Option<f64>> = vec![None; steps + 1];
-    if !preferred.calls.is_empty() {
-        let mut schedule: Vec<(f64, f64)> = Vec::new();
-        for call in &preferred.calls {
+        for call in &self.calls {
             if !(call.call_price > 0.0 && call.call_price.is_finite()) {
                 return Err(RustyQLibError::invalid_input(
                     "preferred",
                     format!("call price must be positive, got {}", call.call_price),
                 ));
             }
-            if call.call_date >= horizon_date {
-                continue;
-            }
-            let redemption = preferred.preference * call.call_price / 100.0;
-            schedule.push((year_fraction(call.call_date), redemption));
         }
-        schedule.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Ok(())
+    }
+
+    /// The preferred's schedule on the shared grid: dividends at stake
+    /// in their step, a standing (American) call from each schedule
+    /// entry with the dividend-cycle accrued in its strike, the
+    /// mandatory redemption or the perpetuity tail as the terminal
+    /// value (with the standing call applied there too), the
+    /// preference as the recovery claim, and a smoothed soft trigger.
+    fn event_grid(
+        &self,
+        curve: &YieldCurve,
+        settlement: NaiveDate,
+        steps: usize,
+        credit_rate: f64,
+    ) -> Result<EventGrid, RustyQLibError> {
+        let year_fraction = |date: NaiveDate| {
+            curve
+                .day_count()
+                .year_fraction(curve.reference_date(), date)
+        };
+        let t0 = year_fraction(settlement);
+        let horizon_date = self.horizon_date(settlement);
+        let horizon = year_fraction(horizon_date);
+        if horizon <= t0 {
+            return Err(RustyQLibError::invalid_input(
+                "preferred",
+                "the horizon is not after settlement",
+            ));
+        }
+        let dividend_dates = self.dividend_dates(settlement)?;
+        let dt = (horizon - t0) / steps as f64;
+        let times: Vec<f64> = (0..=steps).map(|i| t0 + i as f64 * dt).collect();
+        let riskfree_df: Vec<f64> = (0..steps)
+            .map(|i| curve.df(times[i + 1]) / curve.df(times[i]))
+            .collect();
+
+        // dividends assigned to their step interval, discounted to its
+        // edge; all at stake, since a standing call sits at every step
+        let dividend = self.periodic_dividend();
+        let mut coupon_at_step = vec![0.0_f64; steps];
+        for &date in &dividend_dates {
+            let time = year_fraction(date).clamp(t0, horizon);
+            let index = (((time - t0) / dt).ceil() as usize).clamp(1, steps) - 1;
+            let forward = -(riskfree_df[index].ln()) / dt;
+            coupon_at_step[index] +=
+                dividend * (-(forward + credit_rate) * (time - times[index])).exp();
+        }
+
+        // the recovery claim per step: the preference, paid on the
+        // dividend date that ends the period default is observed in
         let dividend_times: Vec<f64> = dividend_dates
             .iter()
             .map(|&date| year_fraction(date))
             .collect();
-        let period = 1.0 / preferred.frequency.per_year() as f64;
-        let accrued_at = |t: f64| -> f64 {
-            if !preferred.cumulative {
-                return 0.0;
-            }
-            match dividend_times
-                .iter()
-                .copied()
-                .find(|&paid| paid > t + 1e-12)
-            {
-                Some(next) => dividend * (1.0 - ((next - t) / period).clamp(0.0, 1.0)),
-                None => 0.0,
-            }
-        };
-        for (step, &t) in times.iter().enumerate() {
-            let redemption = schedule
-                .iter()
-                .rev()
-                .find(|(from, _)| *from <= t + 1e-9)
-                .map(|(_, k)| *k);
-            if let Some(k) = redemption {
-                call_at_step[step] = Some(k + accrued_at(t));
-            }
-        }
-    }
+        let default_claim_at_step: Vec<f64> = times[1..]
+            .iter()
+            .map(|&time| {
+                let paid = dividend_times
+                    .iter()
+                    .copied()
+                    .find(|&paid| paid >= time - 1e-9)
+                    .unwrap_or(horizon);
+                self.preference * curve.df(paid) / curve.df(time)
+            })
+            .collect();
 
-    let convert_from = year_fraction(preferred.convert_from.unwrap_or(preferred.dated_date));
-    let ratio = preferred.conversion_ratio;
-    let spot_at =
-        |step: usize, j: usize| market.spot * up.powi(j as i32) * down.powi((step - j) as i32);
-
-    // terminal: mandatory redemption at the preference, or the
-    // perpetuity continuing value of the remaining dividends
-    let terminal_cash = if preferred.mandatory_redemption.is_some() {
-        preferred.preference
-    } else {
-        preferred.perpetuity_tail(market, curve, horizon)
-    };
-    let mut equity: Vec<f64> = Vec::with_capacity(steps + 1);
-    let mut cash: Vec<f64> = Vec::with_capacity(steps + 1);
-    for j in 0..=steps {
-        let shares = ratio * spot_at(steps, j);
-        if shares > terminal_cash {
-            equity.push(shares);
-            cash.push(0.0);
-        } else {
-            equity.push(0.0);
-            cash.push(terminal_cash);
-        }
-    }
-    // the soft trigger is smoothed across the one-node cell it falls in
-    // (linear in log-price): a hard indicator makes the lattice price
-    // sawtooth in spot as the node ladder slides past the fixed trigger
-    let call_weight = |spot: f64| -> f64 {
-        match preferred.soft_call_trigger {
-            None => 1.0,
-            Some(trigger) => ((spot / trigger).ln() / (2.0 * up.ln()) + 0.5).clamp(0.0, 1.0),
-        }
-    };
-    // the truncation horizon inherits a standing call: the continuing
-    // value is capped at the strike (or forced into conversion)
-    // wherever the trigger is met
-    if let Some(strike) = call_at_step[steps] {
-        let in_window = times[steps] >= convert_from - 1e-9;
-        for j in 0..=steps {
-            let spot = spot_at(steps, j);
-            let weight = call_weight(spot);
-            if weight <= 0.0 {
-                continue;
-            }
-            let shares = ratio * spot;
-            let forced = if in_window {
-                strike.max(shares)
-            } else {
-                strike
+        // calls apply from their date onward — a preferred is
+        // continuously callable once its first call date passes — with
+        // a later schedule entry superseding the earlier one; the strike
+        // carries the accrued of the step's position in the dividend
+        // cycle
+        let mut call_at_step: Vec<Option<f64>> = vec![None; steps + 1];
+        if !self.calls.is_empty() {
+            let mut schedule: Vec<(f64, f64)> = self
+                .calls
+                .iter()
+                .filter(|call| call.call_date < horizon_date)
+                .map(|call| {
+                    (
+                        year_fraction(call.call_date),
+                        self.preference * call.call_price / 100.0,
+                    )
+                })
+                .collect();
+            schedule.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let period = 1.0 / self.frequency.per_year() as f64;
+            let accrued_at = |t: f64| -> f64 {
+                if !self.cumulative {
+                    return 0.0;
+                }
+                match dividend_times
+                    .iter()
+                    .copied()
+                    .find(|&paid| paid > t + 1e-12)
+                {
+                    Some(next) => dividend * (1.0 - ((next - t) / period).clamp(0.0, 1.0)),
+                    None => 0.0,
+                }
             };
-            if equity[j] + cash[j] > forced {
-                let (forced_e, forced_b) = if in_window && shares > strike {
-                    (shares, 0.0)
-                } else {
-                    (0.0, strike)
-                };
-                equity[j] += weight * (forced_e - equity[j]);
-                cash[j] += weight * (forced_b - cash[j]);
-            }
-        }
-    }
-
-    for step in (0..steps).rev() {
-        let p = probability[step];
-        let in_window = times[step] >= convert_from - 1e-9;
-        for j in 0..=step {
-            let mut e = riskfree_df[step] * (p * equity[j + 1] + (1.0 - p) * equity[j]);
-            let mut b = risky_df[step] * (p * cash[j + 1] + (1.0 - p) * cash[j]);
-            b += dividend_at_step[step];
-            let spot = spot_at(step, j);
-            let shares = ratio * spot;
-
-            if let Some(strike) = call_at_step[step] {
-                let weight = call_weight(spot);
-                if weight > 0.0 {
-                    let forced = if in_window {
-                        strike.max(shares)
-                    } else {
-                        strike
-                    };
-                    if e + b > forced {
-                        let (forced_e, forced_b) = if in_window && shares > strike {
-                            (shares, 0.0)
-                        } else {
-                            (0.0, strike)
-                        };
-                        e += weight * (forced_e - e);
-                        b += weight * (forced_b - b);
-                    }
+            for (step, &t) in times.iter().enumerate() {
+                let redemption = schedule
+                    .iter()
+                    .rev()
+                    .find(|(from, _)| *from <= t + 1e-9)
+                    .map(|(_, k)| *k);
+                if let Some(k) = redemption {
+                    call_at_step[step] = Some(k + accrued_at(t));
                 }
             }
-            if in_window && shares > e + b {
-                e = shares;
-                b = 0.0;
-            }
-            equity[j] = e;
-            cash[j] = b;
         }
+
+        // terminal: mandatory redemption at the preference, or the
+        // perpetuity continuing value of the remaining dividends
+        let redemption = if self.mandatory_redemption.is_some() {
+            self.preference
+        } else {
+            self.perpetuity_tail(credit_rate, curve, horizon)
+        };
+
+        let cash_dividend_at_step =
+            cash_dividends_at_steps(&self.cash_dividends, &times, year_fraction);
+        Ok(EventGrid {
+            dt,
+            times,
+            riskfree_df,
+            coupon_at_step,
+            coupon_kept_at_step: vec![0.0; steps],
+            default_claim_at_step,
+            call_at_step,
+            put_at_step: vec![None; steps + 1],
+            make_whole_at_step: vec![0.0; steps + 1],
+            conversion_trigger_at_step: vec![None; steps + 1],
+            event_probability_at_step: vec![0.0; steps + 1],
+            par_put_at_step: vec![0.0; steps + 1],
+            additional_shares_at_step: vec![Vec::new(); steps + 1],
+            additional_share_prices: Vec::new(),
+            convert_from: year_fraction(self.convert_from.unwrap_or(self.dated_date)),
+            convert_until: horizon,
+            redemption,
+            final_principal: redemption,
+            // prices are per share
+            outstanding: 100.0,
+            smooth_trigger: true,
+            exercise_at_horizon: true,
+            cash_dividend_at_step,
+        })
     }
-    Ok(equity[0] + cash[0])
+
+    fn floor<M: CreditModel>(
+        &self,
+        market: &M,
+        curve: &YieldCurve,
+        settlement: NaiveDate,
+    ) -> Result<f64, RustyQLibError> {
+        self.preferred_floor(market, curve, settlement)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bonds::convertible::{
+        ConvertibleFdGrid, ConvertibleMarket, ConvertiblePricing, JumpToDefaultMarket,
+    };
     use crate::core::curves::Compounding;
     use crate::core::daycount::DayCountConvention;
 
@@ -593,6 +519,17 @@ mod tests {
         }
     }
 
+    fn jtd_market(spot: f64) -> JumpToDefaultMarket {
+        JumpToDefaultMarket {
+            spot,
+            volatility: 0.30,
+            dividend_yield: 0.01,
+            borrow_cost: 0.0,
+            hazard_rate: 0.03,
+            recovery_rate: 0.10,
+        }
+    }
+
     #[test]
     fn busted_preferred_collapses_to_the_analytic_floor() {
         // near-worthless common: the cash part is deterministic, so the
@@ -618,6 +555,17 @@ mod tests {
             ..m
         };
         assert!(cps.preferred_floor(&wide, &curve, settlement).unwrap() < floor);
+        // and under jump to default the survival-weighted floor with
+        // the recovery on the preference
+        let jm = jtd_market(0.01);
+        let tree = cps.dirty_price(&jm, &curve, settlement).unwrap();
+        let floor = cps.preferred_floor(&jm, &curve, settlement).unwrap();
+        assert!((tree - floor).abs() < 0.05, "{tree} vs {floor}");
+        let generous = JumpToDefaultMarket {
+            recovery_rate: 0.5,
+            ..jm
+        };
+        assert!(cps.preferred_floor(&generous, &curve, settlement).unwrap() > floor);
     }
 
     #[test]
@@ -641,7 +589,7 @@ mod tests {
             manual += cps.periodic_dividend() * df(date);
         }
         manual += 100.0 * df(d(2031, 5, 15));
-        assert!((floor - manual).abs() < 1e-12, "{floor} vs {manual}");
+        assert!((floor - manual).abs() < 1e-9, "{floor} vs {manual}");
         // and the tree agrees in the busted limit
         let tree = cps.dirty_price(&m, &curve, settlement).unwrap();
         assert!((tree - floor).abs() < 1e-6, "{tree} vs {floor}");
@@ -757,20 +705,77 @@ mod tests {
         let curve = flat(0.04);
         let settlement = d(2026, 8, 14);
         let m = market(60.0);
-        let price = cps.dirty_price(&m, &curve, settlement).unwrap();
+        let clean = cps.clean_price(&m, &curve, settlement).unwrap();
         let implied = cps
-            .implied_credit_spread(price, &m, &curve, settlement)
+            .implied_credit_spread(clean, &m, &curve, settlement)
             .unwrap();
         assert!(
             (implied - m.credit_spread).abs() < 1e-5,
             "implied {implied}"
         );
+        let implied_vol = cps
+            .implied_volatility(clean, &m, &curve, settlement)
+            .unwrap();
+        assert!(
+            (implied_vol - m.volatility).abs() < 1e-5,
+            "vol {implied_vol}"
+        );
         assert!((cps.conversion_price() - 62.5).abs() < 1e-12);
         assert!((cps.parity(60.0) - 96.0).abs() < 1e-12);
-        let premium = cps.conversion_premium(price, 60.0).unwrap();
+        let premium = cps.conversion_premium(clean, 60.0).unwrap();
         assert!(premium > 0.0);
-        let yield_now = cps.current_yield(price).unwrap();
-        assert!((yield_now - 5.5 / price).abs() < 1e-12);
+        let yield_now = cps.current_yield(clean).unwrap();
+        assert!((yield_now - 5.5 / clean).abs() < 1e-12);
+    }
+
+    #[test]
+    fn finite_differences_agree_with_the_tree() {
+        // the shared grid engine on the preferred, under both credit
+        // models, with a standing soft call in play
+        let mut cps = preferred();
+        cps.calls = vec![CallOption {
+            call_date: d(2029, 5, 15),
+            call_price: 101.0,
+        }];
+        cps.soft_call_trigger = Some(81.25);
+        let curve = flat(0.04);
+        let settlement = d(2026, 8, 14);
+        // a 40-year perpetual with a standing call converges slowly on
+        // both engines (each smooths the trigger over its own cell), so
+        // the comparison uses refined grids and a loose tolerance
+        let grid = ConvertibleFdGrid {
+            time_steps: 1600,
+            space_steps: 1600,
+            grid_stdevs: 5.0,
+        };
+        for spot in [30.0, 62.5, 100.0] {
+            let m = market(spot);
+            let tree = cps
+                .dirty_price_with_steps(&m, &curve, settlement, 1600)
+                .unwrap();
+            let fd = cps.fd_valuation(&m, &curve, settlement, grid).unwrap();
+            assert!(
+                (fd.dirty_price - tree).abs() < 0.6,
+                "TF spot {spot}: fd {} vs tree {tree}",
+                fd.dirty_price
+            );
+            assert!(fd.delta > 0.0 && fd.delta <= cps.conversion_ratio + 0.05);
+            let jm = jtd_market(spot);
+            let tree = cps
+                .dirty_price_with_steps(&jm, &curve, settlement, 1600)
+                .unwrap();
+            let fd = cps.fd_valuation(&jm, &curve, settlement, grid).unwrap();
+            assert!(
+                (fd.dirty_price - tree).abs() < 0.6,
+                "JTD spot {spot}: fd {} vs tree {tree}",
+                fd.dirty_price
+            );
+        }
+        // and the bump greeks run
+        let greeks = cps
+            .fd_greeks(&market(62.5), &curve, settlement, grid, &[5.0, 10.0, 30.0])
+            .unwrap();
+        assert!(greeks.vega > 0.0 && greeks.credit_dv01 > 0.0, "{greeks:?}");
     }
 
     #[test]
@@ -791,6 +796,9 @@ mod tests {
         assert!(cps
             .dirty_price_with_steps(&m, &curve, d(2026, 8, 14), 5)
             .is_err());
+        let mut bad_trigger = cps.clone();
+        bad_trigger.soft_call_trigger = Some(-1.0);
+        assert!(bad_trigger.dirty_price(&m, &curve, d(2026, 8, 14)).is_err());
         // settlement past a mandatory redemption
         let mut finite = cps.clone();
         finite.mandatory_redemption = Some(d(2031, 5, 15));
