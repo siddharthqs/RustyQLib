@@ -229,17 +229,27 @@ mod tests {
             let price = bill.price_from_discount_rate(dr, settle).unwrap();
             let bey = bill.bond_equivalent_yield(dr, settle).unwrap();
             let back = bill.price_from_bond_equivalent_yield(bey, settle).unwrap();
-            assert!((back - price).abs() < 1e-12, "{maturity}: {back} vs {price}");
+            assert!(
+                (back - price).abs() < 1e-12,
+                "{maturity}: {back} vs {price}"
+            );
         }
         // exactly at the cutoff the simple branch applies
         let cutoff = TreasuryBill::new(100.0, settle + chrono::Days::new(182)).unwrap();
         let simple = 100.0 / (1.0 + 0.04 * 182.0 / 365.0);
-        let priced = cutoff.price_from_bond_equivalent_yield(0.04, settle).unwrap();
+        let priced = cutoff
+            .price_from_bond_equivalent_yield(0.04, settle)
+            .unwrap();
         assert!((priced - simple).abs() < 1e-14, "{priced} vs {simple}");
         // and one day later it does not
         let beyond = TreasuryBill::new(100.0, settle + chrono::Days::new(183)).unwrap();
         assert!(
-            (beyond.price_from_bond_equivalent_yield(0.04, settle).unwrap() - simple).abs() > 1e-9
+            (beyond
+                .price_from_bond_equivalent_yield(0.04, settle)
+                .unwrap()
+                - simple)
+                .abs()
+                > 1e-9
         );
         // a yield that wipes out the price is an error, not a negative one
         assert!(cutoff

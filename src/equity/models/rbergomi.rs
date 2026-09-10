@@ -754,13 +754,22 @@ mod tests {
         assert!(RBergomiParams { rho: -1.5, ..good }.validate().is_err());
         // NaN and infinities slip past plain comparisons
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(RBergomiParams { xi0: bad, ..good }.validate().is_err(), "xi0 = {bad}");
-            assert!(RBergomiParams { eta: bad, ..good }.validate().is_err(), "eta = {bad}");
+            assert!(
+                RBergomiParams { xi0: bad, ..good }.validate().is_err(),
+                "xi0 = {bad}"
+            );
+            assert!(
+                RBergomiParams { eta: bad, ..good }.validate().is_err(),
+                "eta = {bad}"
+            );
             assert!(
                 RBergomiParams { hurst: bad, ..good }.validate().is_err(),
                 "hurst = {bad}"
             );
-            assert!(RBergomiParams { rho: bad, ..good }.validate().is_err(), "rho = {bad}");
+            assert!(
+                RBergomiParams { rho: bad, ..good }.validate().is_err(),
+                "rho = {bad}"
+            );
         }
         assert!(RBergomiParams { eta: 0.0, ..good }.validate().is_ok());
     }
@@ -769,8 +778,14 @@ mod tests {
     fn generators_reject_out_of_domain_grids() {
         // both schemes share one gate: steps, horizon and Hurst exponent
         for hurst in [0.0, -0.1, 0.51, f64::NAN, f64::INFINITY] {
-            assert!(RBergomiPaths::new(hurst, 8, 1.0).is_err(), "exact H = {hurst}");
-            assert!(RBergomiHybrid::new(hurst, 8, 1.0).is_err(), "hybrid H = {hurst}");
+            assert!(
+                RBergomiPaths::new(hurst, 8, 1.0).is_err(),
+                "exact H = {hurst}"
+            );
+            assert!(
+                RBergomiHybrid::new(hurst, 8, 1.0).is_err(),
+                "hybrid H = {hurst}"
+            );
             assert!(
                 RBergomiGenerator::for_grid(hurst, 8, 1.0).is_err(),
                 "generator H = {hurst}"
@@ -789,10 +804,16 @@ mod tests {
             let z = vec![0.7; 8];
             let (mut dwv, mut vh) = (vec![0.0; 4], vec![0.0; 4]);
             gen.correlate(&z, &mut dwv, &mut vh);
-            assert!(vh.iter().chain(&dwv).all(|x| x.is_finite()), "exact H = {hurst}");
+            assert!(
+                vh.iter().chain(&dwv).all(|x| x.is_finite()),
+                "exact H = {hurst}"
+            );
             let mut scratch = Vec::new();
             hyb.correlate(&z, &mut dwv, &mut vh, &mut scratch);
-            assert!(vh.iter().chain(&dwv).all(|x| x.is_finite()), "hybrid H = {hurst}");
+            assert!(
+                vh.iter().chain(&dwv).all(|x| x.is_finite()),
+                "hybrid H = {hurst}"
+            );
         }
     }
 

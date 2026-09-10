@@ -84,8 +84,8 @@ feeds).
   the source of truth), vol surfaces (strike, moneyness, FX delta), robust
   implied vol, day counts, and holiday calendars with business-day conventions
   and schedule generation.
-- **Free market data** — US Treasury par yields, NY Fed SOFR/EFFR, and Cboe
-  delayed option chains.
+- **Free market data** — US Treasury par yields, NY Fed SOFR/EFFR, the DTCC
+  GCF Repo Index, and Cboe delayed option chains.
 
 ## Feature flags
 
@@ -110,6 +110,7 @@ cat contracts.json | rustyqlib price -i - | jq '.[].output.pv'
 # fetch free market data
 rustyqlib fetch ust -o ust.json                       # Treasury par yields
 rustyqlib fetch sofr                                  # NY Fed reference rates
+rustyqlib fetch gcf --date 2026-08-05                 # DTCC GCF Repo Index
 rustyqlib fetch chain --symbol AAPL --normalize       # Cboe option chain
 
 # chain -> implied vol surface -> Dupire local vol (documents + 3D plots)

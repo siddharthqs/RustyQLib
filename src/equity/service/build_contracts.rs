@@ -66,11 +66,9 @@ mod tests {
 
     #[test]
     fn valid_option_batch_builds() {
-        let built = build_eq_contracts_from_json(vec![
-            option_contract("ABC"),
-            option_contract("ABC"),
-        ])
-        .expect("valid batch must build");
+        let built =
+            build_eq_contracts_from_json(vec![option_contract("ABC"), option_contract("ABC")])
+                .expect("valid batch must build");
         assert_eq!(built.len(), 2);
         assert_eq!(built[0].base.symbol, "ABC");
     }
@@ -106,6 +104,9 @@ mod tests {
             msg.contains("contracts[0]") && msg.contains("'ABC'"),
             "error should name the offending contract: {msg}"
         );
-        assert!(msg.contains("maturity"), "error should name the field: {msg}");
+        assert!(
+            msg.contains("maturity"),
+            "error should name the field: {msg}"
+        );
     }
 }

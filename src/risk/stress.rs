@@ -406,7 +406,8 @@ mod tests {
     #[test]
     fn hand_built_configs_are_validated_by_the_runner() {
         let mut b = EquityPortfolio::new();
-        b.add(option("ACME", PutOrCall::Call, 100.0), 100.0).unwrap();
+        b.add(option("ACME", PutOrCall::Call, 100.0), 100.0)
+            .unwrap();
         let empty = StressConfig {
             scenarios: vec![],
             arbitrage: ArbitrageCheck::default(),
@@ -420,7 +421,10 @@ mod tests {
             }],
             arbitrage: ArbitrageCheck::default(),
         };
-        assert!(stress_mtm(&b, &no_shocks).is_err(), "scenario with no shocks");
+        assert!(
+            stress_mtm(&b, &no_shocks).is_err(),
+            "scenario with no shocks"
+        );
         // a relative time shock never reaches the repricer
         let bad_time = StressConfig {
             scenarios: vec![StressScenario {

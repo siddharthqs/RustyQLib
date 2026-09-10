@@ -50,7 +50,15 @@ struct RrTerms {
 }
 
 impl RrTerms {
-    fn new(s: f64, h: f64, r: f64, q: f64, sigma: f64, t: f64, direction: BarrierDirection) -> Self {
+    fn new(
+        s: f64,
+        h: f64,
+        r: f64,
+        q: f64,
+        sigma: f64,
+        t: f64,
+        direction: BarrierDirection,
+    ) -> Self {
         let down = direction == BarrierDirection::Down;
         let knocked_now = if down { s <= h } else { s >= h };
         let eta: f64 = if down { 1.0 } else { -1.0 };

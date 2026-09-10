@@ -301,11 +301,10 @@ impl Accumulator {
         let gamma = (s_up - 2.0 * pv + s_dn) / (ds * ds);
         // keep the down-bumped vol strictly positive on tiny-vol inputs
         let dv = VOL_BUMP.min(0.5 * self.sigma);
-        let vega = (self.value_with(|a| a.sigma += dv) - self.value_with(|a| a.sigma -= dv))
-            / (2.0 * dv);
+        let vega =
+            (self.value_with(|a| a.sigma += dv) - self.value_with(|a| a.sigma -= dv)) / (2.0 * dv);
         let dr = RATE_BUMP;
-        let rho =
-            (self.value_with(|a| a.r += dr) - self.value_with(|a| a.r -= dr)) / (2.0 * dr);
+        let rho = (self.value_with(|a| a.r += dr) - self.value_with(|a| a.r -= dr)) / (2.0 * dr);
         // one calendar day either side, shortened near expiry so the
         // down leg keeps a positive life
         let dt = (1.0_f64 / 365.0).min(0.5 * self.t);
@@ -703,7 +702,11 @@ mod tests {
         // (the delta sign is regime-dependent for a geared holder near
         // the knock-out, so only the vol exposure is asserted by sign)
         assert!(g.delta.is_finite() && g.delta != 0.0, "delta {}", g.delta);
-        assert!(g.vega < 0.0, "accumulator holder is short vol: vega {}", g.vega);
+        assert!(
+            g.vega < 0.0,
+            "accumulator holder is short vol: vega {}",
+            g.vega
+        );
         assert!(g.gamma.is_finite() && g.rho.is_finite() && g.theta.is_finite());
         // the Greeks are exactly the central differences of the pricer
         let ds = a.s0 * crate::equity::conventions::SPOT_REL_BUMP;
@@ -718,7 +721,10 @@ mod tests {
         vup.sigma += dv;
         let mut vdn = a.clone();
         vdn.sigma -= dv;
-        assert_eq!(g.vega, (vup.analytic_npv() - vdn.analytic_npv()) / (2.0 * dv));
+        assert_eq!(
+            g.vega,
+            (vup.analytic_npv() - vdn.analytic_npv()) / (2.0 * dv)
+        );
         assert_eq!(g.gamma_p, a.s0 * g.gamma / 100.0);
         // the Monte Carlo route is seeded, so its bumps are
         // common-random-number differences: finite and non-zero
@@ -729,7 +735,11 @@ mod tests {
         let result = mc.price().unwrap();
         assert!(result.std_err.is_some());
         let g = &result.greeks;
-        assert!(g.delta.is_finite() && g.delta != 0.0, "mc delta {}", g.delta);
+        assert!(
+            g.delta.is_finite() && g.delta != 0.0,
+            "mc delta {}",
+            g.delta
+        );
         // (knock-out flips make a bumped MC vega noisy, so only
         // finiteness is asserted here; the analytic sign is above)
         for x in [g.gamma, g.vega, g.rho, g.theta] {

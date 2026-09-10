@@ -337,7 +337,11 @@ mod tests {
         let empty = martingale_report(&|_, _| 0.2, &curve, 100.0, &[], &config);
         assert!(!empty.within_threshold);
         assert!(
-            empty.reason.as_deref().unwrap().contains("no usable targets"),
+            empty
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("no usable targets"),
             "{:?}",
             empty.reason
         );
@@ -363,7 +367,10 @@ mod tests {
             let report = martingale_report(&|_, _| 0.2, &curve, bad_spot, &targets, &config);
             assert!(!report.within_threshold, "spot {bad_spot}");
             let reason = report.reason.as_deref().expect("a reason is set");
-            assert!(reason.contains("spot must be finite and positive"), "{reason}");
+            assert!(
+                reason.contains("spot must be finite and positive"),
+                "{reason}"
+            );
             assert!(report.checks.is_empty(), "nothing was simulated");
             assert_eq!(report.paths, 0);
             assert_eq!(report.max_abs_z, 0.0, "no infinite z-score");

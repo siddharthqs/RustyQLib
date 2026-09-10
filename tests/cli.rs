@@ -271,9 +271,7 @@ fn risk_rejects_invalid_confidence() {
             .assert()
             .code(1)
             .stdout(predicates::str::is_empty())
-            .stderr(contains(
-                "--confidence must be strictly between 0.5 and 1",
-            ));
+            .stderr(contains("--confidence must be strictly between 0.5 and 1"));
     }
     // just inside the range still runs
     cli()
@@ -315,7 +313,11 @@ fn risk_rejects_a_portfolio_that_disagrees_with_itself() {
     // scenarios off one spot and would reprice off another
     let mixed = std::fs::read_to_string(fixture("portfolio.json"))
         .unwrap()
-        .replacen("\"underlying_price\": 100.0", "\"underlying_price\": 120.0", 1);
+        .replacen(
+            "\"underlying_price\": 100.0",
+            "\"underlying_price\": 120.0",
+            1,
+        );
     cli()
         .args(["risk", "-i", "-"])
         .write_stdin(mixed)
@@ -325,7 +327,11 @@ fn risk_rejects_a_portfolio_that_disagrees_with_itself() {
     // and two valuation dates
     let dated = std::fs::read_to_string(fixture("portfolio.json"))
         .unwrap()
-        .replacen("\"valuation_date\": \"2026-01-01\"", "\"valuation_date\": \"2026-01-02\"", 1);
+        .replacen(
+            "\"valuation_date\": \"2026-01-01\"",
+            "\"valuation_date\": \"2026-01-02\"",
+            1,
+        );
     cli()
         .args(["risk", "-i", "-"])
         .write_stdin(dated)
@@ -755,6 +761,90 @@ fn fetch_rate_xml_output_works() {
 }
 
 #[test]
+fn fetch_gcf_emits_both_collateral_classes_as_published() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "gcf", "--from-file"])
+            .arg(fixture("dtcc_gcfindex.csv")),
+    );
+    let meta = &doc["metadata"];
+    assert_eq!(meta["index"], "DTCC GCF Repo Index");
+    assert_eq!(meta["index_date"], "2026-08-07", "latest row wins");
+    assert_eq!(meta["unit"], "percent");
+    assert_eq!(meta["par_unit"], "USD");
+    assert!(meta["source"].as_str().unwrap().contains("DTCC"));
+    assert!(meta["file"].as_str().unwrap().contains("dtcc_gcfindex"));
+    assert_eq!(doc["index"]["date"], "2026-08-07");
+    assert_eq!(doc["index"]["treasury"]["weighted_average_rate"], 4.383);
+    assert_eq!(
+        doc["index"]["treasury"]["total_par_value"],
+        57_300_000_000.0
+    );
+    assert_eq!(doc["index"]["mbs"]["weighted_average_rate"], 4.397);
+    assert_eq!(doc["index"]["mbs"]["total_par_value"], 40_250_000_000.0);
+}
+
+#[test]
+fn fetch_gcf_honors_date_and_names_the_nearest_published_day() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "gcf", "--date", "2026-08-04", "--from-file"])
+            .arg(fixture("dtcc_gcfindex.csv")),
+    );
+    assert_eq!(doc["index"]["date"], "2026-08-04");
+    assert_eq!(doc["index"]["treasury"]["weighted_average_rate"], 4.388);
+    // Saturday Aug 8: nearest earlier row is Friday Aug 7
+    cli()
+        .args(["fetch", "gcf", "--date", "2026-08-08", "--from-file"])
+        .arg(fixture("dtcc_gcfindex.csv"))
+        .assert()
+        .code(1)
+        .stdout(predicates::str::is_empty())
+        .stderr(contains("2026-08-07"));
+}
+
+#[test]
+fn fetch_gcf_xml_output_works() {
+    cli()
+        .args(["fetch", "gcf", "--format", "xml", "--from-file"])
+        .arg(fixture("dtcc_gcfindex.csv"))
+        .assert()
+        .success()
+        .stdout(contains("<?xml"))
+        .stdout(contains("<gcf_repo_index>"))
+        .stdout(contains(
+            "<weighted_average_rate>4.383</weighted_average_rate>",
+        ));
+}
+
+#[test]
+fn fetch_gcf_rejects_a_truncated_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("truncated.csv");
+    let text = std::fs::read_to_string(fixture("dtcc_gcfindex.csv")).unwrap();
+    // drop the last data row but keep the trailer count
+    let mut lines: Vec<&str> = text.lines().collect();
+    let trailer = lines.pop().unwrap();
+    lines.pop();
+    lines.push(trailer);
+    std::fs::write(
+        &path,
+        lines.join(
+            "
+",
+        ),
+    )
+    .unwrap();
+    cli()
+        .args(["fetch", "gcf", "--from-file"])
+        .arg(&path)
+        .assert()
+        .code(1)
+        .stderr(contains("TRAILER"))
+        .stderr(contains("truncated"));
+}
+
+#[test]
 fn fetch_chain_emits_the_verbatim_feed_response() {
     let doc = stdout_json(
         cli()
@@ -823,11 +913,11 @@ fn fetch_chain_requires_a_symbol_and_rejects_date() {
 /// every source but `chain`, quietly handing back a different document.
 #[test]
 fn fetch_rejects_chain_only_flags_on_other_sources() {
-    for source in ["ust", "sofr", "effr"] {
-        let file = if source == "ust" {
-            fixture("ust_par_yields_2026.csv")
-        } else {
-            fixture("nyfed_sofr.json")
+    for source in ["ust", "sofr", "effr", "gcf"] {
+        let file = match source {
+            "ust" => fixture("ust_par_yields_2026.csv"),
+            "gcf" => fixture("dtcc_gcfindex.csv"),
+            _ => fixture("nyfed_sofr.json"),
         };
         cli()
             .args(["fetch", source, "--symbol", "AAPL", "--from-file"])

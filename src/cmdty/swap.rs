@@ -749,7 +749,8 @@ mod tests {
         )
         .is_err());
         assert!(
-            CommoditySwap::monthly(10_000.0, 70.0, PayerReceiver::Payer, e, e, cal.clone()).is_err()
+            CommoditySwap::monthly(10_000.0, 70.0, PayerReceiver::Payer, e, e, cal.clone())
+                .is_err()
         );
         // a negative payment lag is rejected at construction, as on the APO
         assert!(CommoditySwap::new(

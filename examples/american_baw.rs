@@ -189,7 +189,8 @@ fn main() {
         println!("  {:<26} {:>12.6}", "T = infinity (exact)", perp);
         common::note(&format!(
             "perpetual exercise boundary S** = {:.4}; finite-maturity American",
-            exercise_boundary(STRIKE, RATE, DIV, VOL, PutOrCall::Put).expect("positive rate and vol")
+            exercise_boundary(STRIKE, RATE, DIV, VOL, PutOrCall::Put)
+                .expect("positive rate and vol")
         ));
         common::note("prices increase with maturity toward the exact perpetual value");
     }

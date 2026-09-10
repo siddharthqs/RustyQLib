@@ -254,13 +254,7 @@ pub(crate) fn ln_price_cf_with<J: JumpSpec>(
     hp: &HestonParams,
     j: &J,
 ) -> Cpx {
-    characteristic_fn(u, s, r, q, t, hp).mul(jump_factor(
-        u,
-        t,
-        j.intensity(),
-        j.kbar(),
-        j.cf(u),
-    ))
+    characteristic_fn(u, s, r, q, t, hp).mul(jump_factor(u, t, j.intensity(), j.kbar(), j.cf(u)))
 }
 
 /// [`ln_price_cf_with`] for a whole parameter set.
@@ -1007,7 +1001,10 @@ mod tests {
             }
             // the Heston leg is gated by the same rule
             assert!(BatesParams {
-                heston: HestonParams { v0: bad, ..heston() },
+                heston: HestonParams {
+                    v0: bad,
+                    ..heston()
+                },
                 jumps: bates().jumps,
             }
             .validate()

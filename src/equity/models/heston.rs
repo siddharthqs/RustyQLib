@@ -289,10 +289,11 @@ pub fn cos_smile(
     // the strip's smallest strike stands in for `k`: it is positive iff
     // every strike is (a NaN strike is kept, so it fails the gate too);
     // an empty strip still validates spot, expiry and parameters
-    let k_min = strikes
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, |m, k| if k < m || k.is_nan() { k } else { m });
+    let k_min =
+        strikes.iter().copied().fold(
+            f64::INFINITY,
+            |m, k| if k < m || k.is_nan() { k } else { m },
+        );
     check_inputs(s, k_min, t, hp);
     let pricer = crate::equity::cos::CosPricer::new(
         &|u| characteristic_fn(u, s, r, q, t, hp),
@@ -660,7 +661,15 @@ mod tests {
         // plain comparisons let NaN through; every positive parameter
         // and the correlation must refuse NaN and both infinities
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(HestonParams { v0: bad, ..params() }.validate().is_err(), "v0 = {bad}");
+            assert!(
+                HestonParams {
+                    v0: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "v0 = {bad}"
+            );
             assert!(
                 HestonParams {
                     kappa: bad,
@@ -688,7 +697,15 @@ mod tests {
                 .is_err(),
                 "vol_of_vol = {bad}"
             );
-            assert!(HestonParams { rho: bad, ..params() }.validate().is_err(), "rho = {bad}");
+            assert!(
+                HestonParams {
+                    rho: bad,
+                    ..params()
+                }
+                .validate()
+                .is_err(),
+                "rho = {bad}"
+            );
         }
         // the finding this closes: a NaN v0 used to price to a finite,
         // wrong number through with_vol_shift's max(1e-6) floor — the
@@ -714,7 +731,16 @@ mod tests {
             (
                 "cash binary, t = 0",
                 Box::new(move || {
-                    heston_binary_cash_price(100.0, 100.0, 0.05, 0.0, 0.0, &hp, 1.0, PutOrCall::Call)
+                    heston_binary_cash_price(
+                        100.0,
+                        100.0,
+                        0.05,
+                        0.0,
+                        0.0,
+                        &hp,
+                        1.0,
+                        PutOrCall::Call,
+                    )
                 }),
             ),
             (
@@ -738,14 +764,29 @@ mod tests {
             (
                 "cos smile, negative strike in the strip",
                 Box::new(move || {
-                    cos_smile(100.0, 0.05, 0.0, 1.0, &hp, &[90.0, -100.0, 110.0], PutOrCall::Call)
-                        [0]
+                    cos_smile(
+                        100.0,
+                        0.05,
+                        0.0,
+                        1.0,
+                        &hp,
+                        &[90.0, -100.0, 110.0],
+                        PutOrCall::Call,
+                    )[0]
                 }),
             ),
             (
                 "cos smile, NaN strike in the strip",
                 Box::new(move || {
-                    cos_smile(100.0, 0.05, 0.0, 1.0, &hp, &[90.0, f64::NAN], PutOrCall::Call)[0]
+                    cos_smile(
+                        100.0,
+                        0.05,
+                        0.0,
+                        1.0,
+                        &hp,
+                        &[90.0, f64::NAN],
+                        PutOrCall::Call,
+                    )[0]
                 }),
             ),
             (
@@ -757,7 +798,15 @@ mod tests {
             (
                 "cos smile, bad params",
                 Box::new(move || {
-                    cos_smile(100.0, 0.05, 0.0, 1.0, &bad_hp, &[90.0, 110.0], PutOrCall::Call)[0]
+                    cos_smile(
+                        100.0,
+                        0.05,
+                        0.0,
+                        1.0,
+                        &bad_hp,
+                        &[90.0, 110.0],
+                        PutOrCall::Call,
+                    )[0]
                 }),
             ),
         ];

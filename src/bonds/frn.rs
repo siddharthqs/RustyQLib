@@ -173,18 +173,16 @@ impl FloatingRateNote {
     ) -> Result<f64, RustyQLibError> {
         match self.current_coupon {
             Some(rate) => Ok(rate),
-            None if period.start < curve.reference_date() => {
-                Err(RustyQLibError::invalid_input(
-                    "frn",
-                    format!(
-                        "the current period fixed on {} , before the curve reference {}: \
+            None if period.start < curve.reference_date() => Err(RustyQLibError::invalid_input(
+                "frn",
+                format!(
+                    "the current period fixed on {} , before the curve reference {}: \
                          supply current_coupon — a historical fixing cannot be read off \
                          the curve",
-                        period.start,
-                        curve.reference_date()
-                    ),
-                ))
-            }
+                    period.start,
+                    curve.reference_date()
+                ),
+            )),
             None => Ok(self.forward(curve, period)? + self.quoted_margin),
         }
     }

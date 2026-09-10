@@ -307,10 +307,8 @@ mod tests {
             assert!(err.contains("snapshot date"), "{timestamp}: {err}");
         }
         // exactly ten ASCII characters still parse
-        let ok = chain_from_value(&with_timestamp(serde_json::json!(
-            "2026-08-08 14:30:00"
-        )))
-        .unwrap();
+        let ok =
+            chain_from_value(&with_timestamp(serde_json::json!("2026-08-08 14:30:00"))).unwrap();
         assert_eq!(ok.as_of, d(2026, 8, 8));
     }
 

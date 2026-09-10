@@ -1,6 +1,7 @@
 use crate::core::serialization::{self, Format};
 use crate::core::trade::PutOrCall;
 use crate::data::cboe;
+use crate::data::dtcc;
 use crate::data::nyfed;
 use crate::data::treasury;
 use crate::equity::blackscholes::implied_vol_from_price;
@@ -193,6 +194,9 @@ pub enum FetchSource {
     /// Effective Federal Funds Rate (markets.newyorkfed.org)
     #[value(name = "effr")]
     Effr,
+    /// DTCC GCF Repo Index: overnight GC repo rate and par, Treasury and MBS (dtcc.com)
+    #[value(name = "gcf", alias = "gcf-repo")]
+    Gcf,
     /// Listed option chain, 15-minute delayed (cdn.cboe.com); needs --symbol
     #[value(name = "chain")]
     Chain,
@@ -502,6 +506,7 @@ pub fn handle_fetch(args: &FetchArgs) -> Result<()> {
         FetchSource::UstParYields => fetch_ust_par_yields(args, date),
         FetchSource::Sofr => fetch_nyfed_rate(args, date, nyfed::ReferenceRate::Sofr),
         FetchSource::Effr => fetch_nyfed_rate(args, date, nyfed::ReferenceRate::Effr),
+        FetchSource::Gcf => fetch_gcf_repo_index(args, date),
         FetchSource::Chain => fetch_cboe_chain(args, date),
     })
 }
@@ -628,6 +633,40 @@ fn fetch_nyfed_rate(
         origin,
         "reference_rate",
     )
+}
+
+fn fetch_gcf_repo_index(args: &FetchArgs, date: Option<NaiveDate>) -> Result<()> {
+    let (rows, origin) = match &args.from_file {
+        Some(path) => {
+            let text = read_input(path)?;
+            let rows = dtcc::parse_csv(&text)
+                .with_context(|| format!("failed to parse {}", input_label(path)))?;
+            (rows, serde_json::json!({ "file": input_label(path) }))
+        }
+        None => {
+            // the feed is one rolling one-year file; any --date inside
+            // that window is served by the same download
+            let (text, url) = dtcc::fetch()?;
+            let origin = serde_json::json!({
+                "url": url,
+                "fetched_at": Local::now().to_rfc3339(),
+            });
+            (dtcc::parse_csv(&text)?, origin)
+        }
+    };
+    let row = dtcc::select_row(&rows, date)?;
+    let rate = |c: Option<dtcc::GcfComponent>| {
+        c.map_or("n/a".to_string(), |c| {
+            format!("{}%", c.weighted_average_rate)
+        })
+    };
+    log::info!(
+        "DTCC GCF Repo Index for {}: Treasury {}, MBS {}",
+        row.date,
+        rate(row.treasury),
+        rate(row.mbs)
+    );
+    emit_document(args, dtcc::to_document(row), origin, "gcf_repo_index")
 }
 
 /// Merge fetch provenance into the document's `metadata` block and write

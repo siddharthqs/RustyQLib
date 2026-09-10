@@ -1504,7 +1504,10 @@ fn stochastic_vol_mc_honours_double_barriers_and_rebates() {
     };
     let rebate = 5.0;
     for (model, make) in [
-        ("heston", heston_option as fn(Box<dyn Payoff>) -> EquityOption),
+        (
+            "heston",
+            heston_option as fn(Box<dyn Payoff>) -> EquityOption,
+        ),
         ("sabr", sabr_option as fn(Box<dyn Payoff>) -> EquityOption),
     ] {
         let price = |payoff: Box<dyn Payoff>| {
@@ -2470,7 +2473,9 @@ fn stochastic_vol_routes_report_a_standard_error_under_the_default_sampler() {
     sabr.engine = crate::equity::utils::PricingEngine::from_kind(Engine::MonteCarlo);
     sabr.mc_cfg_mut().paths = 20_000;
     assert!(
-        crate::equity::montecarlo::stats(&sabr, None).std_err.is_some(),
+        crate::equity::montecarlo::stats(&sabr, None)
+            .std_err
+            .is_some(),
         "the SABR route must report a standard error too"
     );
 }

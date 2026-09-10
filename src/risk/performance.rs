@@ -84,8 +84,7 @@ pub fn sharpe_ratio(
     if var <= 0.0 {
         return Err(RustyQLibError::invalid_input(
             "returns",
-            "the excess-return series has zero variance; the Sharpe ratio is undefined"
-                .to_string(),
+            "the excess-return series has zero variance; the Sharpe ratio is undefined".to_string(),
         ));
     }
     Ok(mean / var.sqrt() * periods_per_year.sqrt())

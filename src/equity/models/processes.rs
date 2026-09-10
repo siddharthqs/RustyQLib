@@ -686,7 +686,10 @@ mod tests {
         };
         let (v, dt) = (0.001, 1.0);
         let (m, s2) = cir_moments(&hp, v, dt);
-        assert!(s2 / (m * m) > QE_PSI_SWITCH, "must hit the exponential branch");
+        assert!(
+            s2 / (m * m) > QE_PSI_SWITCH,
+            "must hit the exponential branch"
+        );
         let mut prev = qe_variance_step(&hp, v, dt, 4.0);
         for z in [6.0, 8.3, 9.0, 12.0, 40.0] {
             let next = qe_variance_step(&hp, v, dt, z);

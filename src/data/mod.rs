@@ -8,6 +8,7 @@
 //! so every downstream computation stays reproducible from a file.
 
 pub mod cboe;
+pub mod dtcc;
 pub mod nyfed;
 pub mod treasury;
 
@@ -60,7 +61,9 @@ pub(crate) fn http_get(url: &str) -> Result<String, RustyQLibError> {
         )));
     }
     String::from_utf8(body).map_err(|e| {
-        RustyQLibError::ParseError(format!("the response body of {url} is not valid UTF-8: {e}"))
+        RustyQLibError::ParseError(format!(
+            "the response body of {url} is not valid UTF-8: {e}"
+        ))
     })
 }
 
@@ -139,7 +142,10 @@ mod tests {
         let items = [d(2026, 8, 4), d(2026, 8, 5), d(2026, 7, 31)];
         let by = |x: &NaiveDate| *x;
         // no date: the latest regardless of order
-        assert_eq!(*select_dated(&items, None, by, "rows").unwrap(), d(2026, 8, 5));
+        assert_eq!(
+            *select_dated(&items, None, by, "rows").unwrap(),
+            d(2026, 8, 5)
+        );
         assert_eq!(
             *select_dated(&items, Some(d(2026, 8, 4)), by, "rows").unwrap(),
             d(2026, 8, 4)

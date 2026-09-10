@@ -214,8 +214,10 @@ mod tests {
         assert!((short.npv() - 4000.0).abs() < 1e-9, "{}", short.npv());
         assert_eq!(short.delta(), -1000.0);
         assert_eq!(short.price().unwrap().greeks.delta, -1000.0);
-        let long = EquityFuture::try_from_json(&data(&BASE.replace("\"long_short\": -1", "\"long_short\": 1")))
-            .unwrap();
+        let long = EquityFuture::try_from_json(&data(
+            &BASE.replace("\"long_short\": -1", "\"long_short\": 1"),
+        ))
+        .unwrap();
         assert!((long.npv() + 4000.0).abs() < 1e-9);
         assert_eq!(long.delta(), 1000.0);
     }
@@ -248,14 +250,44 @@ mod tests {
                 .to_string();
             assert!(err.contains(field), "expected '{field}' in: {err}");
         };
-        expect_field(&BASE.replace("\"risk_free_rate\": 0.06, ", ""), "risk_free_rate");
-        expect_field(&BASE.replace("\"risk_free_rate\": 0.06", "\"risk_free_rate\": 6.0"), "risk_free_rate");
-        expect_field(&BASE.replace("\"dividend\": 0.01", "\"dividend\": 1.0"), "dividend");
-        expect_field(&BASE.replace("\"maturity\": \"2026-09-30\"", "\"maturity\": \"2026-01-05\""), "maturity");
-        expect_field(&BASE.replace("\"multiplier\": 1000.0", "\"multiplier\": 0.0"), "multiplier");
-        expect_field(&BASE.replace("\"current_price\": 99.0", "\"current_price\": -1.0"), "current_price");
-        expect_field(&BASE.replace("\"underlying_price\": 96.0", "\"underlying_price\": 0.0"), "underlying_price");
-        expect_field(&BASE.replace("\"long_short\": -1", "\"long_short\": 0"), "long_short");
-        expect_field(&BASE.replace("\"long_short\": -1", "\"long_short\": 2"), "long_short");
+        expect_field(
+            &BASE.replace("\"risk_free_rate\": 0.06, ", ""),
+            "risk_free_rate",
+        );
+        expect_field(
+            &BASE.replace("\"risk_free_rate\": 0.06", "\"risk_free_rate\": 6.0"),
+            "risk_free_rate",
+        );
+        expect_field(
+            &BASE.replace("\"dividend\": 0.01", "\"dividend\": 1.0"),
+            "dividend",
+        );
+        expect_field(
+            &BASE.replace(
+                "\"maturity\": \"2026-09-30\"",
+                "\"maturity\": \"2026-01-05\"",
+            ),
+            "maturity",
+        );
+        expect_field(
+            &BASE.replace("\"multiplier\": 1000.0", "\"multiplier\": 0.0"),
+            "multiplier",
+        );
+        expect_field(
+            &BASE.replace("\"current_price\": 99.0", "\"current_price\": -1.0"),
+            "current_price",
+        );
+        expect_field(
+            &BASE.replace("\"underlying_price\": 96.0", "\"underlying_price\": 0.0"),
+            "underlying_price",
+        );
+        expect_field(
+            &BASE.replace("\"long_short\": -1", "\"long_short\": 0"),
+            "long_short",
+        );
+        expect_field(
+            &BASE.replace("\"long_short\": -1", "\"long_short\": 2"),
+            "long_short",
+        );
     }
 }

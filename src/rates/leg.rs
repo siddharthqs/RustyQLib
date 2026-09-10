@@ -332,8 +332,7 @@ mod tests {
             let accrual = if p.start >= reference {
                 curve.df_date(p.start) / curve.df_date(p.end) - 1.0
             } else {
-                (1.0 + realized * dc.year_fraction(p.start, reference)) / curve.df_date(p.end)
-                    - 1.0
+                (1.0 + realized * dc.year_fraction(p.start, reference)) / curve.df_date(p.end) - 1.0
             };
             manual_pv += accrual * curve.df_date(p.payment);
         }

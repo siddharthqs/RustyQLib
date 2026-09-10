@@ -869,10 +869,7 @@ pub fn build_portfolio(contents: &str) -> Result<EquityPortfolio> {
                     option.base.symbol
                 );
             }
-            let (book_spot, spot) = (
-                first.option.market.spot.value(),
-                option.market.spot.value(),
-            );
+            let (book_spot, spot) = (first.option.market.spot.value(), option.market.spot.value());
             if (book_spot - spot).abs() > 1e-12 {
                 bail!(
                     "contract {index}: the portfolio must quote one spot for '{}' \

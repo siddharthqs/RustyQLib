@@ -349,8 +349,11 @@ impl CommodityOption {
         // the shared bisection converges on it. A quote the solver only
         // bracketed (rather than hit to tolerance) is still the best
         // estimate of the vol, so the root is returned either way.
-        let root = Solver1d::new(1e-12, 200)
-            .bisection(|v| price_at(v).unwrap_or(f64::NAN) - premium, lo, hi)?;
+        let root = Solver1d::new(1e-12, 200).bisection(
+            |v| price_at(v).unwrap_or(f64::NAN) - premium,
+            lo,
+            hi,
+        )?;
         Ok(root.x)
     }
 
@@ -640,7 +643,11 @@ mod tests {
         put.put_or_call = PutOrCall::Put;
         let df = discount.df_date(put.expiry_date);
         let g_put = put.greeks(&discount, &forward, 0.0).unwrap();
-        assert!((g_put.delta + 1_000.0 * df).abs() < 1e-12, "{}", g_put.delta);
+        assert!(
+            (g_put.delta + 1_000.0 * df).abs() < 1e-12,
+            "{}",
+            g_put.delta
+        );
         // struck exactly at the money the payoff kinks: an error, not a
         // silent half-delta
         assert!(call(72.0, FuturesSettlement::Discounted)

@@ -1018,7 +1018,9 @@ impl EssviSurfaceFit {
         // the median slice's target sits mid-tube. ──────────────────────
         let theta1_anchor = pillars[0].theta.max(1e-8);
         let a_anchors: Vec<f64> = (1..n)
-            .map(|i| (pillars[i].theta - pillars[i - 1].theta).max(1e-6 * pillars[i].theta.max(1e-8)))
+            .map(|i| {
+                (pillars[i].theta - pillars[i - 1].theta).max(1e-6 * pillars[i].theta.max(1e-8))
+            })
             .collect();
         let gamma0 = config.gamma.unwrap_or(0.5);
         // eta anchor: mid-tube at the median pillar under rho = 0
@@ -1072,9 +1074,7 @@ impl EssviSurfaceFit {
             let rmse = (pillar
                 .quotes
                 .iter()
-                .map(|&(k, v)| {
-                    ((prm.total_variance(k) / pillar.t).max(0.0).sqrt() - v).powi(2)
-                })
+                .map(|&(k, v)| ((prm.total_variance(k) / pillar.t).max(0.0).sqrt() - v).powi(2))
                 .sum::<f64>()
                 / pillar.quotes.len() as f64)
                 .sqrt();
@@ -1836,7 +1836,10 @@ mod global_tests {
     struct Lcg(u64);
     impl Lcg {
         fn next_f64(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 11) as f64 / (1u64 << 53) as f64
         }
         /// Uniform in `(-b, b)`.
@@ -1855,7 +1858,7 @@ mod global_tests {
         let mut rng = Lcg(20260827);
         for case in 0..500 {
             let n = 2 + (case % 9); // 2..=10 pillars
-            let dim = 2 * n + 2;    // gamma-free layout (superset)
+            let dim = 2 * n + 2; // gamma-free layout (superset)
             let x: Vec<f64> = (0..dim).map(|_| rng.sym(2.0)).collect();
             let a_anchors: Vec<f64> = (1..n).map(|_| 0.002 + rng.next_f64() * 0.05).collect();
             let gamma_fixed = if case % 2 == 0 { Some(0.5) } else { None };
@@ -1868,15 +1871,17 @@ mod global_tests {
                 assert!(p.theta > 0.0, "theta positive");
                 assert!(p.psi > 0.0, "psi positive");
                 // butterfly caps (Gatheral–Jacquier), with float headroom
-                assert!(p.psi <= 4.0 / m * (1.0 + 1e-12), "psi cap case {case} slice {i}");
+                assert!(
+                    p.psi <= 4.0 / m * (1.0 + 1e-12),
+                    "psi cap case {case} slice {i}"
+                );
                 assert!(
                     p.psi * p.psi <= 4.0 * p.theta / m * (1.0 + 1e-12),
                     "psi^2 cap case {case} slice {i}"
                 );
                 if i > 0 {
                     let q = &params[i - 1];
-                    let pi = ((1.0 + q.rho) / (1.0 + p.rho))
-                        .max((1.0 - q.rho) / (1.0 - p.rho));
+                    let pi = ((1.0 + q.rho) / (1.0 + p.rho)).max((1.0 - q.rho) / (1.0 - p.rho));
                     assert!(p.theta > q.theta, "theta increasing");
                     // The parameter-level Hendriks-Martini bounds hold in
                     // exact arithmetic; the butterfly-cap safety min can
@@ -1910,11 +1915,46 @@ mod global_tests {
     #[test]
     fn global_fit_recovers_a_synthetic_surface() {
         let truth = [
-            (0.08, EssviParams { theta: 0.0045, psi: 0.028, rho: -0.55 }),
-            (0.25, EssviParams { theta: 0.0140, psi: 0.050, rho: -0.60 }),
-            (0.50, EssviParams { theta: 0.0290, psi: 0.072, rho: -0.62 }),
-            (1.00, EssviParams { theta: 0.0600, psi: 0.100, rho: -0.65 }),
-            (1.50, EssviParams { theta: 0.0920, psi: 0.120, rho: -0.66 }),
+            (
+                0.08,
+                EssviParams {
+                    theta: 0.0045,
+                    psi: 0.028,
+                    rho: -0.55,
+                },
+            ),
+            (
+                0.25,
+                EssviParams {
+                    theta: 0.0140,
+                    psi: 0.050,
+                    rho: -0.60,
+                },
+            ),
+            (
+                0.50,
+                EssviParams {
+                    theta: 0.0290,
+                    psi: 0.072,
+                    rho: -0.62,
+                },
+            ),
+            (
+                1.00,
+                EssviParams {
+                    theta: 0.0600,
+                    psi: 0.100,
+                    rho: -0.65,
+                },
+            ),
+            (
+                1.50,
+                EssviParams {
+                    theta: 0.0920,
+                    psi: 0.120,
+                    rho: -0.66,
+                },
+            ),
         ];
         let forward = 100.0;
         let expiries: Vec<Tenor> = truth.iter().map(|&(t, _)| Tenor::YearFraction(t)).collect();
@@ -1938,7 +1978,10 @@ mod global_tests {
         .unwrap();
 
         for gamma in [Some(0.5), None] {
-            let cfg = EssviGlobalConfig { gamma, ..Default::default() };
+            let cfg = EssviGlobalConfig {
+                gamma,
+                ..Default::default()
+            };
             let (fit, diag) =
                 EssviSurfaceFit::fit_global(&surface, |_| forward, &cfg).expect("fit");
             assert_eq!(fit.slices.len(), 5);
@@ -1985,11 +2028,46 @@ mod global_tests {
     #[test]
     fn sequential_backbone_is_arbitrage_free_at_pillars() {
         let truth = [
-            (0.08, EssviParams { theta: 0.0045, psi: 0.028, rho: -0.55 }),
-            (0.25, EssviParams { theta: 0.0140, psi: 0.050, rho: -0.60 }),
-            (0.50, EssviParams { theta: 0.0290, psi: 0.072, rho: -0.62 }),
-            (1.00, EssviParams { theta: 0.0600, psi: 0.100, rho: -0.65 }),
-            (1.50, EssviParams { theta: 0.0920, psi: 0.120, rho: -0.66 }),
+            (
+                0.08,
+                EssviParams {
+                    theta: 0.0045,
+                    psi: 0.028,
+                    rho: -0.55,
+                },
+            ),
+            (
+                0.25,
+                EssviParams {
+                    theta: 0.0140,
+                    psi: 0.050,
+                    rho: -0.60,
+                },
+            ),
+            (
+                0.50,
+                EssviParams {
+                    theta: 0.0290,
+                    psi: 0.072,
+                    rho: -0.62,
+                },
+            ),
+            (
+                1.00,
+                EssviParams {
+                    theta: 0.0600,
+                    psi: 0.100,
+                    rho: -0.65,
+                },
+            ),
+            (
+                1.50,
+                EssviParams {
+                    theta: 0.0920,
+                    psi: 0.120,
+                    rho: -0.66,
+                },
+            ),
         ];
         let forward = 100.0;
         let expiries: Vec<Tenor> = truth.iter().map(|&(t, _)| Tenor::YearFraction(t)).collect();
@@ -2039,7 +2117,10 @@ mod global_tests {
             );
             let m = 1.0 + p.rho.abs();
             assert!(p.psi <= 4.0 / m * (1.0 + 1e-12), "butterfly cap");
-            assert!(p.psi * p.psi <= 4.0 * p.theta / m * (1.0 + 1e-12), "butterfly sqrt cap");
+            assert!(
+                p.psi * p.psi <= 4.0 * p.theta / m * (1.0 + 1e-12),
+                "butterfly sqrt cap"
+            );
         }
         let worst = fit.slices.iter().map(|s| s.rmse).fold(0.0f64, f64::max);
         assert!(worst < 0.02, "worst slice rmse {worst}");
@@ -2052,7 +2133,11 @@ mod global_tests {
     /// shape crashed the first intraday run).
     #[test]
     fn sequential_backbone_survives_flat_atm_term_structure() {
-        let p = EssviParams { theta: 0.004, psi: 0.03, rho: -0.5 };
+        let p = EssviParams {
+            theta: 0.004,
+            psi: 0.03,
+            rho: -0.5,
+        };
         // three one-day-apart expiries with an ATM term structure flat
         // to 1e-12, then a normal tail
         let slices = [
@@ -2063,8 +2148,10 @@ mod global_tests {
             (1.00, 0.0600),
         ];
         let forward = 100.0;
-        let expiries: Vec<Tenor> =
-            slices.iter().map(|&(t, _)| Tenor::YearFraction(t)).collect();
+        let expiries: Vec<Tenor> = slices
+            .iter()
+            .map(|&(t, _)| Tenor::YearFraction(t))
+            .collect();
         let smiles: Vec<Vec<(f64, f64)>> = slices
             .iter()
             .map(|&(t, th)| {
@@ -2084,9 +2171,8 @@ mod global_tests {
             DayCountConvention::Act365,
         )
         .unwrap();
-        let (fit, _diag) =
-            EssviSurfaceFit::fit_sequential_backbone(&surface, |_| forward, 0.5)
-                .expect("must not panic on a flat ATM term structure");
+        let (fit, _diag) = EssviSurfaceFit::fit_sequential_backbone(&surface, |_| forward, 0.5)
+            .expect("must not panic on a flat ATM term structure");
         assert!(
             fit.max_calendar_crossing <= 1e-12,
             "crossing {}",

@@ -512,7 +512,10 @@ pub fn de_americanize_chain(
     let Some(spot) = chain.spot.filter(|s| s.is_finite() && *s > 0.0) else {
         return Err(RustyQLibError::invalid_input(
             "option chain",
-            format!("de-americanize: chain for {} has no usable spot", chain.symbol),
+            format!(
+                "de-americanize: chain for {} has no usable spot",
+                chain.symbol
+            ),
         ));
     };
     let day_count = DayCountConvention::Act365;
@@ -572,9 +575,7 @@ pub fn de_americanize_chain(
         if pair_forwards.is_empty() {
             return Some(spot / df); // zero-carry fallback, as the builder's
         }
-        pair_forwards.sort_by(|a, b| {
-            (a.0 - spot).abs().partial_cmp(&(b.0 - spot).abs()).unwrap()
-        });
+        pair_forwards.sort_by(|a, b| (a.0 - spot).abs().partial_cmp(&(b.0 - spot).abs()).unwrap());
         let mut nearest: Vec<f64> = pair_forwards
             .iter()
             .take(cfg.forward_pairs.max(1))
@@ -589,7 +590,9 @@ pub fn de_americanize_chain(
         for (expiry, work) in by_expiry.iter_mut() {
             let t = day_count.year_fraction(chain.as_of, *expiry);
             let df = discount.df_date(*expiry) / discount.df_date(chain.as_of);
-            let Some(fwd) = parity(work, df) else { continue };
+            let Some(fwd) = parity(work, df) else {
+                continue;
+            };
             if round == 0 {
                 raw_forwards.insert(*expiry, fwd);
             }
@@ -622,7 +625,9 @@ pub fn de_americanize_chain(
     for (expiry, work) in &by_expiry {
         let t = day_count.year_fraction(chain.as_of, *expiry);
         let df = discount.df_date(*expiry) / discount.df_date(chain.as_of);
-        let Some(fwd) = parity(work, df) else { continue };
+        let Some(fwd) = parity(work, df) else {
+            continue;
+        };
         let forward_raw = raw_forwards.get(expiry).copied().unwrap_or(fwd);
         let r = -df.ln() / t;
 
@@ -868,7 +873,10 @@ mod tests {
             // the raw American parity forward must be visibly biased on
             // this configuration, and the correction must remove most of
             // it and land within 10 bp of the truth
-            assert!(e_raw > 5e-4, "{expiry}: raw bias only {e_raw:.2e} — test has no teeth");
+            assert!(
+                e_raw > 5e-4,
+                "{expiry}: raw bias only {e_raw:.2e} — test has no teeth"
+            );
             assert!(
                 e_dea < e_raw / 3.0,
                 "{expiry}: dea error {e_dea:.2e} not well under raw {e_raw:.2e}"

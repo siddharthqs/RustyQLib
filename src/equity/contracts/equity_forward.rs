@@ -172,7 +172,9 @@ impl EquityForward {
     /// `dV/dS = sign * shares * e^{-(q+b)T}`.
     pub fn delta(&self) -> f64 {
         let t = self.time_to_maturity();
-        self.long_short.sign() * self.shares() * (-(self.dividend_yield + self.borrow_cost) * t).exp()
+        self.long_short.sign()
+            * self.shares()
+            * (-(self.dividend_yield + self.borrow_cost) * t).exp()
     }
     pub fn gamma(&self) -> f64 {
         0.0
@@ -189,7 +191,8 @@ impl EquityForward {
         let k = self.forward_price.value();
         self.long_short.sign()
             * self.shares()
-            * (carry * s * (-carry * t).exp() - self.risk_free_rate * k * (-self.risk_free_rate * t).exp())
+            * (carry * s * (-carry * t).exp()
+                - self.risk_free_rate * k * (-self.risk_free_rate * t).exp())
     }
     /// `dV/dr = sign * shares * T K e^{-rT}`.
     pub fn rho(&self) -> f64 {
@@ -252,21 +255,59 @@ mod tests {
                 "valuation_date": "2026-01-05", "maturity": "2026-09-30"}"#,
             "risk_free_rate",
         );
-        expect_field(&BASE.replace("\"entry_price\": 103.0", "\"entry_price\": 0.0"), "entry_price");
-        expect_field(&BASE.replace("\"notional\": 10000.0", "\"notional\": -5.0"), "notional");
-        expect_field(&BASE.replace("\"underlying_price\": 96.0", "\"underlying_price\": 0.0"), "underlying_price");
+        expect_field(
+            &BASE.replace("\"entry_price\": 103.0", "\"entry_price\": 0.0"),
+            "entry_price",
+        );
+        expect_field(
+            &BASE.replace("\"notional\": 10000.0", "\"notional\": -5.0"),
+            "notional",
+        );
+        expect_field(
+            &BASE.replace("\"underlying_price\": 96.0", "\"underlying_price\": 0.0"),
+            "underlying_price",
+        );
         // a percent-vs-decimal slip on any rate-like input is caught
-        expect_field(&BASE.replace("\"risk_free_rate\": 0.06", "\"risk_free_rate\": 6.0"), "risk_free_rate");
-        expect_field(&BASE.replace("\"dividend\": 0.01", "\"dividend\": 1.0"), "dividend");
-        expect_field(&BASE.replace("\"borrow_cost\": 0.005", "\"borrow_cost\": 0.75"), "borrow_cost");
+        expect_field(
+            &BASE.replace("\"risk_free_rate\": 0.06", "\"risk_free_rate\": 6.0"),
+            "risk_free_rate",
+        );
+        expect_field(
+            &BASE.replace("\"dividend\": 0.01", "\"dividend\": 1.0"),
+            "dividend",
+        );
+        expect_field(
+            &BASE.replace("\"borrow_cost\": 0.005", "\"borrow_cost\": 0.75"),
+            "borrow_cost",
+        );
         // expired or same-day maturity is refused
-        expect_field(&BASE.replace("\"maturity\": \"2026-09-30\"", "\"maturity\": \"2026-01-05\""), "maturity");
-        expect_field(&BASE.replace("\"maturity\": \"2026-09-30\"", "\"maturity\": \"2025-01-05\""), "maturity");
+        expect_field(
+            &BASE.replace(
+                "\"maturity\": \"2026-09-30\"",
+                "\"maturity\": \"2026-01-05\"",
+            ),
+            "maturity",
+        );
+        expect_field(
+            &BASE.replace(
+                "\"maturity\": \"2026-09-30\"",
+                "\"maturity\": \"2025-01-05\"",
+            ),
+            "maturity",
+        );
         // long_short outside {1, -1} is rejected, not read as long
-        expect_field(&BASE.replace("\"long_short\": 1", "\"long_short\": 0"), "long_short");
-        expect_field(&BASE.replace("\"long_short\": 1", "\"long_short\": 2"), "long_short");
-        let short = EquityForward::try_from_json(&data(&BASE.replace("\"long_short\": 1", "\"long_short\": -1")))
-            .unwrap();
+        expect_field(
+            &BASE.replace("\"long_short\": 1", "\"long_short\": 0"),
+            "long_short",
+        );
+        expect_field(
+            &BASE.replace("\"long_short\": 1", "\"long_short\": 2"),
+            "long_short",
+        );
+        let short = EquityForward::try_from_json(&data(
+            &BASE.replace("\"long_short\": 1", "\"long_short\": -1"),
+        ))
+        .unwrap();
         assert_eq!(short.long_short, LongShort::SHORT);
     }
 
@@ -279,17 +320,26 @@ mod tests {
             / 365.0;
         let shares = 10000.0 / 103.0;
         let expect = shares * (96.0 * (-0.015 * t).exp() - 103.0 * (-0.06 * t).exp());
-        assert!((fwd.npv() - expect).abs() < 1e-9, "{} vs {expect}", fwd.npv());
+        assert!(
+            (fwd.npv() - expect).abs() < 1e-9,
+            "{} vs {expect}",
+            fwd.npv()
+        );
         // the short is the mirror
-        let short = EquityForward::try_from_json(&data(&BASE.replace("\"long_short\": 1", "\"long_short\": -1")))
-            .unwrap();
+        let short = EquityForward::try_from_json(&data(
+            &BASE.replace("\"long_short\": 1", "\"long_short\": -1"),
+        ))
+        .unwrap();
         assert!((short.npv() + fwd.npv()).abs() < 1e-12);
     }
 
     #[test]
     fn greeks_match_central_differences_of_the_value() {
         for long_short in [1, -1] {
-            let json = BASE.replace("\"long_short\": 1", &format!("\"long_short\": {long_short}"));
+            let json = BASE.replace(
+                "\"long_short\": 1",
+                &format!("\"long_short\": {long_short}"),
+            );
             let fwd = EquityForward::try_from_json(&data(&json)).unwrap();
             let result = fwd.price().unwrap();
             assert_eq!(result.pv, fwd.npv());
@@ -303,7 +353,11 @@ mod tests {
             let fd_delta = (EquityForward::try_from_json(&up).unwrap().npv()
                 - EquityForward::try_from_json(&dn).unwrap().npv())
                 / (2.0 * ds);
-            assert!((fwd.delta() - fd_delta).abs() < 1e-6, "delta {} vs fd {fd_delta}", fwd.delta());
+            assert!(
+                (fwd.delta() - fd_delta).abs() < 1e-6,
+                "delta {} vs fd {fd_delta}",
+                fwd.delta()
+            );
             assert_eq!(result.greeks.delta, fwd.delta());
             assert!(fwd.delta() * long_short as f64 > 0.0);
 
@@ -316,7 +370,11 @@ mod tests {
             let fd_rho = (EquityForward::try_from_json(&up).unwrap().npv()
                 - EquityForward::try_from_json(&dn).unwrap().npv())
                 / (2.0 * dr);
-            assert!((fwd.rho() - fd_rho).abs() < 1e-4, "rho {} vs fd {fd_rho}", fwd.rho());
+            assert!(
+                (fwd.rho() - fd_rho).abs() < 1e-4,
+                "rho {} vs fd {fd_rho}",
+                fwd.rho()
+            );
             assert_eq!(result.greeks.rho, fwd.rho());
 
             // theta = -dV/dT: move the maturity one day either side

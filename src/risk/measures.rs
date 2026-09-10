@@ -200,7 +200,10 @@ mod tests {
         // monotone in confidence
         assert!(historical_var(&pnl, 0.95).unwrap() >= var90);
         // an all-profit sample floors at zero loss
-        assert_eq!(historical_var_es(&[1.0, 2.0, 3.0], 0.9).unwrap(), (0.0, 0.0));
+        assert_eq!(
+            historical_var_es(&[1.0, 2.0, 3.0], 0.9).unwrap(),
+            (0.0, 0.0)
+        );
     }
 
     #[test]

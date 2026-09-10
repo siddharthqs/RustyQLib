@@ -440,9 +440,7 @@ impl EquityOption {
             // documents rely on
             "finitedifference" | "finitdifference" | "fd" => Engine::FiniteDifference,
             "baroneadesiwhaley" | "baw" => Engine::BaroneAdesiWhaley,
-            "bjerksundstensland" | "bjerksund_stensland" | "bs2002" => {
-                Engine::BjerksundStensland
-            }
+            "bjerksundstensland" | "bjerksund_stensland" | "bs2002" => Engine::BjerksundStensland,
             _ => {
                 return Err(RustyQLibError::invalid_input(
                     "pricer",
@@ -497,10 +495,7 @@ impl EquityOption {
 /// Parse one `YYYY-MM-DD` contract date, naming `field` in the error.
 fn parse_date(field: &str, s: &str) -> Result<NaiveDate, RustyQLibError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
-        RustyQLibError::invalid_input(
-            field,
-            format!("invalid date '{s}' (expected YYYY-MM-DD)"),
-        )
+        RustyQLibError::invalid_input(field, format!("invalid date '{s}' (expected YYYY-MM-DD)"))
     })
 }
 
@@ -562,7 +557,10 @@ mod tests {
     }
 
     fn set_pricer(name: &str) -> EquityOptionData {
-        data(&VANILLA.replace("\"pricer\": \"Analytical\"", &format!("\"pricer\": \"{name}\"")))
+        data(&VANILLA.replace(
+            "\"pricer\": \"Analytical\"",
+            &format!("\"pricer\": \"{name}\""),
+        ))
     }
 
     #[test]
@@ -612,24 +610,37 @@ mod tests {
         let err = EquityOption::try_from_json(&set_pricer("NoSuchEngine"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("pricer") && err.contains("NoSuchEngine"), "{err}");
+        assert!(
+            err.contains("pricer") && err.contains("NoSuchEngine"),
+            "{err}"
+        );
     }
 
     #[test]
     fn side_and_exercise_style_parse_case_insensitively() {
         for side in ["C", "c", "Call", "call", "CALL"] {
-            let option = EquityOption::try_from_json(&data(
-                &VANILLA.replace("\"put_or_call\": \"C\"", &format!("\"put_or_call\": \"{side}\"")),
-            ))
+            let option = EquityOption::try_from_json(&data(&VANILLA.replace(
+                "\"put_or_call\": \"C\"",
+                &format!("\"put_or_call\": \"{side}\""),
+            )))
             .unwrap_or_else(|e| panic!("side '{side}' must parse: {e}"));
-            assert_eq!(*option.payoff.put_or_call(), PutOrCall::Call, "side '{side}'");
+            assert_eq!(
+                *option.payoff.put_or_call(),
+                PutOrCall::Call,
+                "side '{side}'"
+            );
         }
         for side in ["P", "p", "Put", "put", "PUT"] {
-            let option = EquityOption::try_from_json(&data(
-                &VANILLA.replace("\"put_or_call\": \"C\"", &format!("\"put_or_call\": \"{side}\"")),
-            ))
+            let option = EquityOption::try_from_json(&data(&VANILLA.replace(
+                "\"put_or_call\": \"C\"",
+                &format!("\"put_or_call\": \"{side}\""),
+            )))
             .unwrap_or_else(|e| panic!("side '{side}' must parse: {e}"));
-            assert_eq!(*option.payoff.put_or_call(), PutOrCall::Put, "side '{side}'");
+            assert_eq!(
+                *option.payoff.put_or_call(),
+                PutOrCall::Put,
+                "side '{side}'"
+            );
         }
         let err = EquityOption::try_from_json(&data(
             &VANILLA.replace("\"put_or_call\": \"C\"", "\"put_or_call\": \"X\""),
@@ -698,8 +709,16 @@ mod tests {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         let (valuation, maturity) = (d(2026, 1, 1), d(2027, 1, 1));
         // strict on both ends (chooser choice date, forward-start fixing)
-        let mid = life_fraction("f", d(2026, 7, 2), valuation, maturity, valuation, false, "bad")
-            .unwrap();
+        let mid = life_fraction(
+            "f",
+            d(2026, 7, 2),
+            valuation,
+            maturity,
+            valuation,
+            false,
+            "bad",
+        )
+        .unwrap();
         assert!((mid - 182.0 / 365.0).abs() < 1e-15, "{mid}");
         for date in [valuation, maturity, d(2025, 12, 31), d(2027, 1, 2)] {
             let err = life_fraction("f", date, valuation, maturity, valuation, false, "bad")
@@ -714,14 +733,32 @@ mod tests {
             1.0
         );
         assert!(life_fraction("leg", choice, valuation, maturity, choice, true, "bad").is_err());
-        assert!(life_fraction("leg", d(2026, 6, 1), valuation, maturity, choice, true, "bad")
-            .is_err());
-        assert!(life_fraction("leg", d(2026, 7, 2), valuation, maturity, choice, true, "bad")
-            .is_ok());
+        assert!(life_fraction(
+            "leg",
+            d(2026, 6, 1),
+            valuation,
+            maturity,
+            choice,
+            true,
+            "bad"
+        )
+        .is_err());
+        assert!(life_fraction(
+            "leg",
+            d(2026, 7, 2),
+            valuation,
+            maturity,
+            choice,
+            true,
+            "bad"
+        )
+        .is_ok());
         // the JSON sites report their own wording
         let mut chooser = with("choice_date", "\"2027-06-01\"");
         chooser.payoff_type = "chooser".to_string();
-        let err = EquityOption::try_from_json(&chooser).unwrap_err().to_string();
+        let err = EquityOption::try_from_json(&chooser)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("choice_date must lie between valuation and maturity"),
             "{err}"

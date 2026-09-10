@@ -8,9 +8,7 @@ use crate::core::errors::RustyQLibError;
 /// SVD of an `m x n` matrix (any shape; internally transposes when
 /// `m < n`). Returns `(u, s, v)` with `A = U diag(S) V^T`. Errs on an
 /// empty or ragged matrix.
-pub fn svd(
-    a: &[Vec<f64>],
-) -> Result<(Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>), RustyQLibError> {
+pub fn svd(a: &[Vec<f64>]) -> Result<(Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>), RustyQLibError> {
     let m = a.len();
     let n = if m == 0 { 0 } else { a[0].len() };
     if m == 0 || n == 0 {

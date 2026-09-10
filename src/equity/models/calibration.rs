@@ -48,7 +48,10 @@ pub(crate) fn check_quotes(quotes: &[HestonQuote]) -> Result<(), RustyQLibError>
         if !(q.strike.is_finite() && q.strike > 0.0) {
             return Err(RustyQLibError::invalid_input(
                 "calibration quotes",
-                format!("quote {i}: strike must be finite and positive (got {})", q.strike),
+                format!(
+                    "quote {i}: strike must be finite and positive (got {})",
+                    q.strike
+                ),
             ));
         }
         if !(q.maturity.is_finite() && q.maturity > 0.0) {

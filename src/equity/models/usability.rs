@@ -552,12 +552,8 @@ mod tests {
         let surface = VolSurface::from_strike_smiles(
             &[Tenor::YearFraction(0.5), Tenor::YearFraction(1.0)],
             &[
-                (0..13)
-                    .map(|i| (70.0 + 5.0 * i as f64, 0.25))
-                    .collect(),
-                (0..13)
-                    .map(|i| (70.0 + 5.0 * i as f64, 0.25))
-                    .collect(),
+                (0..13).map(|i| (70.0 + 5.0 * i as f64, 0.25)).collect(),
+                (0..13).map(|i| (70.0 + 5.0 * i as f64, 0.25)).collect(),
             ],
             asof(),
             DayCountConvention::Act365,

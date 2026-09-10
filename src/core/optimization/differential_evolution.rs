@@ -196,13 +196,9 @@ mod tests {
     fn invalid_bound_pairs_error_and_name_the_offending_pair() {
         let f = |x: &[f64]| x[0] + x[1];
         // reversed pair at index 1
-        let err = differential_evolution(
-            &OptimConfig::default(),
-            &f,
-            &[(0.0, 1.0), (2.0, -3.0)],
-            1,
-        )
-        .unwrap_err();
+        let err =
+            differential_evolution(&OptimConfig::default(), &f, &[(0.0, 1.0), (2.0, -3.0)], 1)
+                .unwrap_err();
         match &err {
             RustyQLibError::InvalidInput { field, reason } => {
                 assert_eq!(field, "bounds");
@@ -217,10 +213,7 @@ mod tests {
         let degenerate =
             differential_evolution(&OptimConfig::default(), &f, &[(1.0, 1.0), (0.0, 1.0)], 1)
                 .unwrap_err();
-        assert!(matches!(
-            degenerate,
-            RustyQLibError::InvalidInput { .. }
-        ));
+        assert!(matches!(degenerate, RustyQLibError::InvalidInput { .. }));
         let nan = differential_evolution(
             &OptimConfig::default(),
             &f,

@@ -156,9 +156,7 @@ mod tests {
         assert!(
             (exercise_boundary(K, R, Q, V, PutOrCall::Call).unwrap() - 318.505635).abs() < 1e-5
         );
-        assert!(
-            (exercise_boundary(K, R, Q, V, PutOrCall::Put).unwrap() - 52.327698).abs() < 1e-5
-        );
+        assert!((exercise_boundary(K, R, Q, V, PutOrCall::Put).unwrap() - 52.327698).abs() < 1e-5);
     }
 
     #[test]
@@ -189,8 +187,7 @@ mod tests {
         let put_boundary = exercise_boundary(K, R, Q, V, PutOrCall::Put).unwrap();
         // value matching: the formula meets intrinsic at the boundary
         assert!(
-            (perpetual_call(call_boundary, K, R, Q, V).unwrap() - (call_boundary - K)).abs()
-                < 1e-9
+            (perpetual_call(call_boundary, K, R, Q, V).unwrap() - (call_boundary - K)).abs() < 1e-9
         );
         assert!(
             (perpetual_put(put_boundary, K, R, Q, V).unwrap() - (K - put_boundary)).abs() < 1e-9
@@ -219,7 +216,9 @@ mod tests {
     fn degenerate_carry_and_rate_cases_are_typed_errors() {
         let names = |e: RustyQLibError| e.to_string();
         // no carry cost: the perpetual call would be worth the stock
-        let err = perpetual_call(100.0, 80.0, 0.05, 0.0, 0.3).map_err(names).unwrap_err();
+        let err = perpetual_call(100.0, 80.0, 0.05, 0.0, 0.3)
+            .map_err(names)
+            .unwrap_err();
         assert!(err.contains("carry"), "{err}");
         // negative q (carry above r): unbounded
         assert!(perpetual_call(100.0, 80.0, 0.05, -0.01, 0.3).is_err());

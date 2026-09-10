@@ -166,7 +166,12 @@ impl FixedRateBond {
         let exercise_times: Vec<(NaiveDate, f64)> = self
             .cashflows()
             .iter()
-            .map(|cf| (cf.accrual_end, year_fraction(cf.payment_date).max(t_settlement)))
+            .map(|cf| {
+                (
+                    cf.accrual_end,
+                    year_fraction(cf.payment_date).max(t_settlement),
+                )
+            })
             .collect();
         let event_time = |date: NaiveDate| {
             exercise_times

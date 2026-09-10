@@ -221,7 +221,10 @@ impl SviParams {
                 ),
             ));
         }
-        if quotes.iter().any(|&(k, v)| !k.is_finite() || !v.is_finite()) {
+        if quotes
+            .iter()
+            .any(|&(k, v)| !k.is_finite() || !v.is_finite())
+        {
             return Err(RustyQLibError::invalid_input(
                 "svi calibration",
                 "quotes must be finite in log-moneyness and implied vol",
@@ -312,7 +315,10 @@ impl SviParams {
                         |acc, &(k, w)| if w < acc.1 { (k, w) } else { acc },
                     )
                     .0;
-                let k_span = w_target.iter().map(|q| q.0).fold(f64::NEG_INFINITY, f64::max)
+                let k_span = w_target
+                    .iter()
+                    .map(|q| q.0)
+                    .fold(f64::NEG_INFINITY, f64::max)
                     - w_target.iter().map(|q| q.0).fold(f64::INFINITY, f64::min);
                 // start: level at the observed floor, gentle wings, no skew
                 vec![
@@ -1733,7 +1739,11 @@ mod tests {
             SviCalibration::LevenbergMarquardt,
         ] {
             let fit = SviSurfaceFit::fit_with(&surface, |_| 101.0, method).unwrap();
-            assert!(fit.slices[0].rmse < 1e-5, "{method:?}: {}", fit.slices[0].rmse);
+            assert!(
+                fit.slices[0].rmse < 1e-5,
+                "{method:?}: {}",
+                fit.slices[0].rmse
+            );
         }
     }
 

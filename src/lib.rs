@@ -24,7 +24,8 @@
 //! - `data` *(feature `fetch`)* — free official end-of-day market data,
 //!   passed through as published with provenance metadata: the US
 //!   Treasury daily par yield curve (with a bootstrap into a discount
-//!   curve), the NY Fed SOFR and EFFR reference rates, and Cboe delayed
+//!   curve), the NY Fed SOFR and EFFR reference rates, the DTCC GCF Repo
+//!   Index (overnight Treasury and MBS GC repo), and Cboe delayed
 //!   listed option chains normalized into an
 //!   [`OptionChain`](equity::option_chain::OptionChain)
 //! - [`validation`] — runtime model-validation checks (martingale
@@ -52,14 +53,14 @@ pub mod utils;
 pub mod validation;
 
 pub use crate::bonds::{
-    bootstrap_credit_curve, bootstrap_curve, conversion_factor, g_spread, BillQuote, BondFuture,
-    BondOptionality, BondQuote, CallOption, CashDividend, ContingentConversion, ConvertibleBond,
-    ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, ConvertibleInstrument,
-    ConvertibleMarket, ConvertiblePreferred, ConvertiblePricing, CouponMakeWhole, CreditCurve,
-    CreditModel, CurveInstrument, DeliverableBond, Deposit, FactorRounding, FdVolModel,
-    FixedRateBond, FloatingRateNote, Fra, Frequency, FundamentalChangeMakeWhole,
-    JumpToDefaultMarket, MakeWholeCall, MandatoryConversion, PutOption, TreasuryBill,
-    dejump_implied_vol, dejump_surface,
+    bootstrap_credit_curve, bootstrap_curve, conversion_factor, dejump_implied_vol, dejump_surface,
+    g_spread, BillQuote, BondFuture, BondOptionality, BondQuote, CallOption, CashDividend,
+    ContingentConversion, ConvertibleBond, ConvertibleFdGreeks, ConvertibleFdGrid,
+    ConvertibleFdValuation, ConvertibleInstrument, ConvertibleMarket, ConvertiblePreferred,
+    ConvertiblePricing, CouponMakeWhole, CreditCurve, CreditModel, CurveInstrument,
+    DeliverableBond, Deposit, FactorRounding, FdVolModel, FixedRateBond, FloatingRateNote, Fra,
+    Frequency, FundamentalChangeMakeWhole, JumpToDefaultMarket, MakeWholeCall, MandatoryConversion,
+    PutOption, TreasuryBill,
 };
 pub use crate::cmdty::{
     AveragePriceOption, ClewlowStrickland, ClewlowStricklandFit, CommodityBasisSwap,
