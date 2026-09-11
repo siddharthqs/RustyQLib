@@ -6,10 +6,10 @@
 //! set, convertible into common at a fixed ratio, and callable by the
 //! issuer (typically to force conversion). It is a
 //! [`ConvertibleInstrument`], so it prices on the same engines and
-//! credit models as [`ConvertibleBond`](crate::bonds::ConvertibleBond)
+//! credit models as [`ConvertibleBond`](crate::hybrid::ConvertibleBond)
 //! — Tsiveriotis-Fernandes or jump to default, tree or finite
 //! differences, with the greeks, implied solves and pluggable
-//! volatility of [`ConvertiblePricing`](crate::bonds::ConvertiblePricing)
+//! volatility of [`ConvertiblePricing`](crate::hybrid::ConvertiblePricing)
 //! — mapping its own conventions
 //! onto the shared event grid:
 //!
@@ -39,10 +39,10 @@
 
 use chrono::{Months, NaiveDate};
 
-use crate::bonds::convertible::events::cash_dividends_at_steps;
-use crate::bonds::convertible::features::validate_dividend_protection;
-use crate::bonds::convertible::instrument::validate_cash_dividends;
-use crate::bonds::convertible::{
+use crate::hybrid::convertible::events::cash_dividends_at_steps;
+use crate::hybrid::convertible::features::validate_dividend_protection;
+use crate::hybrid::convertible::instrument::validate_cash_dividends;
+use crate::hybrid::convertible::{
     CashDividend, ConvertibleInstrument, CreditModel, DividendProtection, EventGrid,
 };
 use crate::bonds::schedule::coupon_dates;
@@ -496,7 +496,7 @@ impl ConvertibleInstrument for ConvertiblePreferred {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bonds::convertible::{
+    use crate::hybrid::convertible::{
         ConvertibleFdGrid, ConvertibleMarket, ConvertiblePricing, JumpToDefaultMarket,
     };
     use crate::core::curves::Compounding;

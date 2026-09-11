@@ -13,7 +13,7 @@
 //! CRR binomial tree ([`tree`]) and one finite-difference engine
 //! ([`fd`]); the market struct passed in selects the model. The
 //! instrument side is the [`ConvertibleInstrument`] trait — the bond
-//! here and the preferred in [`preferred`](crate::bonds::preferred) —
+//! here and the preferred in [`preferred`](crate::hybrid::preferred) —
 //! each mapping its schedule onto the event grid ([`events`]), and the
 //! whole pricing API comes through the blanket [`ConvertiblePricing`]
 //! trait, which callers bring into scope. The contractual extras live
@@ -106,7 +106,7 @@
 //! - [`DividendProtection`]: the ratio adjustment for dividends above a
 //!   threshold, applied by letting only the unprotected part jump.
 
-pub mod credit;
+pub mod models;
 pub mod dejump;
 pub mod events;
 pub mod fd;
@@ -121,7 +121,7 @@ mod fd_tests;
 #[cfg(test)]
 mod tests;
 
-pub use credit::{
+pub use models::{
     ConvertibleMarket, CreditModel, EquityInputs, JumpToDefaultMarket, NodeValue, Split,
 };
 pub use dejump::{dejump_implied_vol, dejump_surface};

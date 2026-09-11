@@ -1,4 +1,4 @@
-//! The credit treatments of the convertible, behind one trait.
+//! The credit models of the convertible, behind one trait.
 //!
 //! A [`CreditModel`] is a market snapshot — the equity inputs plus the
 //! credit inputs — together with the rules for carrying value back one

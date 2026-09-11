@@ -57,7 +57,7 @@
 
 use chrono::NaiveDate;
 
-use super::credit::{CreditModel, NodeValue};
+use super::models::{CreditModel, NodeValue};
 use super::events::{apply_cash_dividend, EventGrid};
 use super::instrument::ConvertibleInstrument;
 use crate::core::curves::{RateShift, YieldCurve};

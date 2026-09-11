@@ -4,7 +4,7 @@
 //! engine ([`tree`](super::tree), [`fd`](super::fd)).
 //!
 //! [`ConvertibleBond`](super::ConvertibleBond) and
-//! [`ConvertiblePreferred`](crate::bonds::ConvertiblePreferred) implement
+//! [`ConvertiblePreferred`](crate::hybrid::ConvertiblePreferred) implement
 //! it, each mapping its own conventions (discrete versus continuous
 //! calls, day-count accrued versus dividend-cycle accrued, a maturity
 //! versus a perpetuity tail) onto the shared [`EventGrid`]. The whole
@@ -13,7 +13,7 @@
 
 use chrono::NaiveDate;
 
-use super::credit::CreditModel;
+use super::models::CreditModel;
 use super::events::EventGrid;
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;

@@ -44,23 +44,22 @@
 pub mod bonds;
 pub mod cmdty;
 pub mod core;
+pub mod credit;
 #[cfg(feature = "fetch")]
 pub mod data;
 pub mod equity;
+pub mod hybrid;
 pub mod rates;
 pub mod risk;
 pub mod utils;
 pub mod validation;
 
 pub use crate::bonds::{
-    bootstrap_credit_curve, bootstrap_curve, conversion_factor, dejump_implied_vol, dejump_surface,
-    g_spread, BillQuote, BondFuture, BondOptionality, BondQuote, CallOption, CashDividend,
-    ContingentConversion, ConvertibleBond, ConvertibleFdGreeks, ConvertibleFdGrid,
-    ConvertibleFdValuation, ConvertibleInstrument, ConvertibleMarket, ConvertiblePreferred,
-    ConvertiblePricing, CouponMakeWhole, CreditCurve, CreditModel, DividendProtection, CurveInstrument,
-    DeliverableBond, Deposit, FactorRounding, FdVolModel, FixedRateBond, FloatingRateNote, Fra,
-    Frequency, FundamentalChangeMakeWhole, JumpToDefaultMarket, MakeWholeCall, MandatoryConversion,
-    PutOption, TreasuryBill,
+    bootstrap_credit_curve, bootstrap_curve, conversion_factor, g_spread, BillQuote, BondFuture, BondOptionality, BondQuote, CallOption, CurveInstrument, DeliverableBond, Deposit, FactorRounding, FixedRateBond, FloatingRateNote, Fra, Frequency, MakeWholeCall, PutOption, RepoSide, RepurchaseAgreement, TreasuryBill,
+};
+pub use crate::credit::{bootstrap_cds_curve, CdsQuote, CreditCurve, CreditDefaultSwap, ProtectionSide};
+pub use crate::hybrid::{
+    dejump_implied_vol, dejump_surface, CashDividend, ContingentConversion, ConvertibleBond, ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, ConvertibleInstrument, ConvertibleMarket, ConvertiblePreferred, ConvertiblePricing, CouponMakeWhole, CreditModel, DividendProtection, FdVolModel, FundamentalChangeMakeWhole, JumpToDefaultMarket, MandatoryConversion,
 };
 pub use crate::cmdty::{
     AveragePriceOption, ClewlowStrickland, ClewlowStricklandFit, CommodityBasisSwap,

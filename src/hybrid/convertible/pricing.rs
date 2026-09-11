@@ -6,7 +6,7 @@
 
 use chrono::NaiveDate;
 
-use super::credit::{ConvertibleMarket, CreditModel, JumpToDefaultMarket};
+use super::models::{ConvertibleMarket, CreditModel, JumpToDefaultMarket};
 use super::fd::{self, ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, FdVolModel};
 use super::implied::{
     central_spot_delta, solve_implied_credit_spread, solve_implied_hazard_rate,
@@ -123,7 +123,7 @@ pub trait ConvertiblePricing: ConvertibleInstrument {
     /// default, holding the equity inputs and the recovery fixed.
     ///
     /// The price is not monotone in the hazard (see the module docs of
-    /// [`convertible`](crate::bonds::convertible)): it falls from the
+    /// [`convertible`](crate::hybrid::convertible)): it falls from the
     /// zero-hazard value while the survival claims dominate, bottoms
     /// out, then rises as the recovery leg takes over. Only the falling
     /// branch is a credit reading, so the solve walks out from zero

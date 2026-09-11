@@ -12,6 +12,9 @@
 //! - quoted-instrument pillars ([`BillQuote`], [`BondQuote`]) that
 //!   bootstrap a Treasury discount curve which exactly reprices its
 //!   input quotes;
+//! - repurchase agreements ([`RepurchaseAgreement`]): cash legs, accrual,
+//!   coupon pass-through, margining and mark-to-market on bond collateral,
+//!   plus the bond's repo forward and carry ([`repo`]);
 //! - Treasury bond futures ([`BondFuture`]): CME conversion factors,
 //!   invoice prices, gross/net basis, implied repo and the
 //!   cheapest-to-deliver;
@@ -23,17 +26,8 @@
 //!   hazard-rate credit pricing and curve bootstrapping ([`credit`]),
 //!   and the Hull-White option model for calls, puts and make-wholes
 //!   ([`callable`]);
-//! - convertible bonds ([`ConvertibleBond`]) and preferreds
-//!   ([`ConvertiblePreferred`]), both [`ConvertibleInstrument`]s priced
-//!   through [`ConvertiblePricing`]: Tsiveriotis-Fernandes and
-//!   jump-to-default pricing on an equity tree or by finite differences
-//!   ([`convertible::fd`], value plus delta and gamma from one solve, and
-//!   vega, theta, parallel/key-rate and credit DV01s by bumping; flat,
-//!   Dupire local or custom volatility), with
-//!   soft calls, puts, contingent conversion, coupon and
-//!   fundamental-change make-wholes, mandatory conversion,
-//!   parity/premium analytics, and
-//!   implied credit spreads, hazard rates and volatilities.
+//! - convertible bonds and preferreds live in [`hybrid`](crate::hybrid),
+//!   above this module, on the [`FixedRateBond`] chassis.
 //!
 //! Conventions follow the rest of the library: instruments carry their own
 //! [`DayCountConvention`](crate::core::daycount::DayCountConvention) for
@@ -44,15 +38,14 @@ pub mod bills;
 pub mod bootstrap;
 pub mod build_contracts;
 pub mod callable;
-pub mod convertible;
 pub mod credit;
 pub mod deposit;
 pub mod fixed_rate_bond;
 pub mod fra;
 pub mod frn;
 pub mod futures;
-pub mod preferred;
 pub mod quotes;
+pub mod repo;
 pub mod schedule;
 pub mod service;
 pub mod spreads;
@@ -60,20 +53,14 @@ pub mod spreads;
 pub use bills::TreasuryBill;
 pub use bootstrap::bootstrap_curve;
 pub use callable::{BondOptionality, MakeWholeCall};
-pub use convertible::{
-    dejump_implied_vol, dejump_surface, CashDividend, ContingentConversion, ConvertibleBond,
-    ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, ConvertibleInstrument,
-    ConvertibleMarket, ConvertiblePricing, CouponMakeWhole, CreditModel, DividendProtection, FdVolModel,
-    FundamentalChangeMakeWhole, JumpToDefaultMarket, MandatoryConversion,
-};
 pub use credit::{bootstrap_credit_curve, CreditCurve};
 pub use deposit::Deposit;
 pub use fixed_rate_bond::{CallOption, Cashflow, FixedRateBond, PutOption};
 pub use fra::Fra;
 pub use frn::FloatingRateNote;
 pub use futures::{conversion_factor, BondFuture, DeliverableBond, FactorRounding};
-pub use preferred::ConvertiblePreferred;
 pub use quotes::{BillQuote, BondQuote};
+pub use repo::{RepoSide, RepurchaseAgreement};
 pub use schedule::CouponSchedule;
 pub use spreads::{g_spread, interpolated_benchmark_yield};
 

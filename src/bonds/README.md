@@ -32,6 +32,19 @@ and everything bootstraps into the library-wide `YieldCurve`.
   and bond-equivalent yield conventions.
 - **`FloatingRateNote`** (`frn.rs`) — projected off the curve, with discount
   margins.
+- **`RepurchaseAgreement`** (`repo.rs`) — term and open repos on bond
+  collateral: purchase and repurchase prices, haircut, coupon pass-through,
+  exposure and margin calls, mark-to-market against the market rate; plus
+  the bond's repo forward price and carry, consistent with the futures
+  implied repo.
+- **`BondFuture`** (`futures.rs`) — CME conversion factors, invoice prices,
+  gross and net basis, implied repo, and the cheapest-to-deliver.
+- Convertible bonds and preferreds moved to [`hybrid`](../hybrid/README.md).
+- **`RepurchaseAgreement`** (`repo.rs`) — term and open repos on bond
+  collateral: purchase and repurchase prices, haircut, coupon pass-through,
+  exposure and margin calls, mark-to-market against the market rate; plus
+  the bond's repo forward price and carry, consistent with the futures
+  implied repo.
 - **`BondFuture`** (`futures.rs`) — CME conversion factors, invoice prices,
   gross and net basis, implied repo, and the cheapest-to-deliver.
 - **`ConvertibleBond`** (`convertible/`) and **`ConvertiblePreferred`**
@@ -57,7 +70,8 @@ and everything bootstraps into the library-wide `YieldCurve`.
 ## Credit and optionality
 
 - **`spreads.rs`** — z-spread, spread DV01, G-spread, asset-swap spread.
-- **`credit.rs`** — hazard-rate pricing and credit-curve bootstrapping.
+- **`credit.rs`** — hazard-rate bond pricing and the bond-strip credit-curve
+  bootstrap; the curve itself lives in [`credit`](../credit).
 - **`callable.rs`** — Hull-White option model for calls, puts and
   make-wholes; yield-to-call, yield-to-put and yield-to-worst.
 - **`schedule.rs`** — coupon schedule generation (forward/backward with

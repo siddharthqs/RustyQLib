@@ -2,7 +2,7 @@
 //! and the volatility that reproduce a quoted clean price, plus the
 //! central-difference spot delta.
 
-use super::credit::ConvertibleMarket;
+use super::models::ConvertibleMarket;
 use crate::core::errors::RustyQLibError;
 use crate::core::solvers::Solver1d;
 

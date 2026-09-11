@@ -7,7 +7,7 @@
 
 use chrono::NaiveDate;
 
-use super::credit::NodeValue;
+use super::models::NodeValue;
 use super::instrument::{CashDividend, ConvertibleInstrument};
 use super::ConvertibleBond;
 use crate::core::curves::YieldCurve;
