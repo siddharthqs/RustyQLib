@@ -315,7 +315,7 @@ impl FixedRateBond {
                 format!("forward date {forward_date} must follow settlement {settlement}"),
             ));
         }
-        if !(clean_price > 0.0 && clean_price.is_finite()) || !repo_rate.is_finite() {
+        if !(clean_price > 0.0 && clean_price.is_finite() && repo_rate.is_finite()) {
             return Err(RustyQLibError::invalid_input(
                 "repo forward",
                 "clean price must be positive and the repo rate finite",

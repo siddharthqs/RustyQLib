@@ -14,7 +14,8 @@
 //!   input quotes;
 //! - repurchase agreements ([`RepurchaseAgreement`]): cash legs, accrual,
 //!   coupon pass-through, margining and mark-to-market on bond collateral,
-//!   plus the bond's repo forward and carry ([`repo`]);
+//!   plus the bond's repo forward and carry ([`repo`]), and the term repo
+//!   curve with specialness that feeds them ([`repo_curve`]);
 //! - Treasury bond futures ([`BondFuture`]): CME conversion factors,
 //!   invoice prices, gross/net basis, implied repo and the
 //!   cheapest-to-deliver;
@@ -46,6 +47,7 @@ pub mod frn;
 pub mod futures;
 pub mod quotes;
 pub mod repo;
+pub mod repo_curve;
 pub mod schedule;
 pub mod service;
 pub mod spreads;
@@ -61,6 +63,7 @@ pub use frn::FloatingRateNote;
 pub use futures::{conversion_factor, BondFuture, DeliverableBond, FactorRounding};
 pub use quotes::{BillQuote, BondQuote};
 pub use repo::{RepoSide, RepurchaseAgreement};
+pub use repo_curve::{RepoCurve, TermRepoQuote};
 pub use schedule::CouponSchedule;
 pub use spreads::{g_spread, interpolated_benchmark_yield};
 

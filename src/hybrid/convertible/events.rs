@@ -7,8 +7,8 @@
 
 use chrono::NaiveDate;
 
-use super::models::NodeValue;
 use super::instrument::{CashDividend, ConvertibleInstrument};
+use super::models::NodeValue;
 use super::ConvertibleBond;
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;

@@ -39,17 +39,17 @@
 
 use chrono::{Months, NaiveDate};
 
+use crate::bonds::schedule::coupon_dates;
+use crate::bonds::CallOption;
+use crate::core::calendar::Frequency;
+use crate::core::curves::YieldCurve;
+use crate::core::errors::RustyQLibError;
 use crate::hybrid::convertible::events::cash_dividends_at_steps;
 use crate::hybrid::convertible::features::validate_dividend_protection;
 use crate::hybrid::convertible::instrument::validate_cash_dividends;
 use crate::hybrid::convertible::{
     CashDividend, ConvertibleInstrument, CreditModel, DividendProtection, EventGrid,
 };
-use crate::bonds::schedule::coupon_dates;
-use crate::bonds::CallOption;
-use crate::core::calendar::Frequency;
-use crate::core::curves::YieldCurve;
-use crate::core::errors::RustyQLibError;
 
 /// Tree truncation horizon for perpetual preferreds, in years; the
 /// dividend stream beyond it is carried as an exact perpetuity tail.
@@ -496,11 +496,11 @@ impl ConvertibleInstrument for ConvertiblePreferred {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hybrid::convertible::{
-        ConvertibleFdGrid, ConvertibleMarket, ConvertiblePricing, JumpToDefaultMarket,
-    };
     use crate::core::curves::Compounding;
     use crate::core::daycount::DayCountConvention;
+    use crate::hybrid::convertible::{
+        ConvertibleFdGrid, ConvertibleMarket, ConvertiblePricing, HazardLevel, JumpToDefaultMarket,
+    };
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -537,7 +537,7 @@ mod tests {
             volatility: 0.30,
             dividend_yield: 0.01,
             borrow_cost: 0.0,
-            hazard_rate: 0.03,
+            hazard: HazardLevel::Flat(0.03),
             recovery_rate: 0.10,
         }
     }
@@ -564,7 +564,7 @@ mod tests {
         // wider spread, lower floor
         let wide = ConvertibleMarket {
             credit_spread: 0.05,
-            ..m
+            ..m.clone()
         };
         assert!(cps.preferred_floor(&wide, &curve, settlement).unwrap() < floor);
         // and under jump to default the survival-weighted floor with
@@ -575,7 +575,7 @@ mod tests {
         assert!((tree - floor).abs() < 0.05, "{tree} vs {floor}");
         let generous = JumpToDefaultMarket {
             recovery_rate: 0.5,
-            ..jm
+            ..jm.clone()
         };
         assert!(cps.preferred_floor(&generous, &curve, settlement).unwrap() > floor);
     }

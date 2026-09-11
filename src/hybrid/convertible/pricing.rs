@@ -6,13 +6,15 @@
 
 use chrono::NaiveDate;
 
-use super::models::{ConvertibleMarket, CreditModel, JumpToDefaultMarket};
 use super::fd::{self, ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, FdVolModel};
 use super::implied::{
     central_spot_delta, solve_implied_credit_spread, solve_implied_hazard_rate,
     solve_implied_volatility,
 };
 use super::instrument::ConvertibleInstrument;
+use super::models::{
+    ConvertibleMarket, CreditModel, EquityLinkedHazardMarket, HazardLevel, JumpToDefaultMarket,
+};
 use super::tree::tree_value;
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
@@ -119,8 +121,9 @@ pub trait ConvertiblePricing: ConvertibleInstrument {
         })
     }
 
-    /// The hazard rate implied by a quoted clean price under jump to
-    /// default, holding the equity inputs and the recovery fixed.
+    /// The flat hazard rate implied by a quoted clean price under jump
+    /// to default, holding the equity inputs and the recovery fixed (a
+    /// term structure on the market is replaced by the flat rate).
     ///
     /// The price is not monotone in the hazard (see the module docs of
     /// [`convertible`](crate::hybrid::convertible)): it falls from the
@@ -141,10 +144,32 @@ pub trait ConvertiblePricing: ConvertibleInstrument {
         check_quoted_price(clean_price)?;
         solve_implied_hazard_rate(clean_price, |hazard_rate| {
             let with_hazard = JumpToDefaultMarket {
-                hazard_rate,
-                ..*market
+                hazard: HazardLevel::Flat(hazard_rate),
+                ..market.clone()
             };
             self.clean_price(&with_hazard, curve, settlement)
+        })
+    }
+
+    /// The flat hazard level `a` implied by a quoted clean price under
+    /// the equity-linked model at its elasticity and reference price (a
+    /// term structure on the market is replaced by the flat level). The
+    /// same caveats as [`implied_hazard_rate`](Self::implied_hazard_rate):
+    /// only the falling branch of the price is searched.
+    fn implied_hazard_level(
+        &self,
+        clean_price: f64,
+        market: &EquityLinkedHazardMarket,
+        curve: &YieldCurve,
+        settlement: NaiveDate,
+    ) -> Result<f64, RustyQLibError> {
+        check_quoted_price(clean_price)?;
+        solve_implied_hazard_rate(clean_price, |hazard_rate| {
+            let with_level = EquityLinkedHazardMarket {
+                hazard: HazardLevel::Flat(hazard_rate),
+                ..market.clone()
+            };
+            self.clean_price(&with_level, curve, settlement)
         })
     }
 

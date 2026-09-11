@@ -57,9 +57,9 @@
 
 use chrono::NaiveDate;
 
-use super::models::{CreditModel, NodeValue};
 use super::events::{apply_cash_dividend, EventGrid};
 use super::instrument::ConvertibleInstrument;
+use super::models::{CreditModel, NodeValue, StepContext};
 use crate::core::curves::{RateShift, YieldCurve};
 use crate::core::errors::RustyQLibError;
 use crate::core::fd_solvers::tridiagonal::thomas_algorithm;
@@ -448,34 +448,53 @@ impl SpaceGrid {
 }
 
 /// One backward theta step of `u_t + 1/2 sigma^2 u_xx + (mu - 1/2
-/// sigma^2) u_x - rho u = 0` over `dt`, with `sigma` given per node and
-/// the linearity condition `u_xx = u_x` (flat in the share price) at
-/// both edges. Returns the values at the earlier time.
+/// sigma^2) u_x - rho u = 0` over `dt`, with `sigma`, `mu` and `rho`
+/// given per node and the linearity condition `u_xx = u_x` (flat in the
+/// share price) at both edges. The drift uses central differences
+/// while both neighbours keep non-negative weights and switches to the
+/// upwind one-sided difference where the drift dominates the diffusion
+/// (a state-dependent hazard at low nodes), which keeps the scheme
+/// monotone. Returns the values at the earlier time.
 fn theta_step(
     u: &[f64],
     h: f64,
     dt: f64,
     theta: f64,
     sigma: &[f64],
-    mu: f64,
-    rho: f64,
+    mu: &[f64],
+    rho: &[f64],
 ) -> Vec<f64> {
     let n = u.len();
     let m = n - 1;
     // operator coefficients: lower, diagonal, upper per row
     let coefficients = |j: usize| -> (f64, f64, f64) {
         if j == 0 {
-            (0.0, -mu / h - rho, mu / h)
+            (0.0, -mu[0] / h - rho[0], mu[0] / h)
         } else if j == m {
-            (-mu / h, mu / h - rho, 0.0)
+            (-mu[m] / h, mu[m] / h - rho[m], 0.0)
         } else {
             let s2 = sigma[j] * sigma[j];
-            let nu = mu - 0.5 * s2;
-            (
-                0.5 * s2 / (h * h) - nu / (2.0 * h),
-                -s2 / (h * h) - rho,
-                0.5 * s2 / (h * h) + nu / (2.0 * h),
-            )
+            let nu = mu[j] - 0.5 * s2;
+            let diffusion = 0.5 * s2 / (h * h);
+            if nu.abs() * h <= s2 {
+                (
+                    diffusion - nu / (2.0 * h),
+                    -s2 / (h * h) - rho[j],
+                    diffusion + nu / (2.0 * h),
+                )
+            } else if nu > 0.0 {
+                (
+                    diffusion,
+                    -s2 / (h * h) - nu / h - rho[j],
+                    diffusion + nu / h,
+                )
+            } else {
+                (
+                    diffusion - nu / h,
+                    -s2 / (h * h) + nu / h - rho[j],
+                    diffusion,
+                )
+            }
         }
     };
     let mut sub = Vec::with_capacity(m);
@@ -524,7 +543,7 @@ fn solve<I: ConvertibleInstrument + ?Sized, M: CreditModel>(
 ) -> Vec<f64> {
     let steps = events.riskfree_df.len();
     let dt = events.dt;
-    let credit_df = (-market.credit_rate() * dt).exp();
+    let t0 = events.times[0];
     // the log-price width of one grid cell, for a smoothed soft trigger
     let cell_width = space.h;
 
@@ -538,17 +557,24 @@ fn solve<I: ConvertibleInstrument + ?Sized, M: CreditModel>(
         let theta = rannacher_theta(steps - 1 - step);
         let riskfree_df = events.riskfree_df[step];
         let r = -riskfree_df.ln() / dt;
-        let mu = r + market.survival_drift();
+        let t = 0.5 * (events.times[step] + events.times[step + 1]) - t0;
+        let mu: Vec<f64> = space
+            .spot
+            .iter()
+            .map(|&s| r + market.survival_drift_at(s, t))
+            .collect();
         let sigma = space.sigma_at(field, events, step);
-        let diffuse = |u: Vec<f64>, rho: f64| theta_step(&u, space.h, dt, theta, &sigma, mu, rho);
-        nodes = market.pde_step(
-            &nodes,
-            &diffuse,
+        let diffuse =
+            |u: Vec<f64>, rho: &[f64]| theta_step(&u, space.h, dt, theta, &sigma, &mu, rho);
+        let context = StepContext {
             r,
             riskfree_df,
-            credit_df,
-            events.default_claim_at_step[step],
-        );
+            dt,
+            spots: &space.spot,
+            t,
+            default_claim: events.default_claim_at_step[step],
+        };
+        nodes = market.pde_step(&nodes, &diffuse, &context);
         apply_cash_dividend(&mut nodes, &space.spot, events.cash_dividend_at_step[step]);
         for (j, node) in nodes.iter_mut().enumerate() {
             let continuation = node.plus_cash(events.coupon_at_step[step]);

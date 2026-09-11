@@ -76,6 +76,30 @@
 //! as credit; [`ConvertiblePricing::implied_hazard_rate`] searches it
 //! alone.
 //!
+//! # Equity-linked hazard ([`EquityLinkedHazardMarket`])
+//!
+//! Jump to default assumes default is equally likely whatever the
+//! share price. The equity-linked model lets the intensity rise as the
+//! stock falls,
+//!
+//! ```text
+//! lambda(S) = a (S0 / S)^p,    0 <= p <= 2
+//! ```
+//!
+//! with the conditional drift `r + lambda(S, t) - q - b` and the
+//! survival factor following the node's hazard. At `p = 0` it is jump to
+//! default exactly; for `p > 0` the bond floor falls with the stock, a
+//! busted convertible prices lower and carries a credit delta, and the
+//! model's unconditional survival sits below `exp(-integral of a)`
+//! because the hazard is convex in the share price — so `a(t)` is not
+//! the CDS hazard (it sits below it): [`calibration`] solves it through
+//! the model so that the survival probabilities match a CDS curve's. The level, like the
+//! jump-to-default hazard, is a [`HazardLevel`]: flat or a term
+//! structure on a [`CreditCurve`](crate::credit::CreditCurve). On the
+//! grid the drift switches to upwind differences where the hazard
+//! dominates; on the tree the hazard is capped at the lattice's
+//! admissible maximum at deep out-of-the-money nodes.
+//!
 //! # Exercise logic
 //!
 //! Per node, inside the conversion window, for both models:
@@ -106,13 +130,14 @@
 //! - [`DividendProtection`]: the ratio adjustment for dividends above a
 //!   threshold, applied by letting only the unprotected part jump.
 
-pub mod models;
+pub mod calibration;
 pub mod dejump;
 pub mod events;
 pub mod fd;
 pub mod features;
 pub mod implied;
 pub mod instrument;
+pub mod models;
 pub mod pricing;
 pub mod tree;
 
@@ -121,9 +146,6 @@ mod fd_tests;
 #[cfg(test)]
 mod tests;
 
-pub use models::{
-    ConvertibleMarket, CreditModel, EquityInputs, JumpToDefaultMarket, NodeValue, Split,
-};
 pub use dejump::{dejump_implied_vol, dejump_surface};
 pub use events::EventGrid;
 pub use fd::{ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, FdVolModel};
@@ -132,6 +154,10 @@ pub use features::{
     MandatoryConversion,
 };
 pub use instrument::{CashDividend, ConvertibleInstrument};
+pub use models::{
+    ConvertibleMarket, CreditModel, Diffusion, EquityInputs, EquityLinkedHazardMarket, HazardLevel,
+    JumpToDefaultMarket, NodeValue, Split, StepContext,
+};
 pub use pricing::{ConvertiblePricing, DEFAULT_TREE_STEPS};
 
 use chrono::NaiveDate;

@@ -7,8 +7,13 @@ Instruments that are a bond, an equity claim and a credit exposure at once.
   blanket `ConvertiblePricing` trait; two credit models behind one
   `CreditModel` trait (Tsiveriotis-Fernandes with an equity/cash split and a
   flat spread; jump to default with a hazard rate, the stock absorbed at
-  zero, recovery on face and borrow in the drift) on one CRR tree and one
-  Crank-Nicolson grid. Soft calls and puts, contingent conversion, coupon
+  zero, recovery on face and borrow in the drift; and the equity-linked
+  hazard `a(t) (S0/S)^p` that rises as the stock falls, giving the bond
+  floor a credit delta; hazards flat or a term structure on a `CreditCurve`)
+  on one CRR tree and one Crank-Nicolson grid.
+- **`convertible/calibration.rs`** — the equity-linked level `a(t)` solved
+  through the model, pillar by pillar, so its survival probabilities match
+  a CDS curve's. Soft calls and puts, contingent conversion, coupon
   and fundamental-change make-wholes, mandatory conversion, discrete cash
   dividends with threshold protection, parity/premium analytics, implied
   credit spreads, hazard rates and volatilities.

@@ -65,6 +65,17 @@ impl CreditCurve {
             .collect()
     }
 
+    /// The instantaneous hazard at `t`: the pillar's on `(t_{i-1}, t_i]`,
+    /// the last pillar's beyond.
+    pub fn hazard_at(&self, t: f64) -> f64 {
+        for (&segment_end, &hazard) in self.times.iter().zip(&self.hazards) {
+            if t <= segment_end {
+                return hazard;
+            }
+        }
+        self.hazards[self.hazards.len() - 1]
+    }
+
     /// Survival probability to `t`: `exp(-integral of the hazard)`.
     pub fn survival(&self, t: f64) -> f64 {
         if t <= 0.0 {

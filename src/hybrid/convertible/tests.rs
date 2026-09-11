@@ -8,6 +8,7 @@ use crate::core::curves::{Compounding, YieldCurve};
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
 use crate::core::utils::norm_cdf;
+use crate::credit::CreditCurve;
 
 fn d(y: i32, m: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -232,7 +233,7 @@ fn implied_volatility_round_trips_under_both_models() {
     // the solve starts from a wrong vol and must find the right one
     let guess = ConvertibleMarket {
         volatility: 0.5,
-        ..m
+        ..m.clone()
     };
     let implied = cv
         .implied_volatility(clean, &guess, &curve, settlement)
@@ -243,7 +244,7 @@ fn implied_volatility_round_trips_under_both_models() {
     let clean = cv.clean_price(&jm, &curve, settlement).unwrap();
     let guess = JumpToDefaultMarket {
         volatility: 0.15,
-        ..jm
+        ..jm.clone()
     };
     let implied = cv
         .implied_volatility(clean, &guess, &curve, settlement)
@@ -493,7 +494,7 @@ fn jtd_market(spot: f64) -> JumpToDefaultMarket {
         volatility: 0.30,
         dividend_yield: 0.01,
         borrow_cost: 0.005,
-        hazard_rate: 0.03,
+        hazard: HazardLevel::Flat(0.03),
         recovery_rate: 0.40,
     }
 }
@@ -529,7 +530,7 @@ fn jtd_without_hazard_is_tsiveriotis_fernandes_without_spread() {
             ..market(spot)
         };
         let jtd = JumpToDefaultMarket {
-            hazard_rate: 0.0,
+            hazard: HazardLevel::Flat(0.0),
             borrow_cost: 0.0,
             ..jtd_market(spot)
         };
@@ -584,14 +585,14 @@ fn jtd_maturity_only_conversion_is_risky_bond_plus_jump_to_default_call() {
     let t = dc.year_fraction(settlement, last.payment_date);
     let strike = last.amount / cv.conversion_ratio;
     let df = curve.df_date(last.payment_date) / curve.df_date(settlement);
-    let survival = (-m.hazard_rate * t).exp();
+    let survival = (-m.hazard.at(0.0) * t).exp();
     let forward = m.spot * (-(m.dividend_yield + m.borrow_cost) * t).exp() / (df * survival);
     let sd = m.volatility * t.sqrt();
     let d1 = ((forward / strike).ln() + 0.5 * sd * sd) / sd;
     let call = df * survival * (forward * norm_cdf(d1) - strike * norm_cdf(d1 - sd));
     let straight = cv
         .bond
-        .risky_dirty_price(&curve, m.hazard_rate, m.recovery_rate, settlement)
+        .risky_dirty_price(&curve, m.hazard.at(0.0), m.recovery_rate, settlement)
         .unwrap();
     let expected = straight + cv.conversion_ratio * call * 100.0 / cv.bond.face_value;
     assert!((tree - expected).abs() < 0.15, "{tree} vs {expected}");
@@ -623,29 +624,29 @@ fn jtd_price_sits_above_both_floors_and_orders_in_the_inputs() {
     // more default risk cheapens every claim
     assert!(
         price(JumpToDefaultMarket {
-            hazard_rate: 0.08,
-            ..base_market
+            hazard: HazardLevel::Flat(0.08),
+            ..base_market.clone()
         }) < base
     );
     // a better recovery is worth more
     assert!(
         price(JumpToDefaultMarket {
             recovery_rate: 0.7,
-            ..base_market
+            ..base_market.clone()
         }) > base
     );
     // vega
     assert!(
         price(JumpToDefaultMarket {
             volatility: 0.45,
-            ..base_market
+            ..base_market.clone()
         }) > base
     );
     // borrow lowers the forward, hence the conversion value
     assert!(
         price(JumpToDefaultMarket {
             borrow_cost: 0.03,
-            ..base_market
+            ..base_market.clone()
         }) < base
     );
     // calls cap, puts floor
@@ -686,11 +687,14 @@ fn jtd_implied_hazard_rate_round_trips() {
     let implied = cv
         .implied_hazard_rate(clean, &m, &curve, settlement)
         .unwrap();
-    assert!((implied - m.hazard_rate).abs() < 1e-5, "implied {implied}");
+    assert!(
+        (implied - m.hazard.at(0.0)).abs() < 1e-5,
+        "implied {implied}"
+    );
     // a quote at the zero-hazard value reads as no credit risk
     let riskless = JumpToDefaultMarket {
-        hazard_rate: 0.0,
-        ..m
+        hazard: HazardLevel::Flat(0.0),
+        ..m.clone()
     };
     let top = cv.clean_price(&riskless, &curve, settlement).unwrap();
     let implied = cv.implied_hazard_rate(top, &m, &curve, settlement).unwrap();
@@ -716,21 +720,24 @@ fn jtd_validation() {
     let good = jtd_market(48.0);
     assert!(cv.dirty_price(&good, &curve, settlement).is_ok());
     let bad_hazard = JumpToDefaultMarket {
-        hazard_rate: -0.01,
-        ..good
+        hazard: HazardLevel::Flat(-0.01),
+        ..good.clone()
     };
     assert!(cv.dirty_price(&bad_hazard, &curve, settlement).is_err());
     let bad_recovery = JumpToDefaultMarket {
         recovery_rate: 1.5,
-        ..good
+        ..good.clone()
     };
     assert!(cv.dirty_price(&bad_recovery, &curve, settlement).is_err());
     let bad_borrow = JumpToDefaultMarket {
         borrow_cost: f64::NAN,
-        ..good
+        ..good.clone()
     };
     assert!(cv.dirty_price(&bad_borrow, &curve, settlement).is_err());
-    let bad_spot = JumpToDefaultMarket { spot: 0.0, ..good };
+    let bad_spot = JumpToDefaultMarket {
+        spot: 0.0,
+        ..good.clone()
+    };
     assert!(cv.dirty_price(&bad_spot, &curve, settlement).is_err());
     assert!(cv
         .dirty_price_with_steps(&good, &curve, settlement, 5)
@@ -738,6 +745,315 @@ fn jtd_validation() {
     assert!(cv
         .implied_hazard_rate(-10.0, &good, &curve, settlement)
         .is_err());
+}
+
+// --- equity-linked hazard --------------------------------------------
+
+/// The jump-to-default inputs with the hazard linked to the stock
+/// around a reference price of 48.
+fn linked_market(spot: f64, elasticity: f64) -> EquityLinkedHazardMarket {
+    EquityLinkedHazardMarket {
+        reference_spot: 48.0,
+        ..EquityLinkedHazardMarket::new(jtd_market(spot), elasticity).unwrap()
+    }
+}
+
+#[test]
+fn zero_elasticity_is_jump_to_default_to_the_bit() {
+    let cv = convertible();
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    for spot in [30.0, 48.0, 70.0] {
+        let jtd = cv
+            .dirty_price(&jtd_market(spot), &curve, settlement)
+            .unwrap();
+        let linked = cv
+            .dirty_price(&linked_market(spot, 0.0), &curve, settlement)
+            .unwrap();
+        assert_eq!(jtd, linked, "spot {spot}");
+    }
+    let m = linked_market(24.0, 1.0);
+    assert!((m.hazard_at(24.0, 0.0) - 0.06).abs() < 1e-12);
+    assert!((m.hazard_at(96.0, 0.0) - 0.015).abs() < 1e-12);
+    assert!((linked_market(24.0, 2.0).hazard_at(24.0, 0.0) - 0.12).abs() < 1e-12);
+}
+
+#[test]
+fn hazard_rises_as_the_stock_falls() {
+    let cv = convertible();
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    let price = |spot: f64, p: f64| {
+        cv.clean_price(&linked_market(spot, p), &curve, settlement)
+            .unwrap()
+    };
+    // below the reference the credit is weaker; above it the current
+    // hazard is below the level, yet the exposure lives in the states
+    // where the stock has fallen, so the gap to jump to default only
+    // narrows rather than changing sign
+    assert!(
+        price(30.0, 1.0) < price(30.0, 0.0) - 0.5,
+        "{} vs {}",
+        price(30.0, 1.0),
+        price(30.0, 0.0)
+    );
+    assert!(price(30.0, 2.0) < price(30.0, 1.0));
+    let gap = |spot: f64, p: f64| price(spot, 0.0) - price(spot, p);
+    assert!(
+        gap(70.0, 1.0) < 0.5 * gap(30.0, 1.0),
+        "{} vs {}",
+        gap(70.0, 1.0),
+        gap(30.0, 1.0)
+    );
+    // at the reference the hazard averages above its level: the map is
+    // convex in the share price, so the price sits below jump to default
+    assert!(
+        price(48.0, 1.0) < price(48.0, 0.0),
+        "{} vs {}",
+        price(48.0, 1.0),
+        price(48.0, 0.0)
+    );
+    // the floor moves with the stock: flat under jump to default, rising
+    // with the share price here
+    let floor = |spot: f64, p: f64| {
+        cv.bond_floor(&linked_market(spot, p), &curve, settlement)
+            .unwrap()
+    };
+    assert!(
+        floor(30.0, 1.0) < floor(30.0, 0.0) - 1.0,
+        "{} vs {}",
+        floor(30.0, 1.0),
+        floor(30.0, 0.0)
+    );
+    assert!(
+        floor(70.0, 1.0) > floor(30.0, 1.0) + 1.0,
+        "{} vs {}",
+        floor(70.0, 1.0),
+        floor(30.0, 1.0)
+    );
+    assert!((floor(70.0, 0.0) - floor(30.0, 0.0)).abs() < 1e-9);
+    assert!(
+        (floor(48.0, 0.0)
+            - cv.bond_floor(&jtd_market(48.0), &curve, settlement)
+                .unwrap())
+        .abs()
+            < 1e-9
+    );
+    // the implied level round-trips
+    let quoted = price(48.0, 1.0);
+    let implied = cv
+        .implied_hazard_level(quoted, &linked_market(48.0, 1.0), &curve, settlement)
+        .unwrap();
+    assert!((implied - 0.03).abs() < 1e-5, "{implied}");
+}
+
+#[test]
+fn survival_is_below_the_reference_level_for_a_convex_hazard() {
+    // a claim that only pays on survival: the bond with the conversion
+    // right never opening and no recovery
+    let mut zero = convertible();
+    zero.convert_from = Some(d(2031, 5, 15));
+    zero.convert_until = Some(d(2026, 5, 15));
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    let flat_hazard = JumpToDefaultMarket {
+        recovery_rate: 0.0,
+        ..jtd_market(48.0)
+    };
+    let linked = EquityLinkedHazardMarket {
+        recovery_rate: 0.0,
+        reference_spot: 48.0,
+        ..EquityLinkedHazardMarket::new(jtd_market(48.0), 1.0).unwrap()
+    };
+    let at_level = zero.dirty_price(&flat_hazard, &curve, settlement).unwrap();
+    let convex = zero.dirty_price(&linked, &curve, settlement).unwrap();
+    assert!(convex < at_level - 0.1, "{convex} vs {at_level}");
+}
+
+#[test]
+fn equity_linked_validation() {
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    let cv = convertible();
+    assert!(EquityLinkedHazardMarket::new(jtd_market(48.0), -0.1).is_err());
+    assert!(EquityLinkedHazardMarket::new(jtd_market(48.0), 2.5).is_err());
+    let bad_reference = EquityLinkedHazardMarket {
+        reference_spot: 0.0,
+        ..EquityLinkedHazardMarket::new(jtd_market(48.0), 1.0).unwrap()
+    };
+    assert!(cv.dirty_price(&bad_reference, &curve, settlement).is_err());
+    let bad_spot = JumpToDefaultMarket {
+        spot: -1.0,
+        ..jtd_market(48.0)
+    };
+    assert!(EquityLinkedHazardMarket::new(bad_spot, 1.0).is_err());
+}
+
+// --- hazard term structures and the level calibration ----------------
+
+#[test]
+fn a_flat_term_structure_is_the_flat_hazard_to_the_bit() {
+    let cv = convertible();
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    let flat_hazard = jtd_market(48.0);
+    let as_curve = flat_hazard
+        .clone()
+        .with_hazard_curve(CreditCurve::flat(0.03).unwrap());
+    assert_eq!(
+        cv.dirty_price(&flat_hazard, &curve, settlement).unwrap(),
+        cv.dirty_price(&as_curve, &curve, settlement).unwrap()
+    );
+    assert_eq!(
+        cv.bond_floor(&flat_hazard, &curve, settlement).unwrap(),
+        cv.bond_floor(&as_curve, &curve, settlement).unwrap()
+    );
+}
+
+#[test]
+fn a_hazard_term_structure_prices_its_own_survival() {
+    // a survival-only claim (no conversion, no recovery) on the tree and
+    // the grid is the discounted survival of the term structure
+    let mut claim = convertible();
+    claim.convert_from = Some(d(2031, 5, 15));
+    claim.convert_until = Some(d(2026, 5, 15));
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    let credit = CreditCurve::new(&[(1.0, 0.01), (3.0, 0.03), (10.0, 0.05)]).unwrap();
+    let m = JumpToDefaultMarket {
+        recovery_rate: 0.0,
+        ..jtd_market(48.0)
+    }
+    .with_hazard_curve(credit.clone());
+    let last = claim.bond.cashflows().last().unwrap().clone();
+    let t = curve
+        .day_count()
+        .year_fraction(settlement, last.payment_date);
+    let df = curve.df_date(last.payment_date) / curve.df_date(settlement);
+    let coupons = claim
+        .bond
+        .dirty_price_from_curve(&curve, settlement)
+        .unwrap()
+        - 100.0 * df;
+    // the coupons survive to their own dates; check the bullet part
+    // through the analytic risky bond on the curve, which the floor is
+    let floor = cv_floor(&claim, &m, &curve, settlement);
+    let analytic = claim
+        .bond
+        .risky_clean_price_on_curve(&curve, &credit, 0.0, settlement)
+        .unwrap();
+    assert!((floor - analytic).abs() < 1e-9, "{floor} vs {analytic}");
+    let tree = claim
+        .dirty_price_with_steps(&m, &curve, settlement, 3200)
+        .unwrap();
+    let grid = claim
+        .fd_valuation(&m, &curve, settlement, ConvertibleFdGrid::default())
+        .unwrap()
+        .dirty_price;
+    let expected = analytic + claim.bond.accrued_interest(settlement).unwrap();
+    assert!((tree - expected).abs() < 0.02, "tree {tree} vs {expected}");
+    assert!((grid - expected).abs() < 0.02, "grid {grid} vs {expected}");
+    let _ = (coupons, t);
+    // the credit bump shifts every pillar, the implied solve returns a
+    // flat rate that reprices the quote
+    let bumped = m.with_credit_bump(0.01);
+    assert!((bumped.hazard.at(2.0) - 0.04).abs() < 1e-12);
+    let quoted = convertible().clean_price(&m, &curve, settlement).unwrap();
+    let implied = convertible()
+        .implied_hazard_rate(quoted, &m, &curve, settlement)
+        .unwrap();
+    let flat_market = JumpToDefaultMarket {
+        hazard: HazardLevel::Flat(implied),
+        ..m.clone()
+    };
+    assert!(
+        (convertible()
+            .clean_price(&flat_market, &curve, settlement)
+            .unwrap()
+            - quoted)
+            .abs()
+            < 1e-6
+    );
+}
+
+fn cv_floor(
+    cv: &ConvertibleBond,
+    market: &JumpToDefaultMarket,
+    curve: &YieldCurve,
+    settlement: NaiveDate,
+) -> f64 {
+    cv.bond_floor(market, curve, settlement).unwrap()
+}
+
+#[test]
+fn calibrated_level_reproduces_the_cds_survival_through_the_model() {
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    let credit = CreditCurve::new(&[(1.0, 0.01), (3.0, 0.02), (5.0, 0.03)]).unwrap();
+    let grid = ConvertibleFdGrid {
+        time_steps: 200,
+        space_steps: 200,
+        grid_stdevs: 5.0,
+    };
+    // at zero elasticity the level is the CDS hazard itself
+    let flat_model = EquityLinkedHazardMarket::new(jtd_market(48.0), 0.0).unwrap();
+    let calibrated = flat_model
+        .calibrated_to(&credit, &curve, settlement, grid)
+        .unwrap();
+    for ((t, target), (ct, level)) in credit.pillars().iter().zip(match &calibrated.hazard {
+        HazardLevel::Term(c) => c.pillars(),
+        HazardLevel::Flat(_) => panic!("a term structure was expected"),
+    }) {
+        assert!((t - ct).abs() < 1e-12);
+        assert!((target - level).abs() < 2e-4, "{target} vs {level}");
+    }
+    // with elasticity the level sits below the CDS hazard: the hazard
+    // is convex in the share price, so the model amplifies its level,
+    // and the survival matches by construction
+    let linked = EquityLinkedHazardMarket::new(jtd_market(48.0), 1.0).unwrap();
+    let calibrated = linked
+        .calibrated_to(&credit, &curve, settlement, grid)
+        .unwrap();
+    let levels = match &calibrated.hazard {
+        HazardLevel::Term(c) => c.pillars(),
+        HazardLevel::Flat(_) => panic!("a term structure was expected"),
+    };
+    for ((_, target), (_, level)) in credit.pillars().iter().zip(&levels) {
+        assert!(level < target, "{level} vs {target}");
+    }
+    for (t, _) in credit.pillars() {
+        let horizon = (t * 365.0).round() / 365.0;
+        let model = calibrated
+            .survival_probability(&curve, settlement, horizon, grid)
+            .unwrap();
+        assert!(
+            (model - credit.survival(horizon)).abs() < 1e-8,
+            "{model} vs {}",
+            credit.survival(horizon)
+        );
+    }
+    // and the un-calibrated model at the CDS hazards survives less
+    let naive = EquityLinkedHazardMarket {
+        hazard: HazardLevel::Term(credit.clone()),
+        ..linked.clone()
+    };
+    assert!(
+        naive
+            .survival_probability(&curve, settlement, 5.0, grid)
+            .unwrap()
+            < credit.survival(5.0)
+    );
+    // a busted bond on the calibrated model prices between the naive
+    // level and the flat-hazard bond
+    let cv = convertible();
+    let priced = cv
+        .fd_valuation(&calibrated.with_spot(30.0), &curve, settlement, grid)
+        .unwrap()
+        .dirty_price;
+    assert!(
+        priced.is_finite() && priced > 50.0 && priced < 120.0,
+        "{priced}"
+    );
 }
 
 // --- contractual features ------------------------------------------
@@ -967,9 +1283,9 @@ fn mandatory_terminal_schedule_and_floor() {
     let floor_jtd = cv.bond_floor(&jm, &curve, settlement).unwrap();
     let risky = cv
         .bond
-        .risky_clean_price(&curve, jm.hazard_rate, jm.recovery_rate, settlement)
+        .risky_clean_price(&curve, jm.hazard.at(0.0), jm.recovery_rate, settlement)
         .unwrap();
-    let principal = 100.0 * (-(0.04 + jm.hazard_rate) * t).exp();
+    let principal = 100.0 * (-(0.04 + jm.hazard.at(0.0)) * t).exp();
     assert!(
         (floor_jtd - (risky - principal)).abs() < 1e-6,
         "{floor_jtd}"

@@ -138,8 +138,8 @@ pub fn dejump_implied_vol(
     Ok(0.5 * (lo + hi))
 }
 
-/// `surface` de-jumped for a hazard, sampled on an absolute strike x
-/// expiry grid (expiries as year fractions on the surface's axis; the
+/// `surface` de-jumped for a flat hazard, sampled on an absolute strike
+/// x expiry grid (expiries as year fractions on the surface's axis; the
 /// curve is read at the same times, so it should share the surface's
 /// reference date). Every point must de-jump; a point where the jump
 /// exceeds the option value fails the whole surface, naming it.
@@ -154,10 +154,37 @@ pub fn dejump_surface(
     strikes: &[f64],
     expiries: &[f64],
 ) -> Result<VolSurface, RustyQLibError> {
+    dejump_surface_with(
+        surface,
+        curve,
+        spot,
+        dividend_yield,
+        borrow_cost,
+        |_| hazard,
+        strikes,
+        expiries,
+    )
+}
+
+/// [`dejump_surface`] with the hazard given per expiry: for a term
+/// structure, the average hazard to each expiry, which has the same
+/// survival as the flat rate the call formula assumes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dejump_surface_with(
+    surface: &VolSurface,
+    curve: &YieldCurve,
+    spot: f64,
+    dividend_yield: f64,
+    borrow_cost: f64,
+    hazard_to: impl Fn(f64) -> f64,
+    strikes: &[f64],
+    expiries: &[f64],
+) -> Result<VolSurface, RustyQLibError> {
     let mut rows = Vec::with_capacity(expiries.len());
     for &t in expiries {
         let rate = curve.zero_rate_with(t, Compounding::Continuous);
         let forward = spot * ((rate - dividend_yield - borrow_cost) * t).exp();
+        let hazard = hazard_to(t);
         let row = strikes
             .iter()
             .map(|&strike| {

@@ -13,8 +13,8 @@
 
 use chrono::NaiveDate;
 
-use super::models::CreditModel;
 use super::events::EventGrid;
+use super::models::CreditModel;
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 

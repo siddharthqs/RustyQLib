@@ -32,6 +32,10 @@ and everything bootstraps into the library-wide `YieldCurve`.
   and bond-equivalent yield conventions.
 - **`FloatingRateNote`** (`frn.rs`) — projected off the curve, with discount
   margins.
+- **`RepoCurve`** (`repo_curve.rs`) — the term repo curve bootstrapped from
+  overnight and term GC quotes (or a SOFR curve), with a per-issue
+  specialness spread; feeds the bond's repo forward and carry, the futures
+  net basis and the term-repo mark-to-market.
 - **`RepurchaseAgreement`** (`repo.rs`) — term and open repos on bond
   collateral: purchase and repurchase prices, haircut, coupon pass-through,
   exposure and margin calls, mark-to-market against the market rate; plus

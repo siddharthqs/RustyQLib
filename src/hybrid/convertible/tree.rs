@@ -6,9 +6,9 @@
 
 use chrono::NaiveDate;
 
-use super::models::{CreditModel, NodeValue};
 use super::events::apply_cash_dividend;
 use super::instrument::ConvertibleInstrument;
+use super::models::{CreditModel, NodeValue};
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 
@@ -43,13 +43,24 @@ pub(crate) fn tree_value<I: ConvertibleInstrument + ?Sized, M: CreditModel>(
     let down = 1.0 / up;
     // the log-price width of one node cell, for a smoothed soft trigger
     let cell_width = 2.0 * up.ln();
-    let credit_df = (-market.credit_rate() * dt).exp();
-    let drift = (market.survival_drift() * dt).exp();
+    let state_dependent = market.is_state_dependent();
+    let t0 = grid.times[0];
 
-    // per-step risk-neutral probabilities from the curve's forwards
-    let probability = (0..steps)
-        .map(|i| crr_probability(drift / grid.riskfree_df[i], up, down, i))
-        .collect::<Result<Vec<f64>, _>>()?;
+    // per-step credit factors and risk-neutral probabilities from the
+    // curve's forwards, at the step's start (a term structure varies
+    // here; a state-dependent hazard is set node by node below)
+    let mut credit_df = Vec::with_capacity(steps);
+    let mut probability = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let t = grid.times[i] - t0;
+        credit_df.push((-market.credit_rate_at(equity.spot, t) * dt).exp());
+        let drift = (market.survival_drift_at(equity.spot, t) * dt).exp();
+        probability.push(if state_dependent {
+            f64::NAN
+        } else {
+            crr_probability(drift / grid.riskfree_df[i], up, down, i)?
+        });
+    }
 
     let spot_at =
         |step: usize, j: usize| equity.spot * up.powi(j as i32) * down.powi((step - j) as i32);
@@ -61,12 +72,41 @@ pub(crate) fn tree_value<I: ConvertibleInstrument + ?Sized, M: CreditModel>(
     // backward induction: expectation and discounting, the ex-dividend
     // jump, then the step's events
     for step in (0..steps).rev() {
-        let p = probability[step];
         let riskfree_df = grid.riskfree_df[step];
         let default_claim = grid.default_claim_at_step[step];
-        for j in 0..=step {
-            let expected = M::Node::blend(nodes[j], nodes[j + 1], p);
-            nodes[j] = market.discount_step(expected, riskfree_df, credit_df, default_claim);
+        if state_dependent {
+            // the lattice admits a survival drift of at most ln(u)/dt
+            // less the step's rate, where the up probability reaches
+            // one; hazard beyond that at deep out-of-the-money nodes is
+            // capped, and the same excess is taken out of the survival
+            // factor so the capped node is a consistent, milder hazard
+            let t = grid.times[step] - t0;
+            let max_drift = up.ln() / dt + riskfree_df.ln() / dt - 1e-9;
+            // the carry between the hazard and the survival drift, taken
+            // at the reference so the capped hazard is rebuilt without
+            // cancelling two huge numbers at the deepest nodes
+            let carry = market.credit_rate() - market.survival_drift();
+            for j in 0..=step {
+                let spot = spot_at(step, j);
+                let drift = market.survival_drift_at(spot, t).min(max_drift);
+                let growth = (drift * dt).exp() / riskfree_df;
+                let p = crr_probability(growth, up, down, step)?;
+                let hazard = drift + carry;
+                let expected = M::Node::blend(nodes[j], nodes[j + 1], p);
+                nodes[j] = market.discount_step(
+                    expected,
+                    riskfree_df,
+                    (-hazard * dt).exp(),
+                    default_claim,
+                );
+            }
+        } else {
+            let p = probability[step];
+            for j in 0..=step {
+                let expected = M::Node::blend(nodes[j], nodes[j + 1], p);
+                nodes[j] =
+                    market.discount_step(expected, riskfree_df, credit_df[step], default_claim);
+            }
         }
         nodes.truncate(step + 1);
         let dividend = grid.cash_dividend_at_step[step];

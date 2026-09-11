@@ -5,7 +5,8 @@
 //! preferred ([`ConvertiblePreferred`]) are the [`ConvertibleInstrument`]s
 //! priced through [`ConvertiblePricing`]: two credit models
 //! ([`ConvertibleMarket`] for Tsiveriotis-Fernandes, [`JumpToDefaultMarket`]
-//! for jump to default) on a CRR tree or a Crank-Nicolson grid, with
+//! for jump to default, [`EquityLinkedHazardMarket`] for a hazard that rises
+//! as the stock falls) on a CRR tree or a Crank-Nicolson grid, with
 //! pluggable volatility, the contractual extras (calls and puts,
 //! contingent conversion, make-wholes, mandatory conversion, cash
 //! dividends and their protection), greeks and implied solves. The
@@ -20,8 +21,9 @@ pub mod preferred;
 pub use convertible::{
     dejump_implied_vol, dejump_surface, CashDividend, ContingentConversion, ConvertibleBond,
     ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, ConvertibleInstrument,
-    ConvertibleMarket, ConvertiblePricing, CouponMakeWhole, CreditModel, DividendProtection,
-    EquityInputs, EventGrid, FdVolModel, FundamentalChangeMakeWhole, JumpToDefaultMarket,
-    MandatoryConversion, NodeValue, Split, DEFAULT_TREE_STEPS,
+    ConvertibleMarket, ConvertiblePricing, CouponMakeWhole, CreditModel, Diffusion,
+    DividendProtection, EquityInputs, EquityLinkedHazardMarket, EventGrid, FdVolModel,
+    FundamentalChangeMakeWhole, HazardLevel, JumpToDefaultMarket, MandatoryConversion, NodeValue,
+    Split, StepContext, DEFAULT_TREE_STEPS,
 };
 pub use preferred::{ConvertiblePreferred, PERPETUAL_HORIZON_YEARS};

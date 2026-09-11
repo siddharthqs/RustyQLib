@@ -61,7 +61,7 @@ fn jtd_market(spot: f64) -> JumpToDefaultMarket {
         volatility: 0.30,
         dividend_yield: 0.01,
         borrow_cost: 0.005,
-        hazard_rate: 0.03,
+        hazard: HazardLevel::Flat(0.03),
         recovery_rate: 0.40,
     }
 }
@@ -152,7 +152,10 @@ fn grid_delta_matches_a_bumped_solve() {
         let bump = 0.01 * spot;
         let price = |s: f64| {
             cv.fd_valuation(
-                &JumpToDefaultMarket { spot: s, ..m },
+                &JumpToDefaultMarket {
+                    spot: s,
+                    ..m.clone()
+                },
                 &curve,
                 settlement,
                 GRID,
@@ -335,7 +338,7 @@ fn greeks_read_off_the_grid_are_consistent() {
         .fd_valuation(
             &JumpToDefaultMarket {
                 spot: 48.0 + bump,
-                ..m
+                ..m.clone()
             },
             &curve,
             settlement,
@@ -346,7 +349,7 @@ fn greeks_read_off_the_grid_are_consistent() {
         .fd_valuation(
             &JumpToDefaultMarket {
                 spot: 48.0 - bump,
-                ..m
+                ..m.clone()
             },
             &curve,
             settlement,
@@ -387,14 +390,14 @@ fn maturity_only_conversion_matches_the_closed_form() {
     let t = dc.year_fraction(settlement, last.payment_date);
     let strike = last.amount / cv.conversion_ratio;
     let df = curve.df_date(last.payment_date) / curve.df_date(settlement);
-    let survival = (-m.hazard_rate * t).exp();
+    let survival = (-m.hazard.at(0.0) * t).exp();
     let forward = m.spot * (-(m.dividend_yield + m.borrow_cost) * t).exp() / (df * survival);
     let sd = m.volatility * t.sqrt();
     let d1 = ((forward / strike).ln() + 0.5 * sd * sd) / sd;
     let call = df * survival * (forward * norm_cdf(d1) - strike * norm_cdf(d1 - sd));
     let straight = cv
         .bond
-        .risky_dirty_price(&curve, m.hazard_rate, m.recovery_rate, settlement)
+        .risky_dirty_price(&curve, m.hazard.at(0.0), m.recovery_rate, settlement)
         .unwrap();
     let expected = straight + cv.conversion_ratio * call * 100.0 / cv.bond.face_value;
     assert!(
@@ -671,8 +674,8 @@ fn dejumped_surface_feeds_a_consistent_local_vol() {
     // a hazard the quotes cannot carry fails, naming the point; so does
     // a strike whose flat-vol put is worth less than the default leg
     let hot = JumpToDefaultMarket {
-        hazard_rate: 0.10,
-        ..m
+        hazard: HazardLevel::Flat(0.10),
+        ..m.clone()
     };
     assert!(hot
         .dejump_surface(&listed, &curve, &strikes, &expiries)
@@ -680,6 +683,68 @@ fn dejumped_surface_feeds_a_consistent_local_vol() {
     assert!(m
         .dejump_surface(&listed, &curve, &[20.0, 48.0], &[0.5])
         .is_err());
+}
+
+fn linked_market(spot: f64, elasticity: f64) -> EquityLinkedHazardMarket {
+    EquityLinkedHazardMarket {
+        reference_spot: 48.0,
+        ..EquityLinkedHazardMarket::new(jtd_market(spot), elasticity).unwrap()
+    }
+}
+
+#[test]
+fn equity_linked_hazard_agrees_between_the_engines() {
+    let cv = convertible();
+    let curve = flat(0.04);
+    let settlement = d(2026, 8, 14);
+    // no elasticity: the grid is jump to default to the bit
+    for spot in [30.0, 48.0, 70.0] {
+        let jtd = cv
+            .fd_valuation(&jtd_market(spot), &curve, settlement, GRID)
+            .unwrap();
+        let linked = cv
+            .fd_valuation(&linked_market(spot, 0.0), &curve, settlement, GRID)
+            .unwrap();
+        assert_eq!(jtd.dirty_price, linked.dirty_price);
+    }
+    // with elasticity the grid and the tree agree, and the busted delta
+    // carries the credit component
+    for spot in [30.0, 48.0, 70.0] {
+        let m = linked_market(spot, 1.0);
+        let fd = cv.fd_valuation(&m, &curve, settlement, FINE).unwrap();
+        let tree = cv
+            .dirty_price_with_steps(&m, &curve, settlement, 1600)
+            .unwrap();
+        assert!(
+            (fd.dirty_price - tree).abs() < 0.2,
+            "spot {spot}: fd {} vs tree {tree}",
+            fd.dirty_price
+        );
+    }
+    let busted_flat = cv
+        .fd_valuation(&jtd_market(30.0), &curve, settlement, GRID)
+        .unwrap();
+    let busted_linked = cv
+        .fd_valuation(&linked_market(30.0, 2.0), &curve, settlement, GRID)
+        .unwrap();
+    assert!(
+        busted_linked.delta > busted_flat.delta + 0.1,
+        "credit delta: {} vs {}",
+        busted_linked.delta,
+        busted_flat.delta
+    );
+    // a steep hazard deep out of the money stays finite and ordered on
+    // the grid (the drift is upwinded there)
+    let steep = cv
+        .fd_valuation(&linked_market(15.0, 2.0), &curve, settlement, GRID)
+        .unwrap();
+    assert!(steep.dirty_price.is_finite() && steep.dirty_price > 0.0);
+    assert!(steep.dirty_price < busted_linked.dirty_price);
+    // and the bump greeks run, with the hazard DV01 on the level
+    let greeks = cv
+        .fd_greeks(&linked_market(48.0, 1.0), &curve, settlement, GRID, &[])
+        .unwrap();
+    assert!(greeks.credit_dv01 > 0.0 && greeks.vega > 0.0, "{greeks:?}");
 }
 
 #[test]
@@ -690,36 +755,36 @@ fn grid_validation() {
     let m = tf_market(48.0);
     let coarse_time = ConvertibleFdGrid {
         time_steps: 5,
-        ..GRID
+        ..GRID.clone()
     };
     assert!(cv
         .fd_valuation(&m, &curve, settlement, coarse_time)
         .is_err());
     let coarse_space = ConvertibleFdGrid {
         space_steps: 10,
-        ..GRID
+        ..GRID.clone()
     };
     assert!(cv
         .fd_valuation(&m, &curve, settlement, coarse_space)
         .is_err());
     let narrow = ConvertibleFdGrid {
         grid_stdevs: 0.0,
-        ..GRID
+        ..GRID.clone()
     };
     assert!(cv.fd_valuation(&m, &curve, settlement, narrow).is_err());
     // an odd space count is rounded up, not rejected
     let odd = ConvertibleFdGrid {
         space_steps: 201,
-        ..GRID
+        ..GRID.clone()
     };
     assert!(cv.fd_valuation(&m, &curve, settlement, odd).is_ok());
     let bad = ConvertibleMarket {
         volatility: -0.1,
-        ..m
+        ..m.clone()
     };
     assert!(cv.fd_valuation(&bad, &curve, settlement, GRID).is_err());
     let bad = JumpToDefaultMarket {
-        hazard_rate: -0.1,
+        hazard: HazardLevel::Flat(-0.1),
         ..jtd_market(48.0)
     };
     assert!(cv.fd_valuation(&bad, &curve, settlement, GRID).is_err());

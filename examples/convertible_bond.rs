@@ -11,8 +11,8 @@ use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::{
     dejump_implied_vol, CallOption, CashDividend, ContingentConversion, ConvertibleBond,
     ConvertibleFdGrid, ConvertibleMarket, ConvertiblePreferred, ConvertiblePricing,
-    CouponMakeWhole, DividendProtection, FdVolModel, FixedRateBond, FundamentalChangeMakeWhole,
-    JumpToDefaultMarket, MandatoryConversion, PutOption,
+    CouponMakeWhole, DividendProtection, EquityLinkedHazardMarket, FdVolModel, FixedRateBond,
+    FundamentalChangeMakeWhole, HazardLevel, JumpToDefaultMarket, MandatoryConversion, PutOption,
 };
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -107,7 +107,7 @@ jump to default, hazard 300bp, recovery 40%, borrow 50bp:"
             volatility: 0.30,
             dividend_yield: 0.01,
             borrow_cost: 0.005,
-            hazard_rate: 0.03,
+            hazard: HazardLevel::Flat(0.03),
             recovery_rate: 0.40,
         };
         let clean = convertible.clean_price(&market, &curve, settlement)?;
@@ -125,7 +125,7 @@ jump to default, hazard 300bp, recovery 40%, borrow 50bp:"
         volatility: 0.30,
         dividend_yield: 0.01,
         borrow_cost: 0.005,
-        hazard_rate: 0.03,
+        hazard: HazardLevel::Flat(0.03),
         recovery_rate: 0.40,
     };
     // the put floors the cash leg, so the price is shallow in the hazard:
@@ -168,7 +168,7 @@ finite differences (400 x 400 grid) against the 800-step trees:"
             volatility: 0.30,
             dividend_yield: 0.01,
             borrow_cost: 0.005,
-            hazard_rate: 0.03,
+            hazard: HazardLevel::Flat(0.03),
             recovery_rate: 0.40,
         };
         let grid = ConvertibleFdGrid::default();
@@ -179,6 +179,40 @@ finite differences (400 x 400 grid) against the 800-step trees:"
         println!(
             "{spot:>8.2} {tf_tree:>10.4} {:>10.4} {:>9.4} {:>9.5} {jtd_tree:>10.4} {:>10.4} {:>9.4} {:>9.5}",
             tf_fd.clean_price, tf_fd.delta, tf_fd.gamma, jtd_fd.clean_price, jtd_fd.delta, jtd_fd.gamma
+        );
+    }
+
+    // --- equity-linked hazard ----------------------------------------
+    // the same 300bp at the reference price 48, with the hazard rising
+    // as the stock falls: lambda = a (48 / S)^p; p = 0 is jump to default
+    println!(
+        "\
+equity-linked hazard, 300bp at 48, 40% recovery (grid):"
+    );
+    println!(
+        "{:>8} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+        "spot", "p = 0", "p = 1", "p = 2", "delta 0", "delta 1", "delta 2"
+    );
+    for spot in [30.0, 40.0, 48.0, 65.0] {
+        let base = JumpToDefaultMarket {
+            spot,
+            volatility: 0.30,
+            dividend_yield: 0.01,
+            borrow_cost: 0.005,
+            hazard: HazardLevel::Flat(0.03),
+            recovery_rate: 0.40,
+        };
+        let at = |p: f64| {
+            let market = EquityLinkedHazardMarket {
+                reference_spot: 48.0,
+                ..EquityLinkedHazardMarket::new(base.clone(), p).unwrap()
+            };
+            convertible.fd_valuation(&market, &curve, settlement, ConvertibleFdGrid::default())
+        };
+        let (v0, v1, v2) = (at(0.0)?, at(1.0)?, at(2.0)?);
+        println!(
+            "{spot:>8.2} {:>10.4} {:>10.4} {:>10.4} {:>9.4} {:>9.4} {:>9.4}",
+            v0.clean_price, v1.clean_price, v2.clean_price, v0.delta, v1.delta, v2.delta
         );
     }
 
