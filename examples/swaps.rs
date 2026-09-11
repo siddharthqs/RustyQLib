@@ -82,14 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0.0,
         effective,
         date(2029, 8, 6),
-        BasisSwapLeg {
-            frequency: Frequency::Quarterly,
-            day_count: DayCountConvention::Act360,
-        },
-        BasisSwapLeg {
-            frequency: Frequency::Semiannual,
-            day_count: DayCountConvention::Act360,
-        },
+        BasisSwapLeg::new(Frequency::Quarterly, DayCountConvention::Act360),
+        BasisSwapLeg::new(Frequency::Semiannual, DayCountConvention::Act360),
         Calendar::UsGovernmentBond,
         BusinessDayConvention::ModifiedFollowing,
     )?;

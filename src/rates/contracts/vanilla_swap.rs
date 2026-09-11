@@ -7,14 +7,25 @@ use crate::core::curves::YieldCurve;
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
 use crate::rates::leg::{
-    accrual_periods, annuity, fixed_leg_pv, float_leg_pv, float_leg_pv_with_fixing, AccrualPeriod,
+    annuity, fixed_leg_pv, float_leg_pv_compounded, float_leg_pv_with_fixing, float_periods,
+    AccrualPeriod, CompoundingMethod, FloatPeriod,
 };
+use crate::rates::overnight::RateFixings;
+use crate::rates::schedule::{LegSchedule, RollConvention, StubConvention};
 use crate::rates::{validate_swap_terms, PayerReceiver};
 
 /// A vanilla interest rate swap: a periodic fixed leg against a
 /// periodic floating leg, both from `effective_date` to
 /// `maturity_date`. PV is quoted from the position's point of view
 /// (`Payer` pays fixed).
+///
+/// The constructors give the market defaults — short front stub, the
+/// maturity's roll day, one reset per floating payment; [`with_stub`],
+/// [`with_roll`] and [`with_float_reset`] change them.
+///
+/// [`with_stub`]: Self::with_stub
+/// [`with_roll`]: Self::with_roll
+/// [`with_float_reset`]: Self::with_float_reset
 #[derive(Debug, Clone)]
 pub struct VanillaSwap {
     pub notional: f64,
@@ -28,6 +39,15 @@ pub struct VanillaSwap {
     pub float_day_count: DayCountConvention,
     pub calendar: Calendar,
     pub convention: BusinessDayConvention,
+    /// Stub placement, shared by both legs.
+    pub stub: StubConvention,
+    /// Anchor-day roll, shared by both legs.
+    pub roll: RollConvention,
+    /// The floating index's reset frequency when it resets more often
+    /// than the leg pays (`None`: one reset per payment).
+    pub float_reset: Option<Frequency>,
+    /// How reset sub-periods compound into a payment.
+    pub float_compounding: CompoundingMethod,
 }
 
 impl VanillaSwap {
@@ -65,7 +85,64 @@ impl VanillaSwap {
             float_day_count,
             calendar,
             convention,
+            stub: StubConvention::default(),
+            roll: RollConvention::default(),
+            float_reset: None,
+            float_compounding: CompoundingMethod::default(),
         })
+    }
+
+    /// Place the stub (both legs).
+    pub fn with_stub(mut self, stub: StubConvention) -> Self {
+        self.stub = stub;
+        self
+    }
+
+    /// Pin the anchor day (both legs).
+    pub fn with_roll(mut self, roll: RollConvention) -> Self {
+        self.roll = roll;
+        self
+    }
+
+    /// Reset the floating index every `reset` inside each payment
+    /// period, compounding the sub-periods by `compounding` — a 1M
+    /// index on a quarterly leg, say. The reset frequency must divide
+    /// the floating payment frequency.
+    pub fn with_float_reset(mut self, reset: Frequency, compounding: CompoundingMethod) -> Self {
+        self.float_reset = Some(reset);
+        self.float_compounding = compounding;
+        self
+    }
+
+    /// The fixed leg's schedule terms.
+    pub fn fixed_schedule(&self) -> LegSchedule {
+        LegSchedule::new(
+            self.effective_date,
+            self.maturity_date,
+            self.fixed_frequency,
+            self.calendar.clone(),
+            self.convention,
+        )
+        .with_stub(self.stub)
+        .with_roll(self.roll)
+    }
+
+    /// The floating leg's payment schedule terms.
+    pub fn float_schedule(&self) -> LegSchedule {
+        LegSchedule::new(
+            self.effective_date,
+            self.maturity_date,
+            self.float_frequency,
+            self.calendar.clone(),
+            self.convention,
+        )
+        .with_stub(self.stub)
+        .with_roll(self.roll)
+    }
+
+    /// The floating leg's payment periods with their reset sub-periods.
+    pub fn float_reset_periods(&self) -> Result<Vec<FloatPeriod>, RustyQLibError> {
+        float_periods(&self.float_schedule(), self.float_reset)
     }
 
     /// A USD-style swap: semiannual 30/360 fixed versus quarterly
@@ -95,26 +172,27 @@ impl VanillaSwap {
 
     /// The fixed leg's accrual periods.
     pub fn fixed_periods(&self) -> Result<Vec<AccrualPeriod>, RustyQLibError> {
-        accrual_periods(
-            self.effective_date,
-            self.maturity_date,
-            self.fixed_frequency,
-            &self.calendar,
-            self.convention,
-            0,
-        )
+        self.fixed_schedule().accrual_periods()
     }
 
-    /// The floating leg's accrual periods.
+    /// The floating leg's payment periods.
     pub fn float_periods(&self) -> Result<Vec<AccrualPeriod>, RustyQLibError> {
-        accrual_periods(
-            self.effective_date,
-            self.maturity_date,
-            self.float_frequency,
-            &self.calendar,
-            self.convention,
-            0,
-        )
+        self.float_schedule().accrual_periods()
+    }
+
+    /// The single-rate fixing path applies only to a leg that resets
+    /// once per payment; a compounding leg takes a fixing history.
+    fn require_single_reset(&self, method: &str) -> Result<(), RustyQLibError> {
+        if self.float_reset.is_some() {
+            return Err(RustyQLibError::invalid_input(
+                "swap",
+                format!(
+                    "{method} takes one realized rate per period; a leg with sub-period \
+                     resets needs pv_with_fixings and a fixing history"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// PV of the fixed leg (positive, before the payer/receiver sign).
@@ -136,12 +214,14 @@ impl VanillaSwap {
         forecast: &YieldCurve,
     ) -> Result<f64, RustyQLibError> {
         Ok(self.notional
-            * float_leg_pv(
-                &self.float_periods()?,
+            * float_leg_pv_compounded(
+                &self.float_reset_periods()?,
                 0.0,
                 self.float_day_count,
+                self.float_compounding,
                 discount,
                 forecast,
+                None,
             )?)
     }
 
@@ -155,6 +235,7 @@ impl VanillaSwap {
         forecast: &YieldCurve,
         realized_rate: f64,
     ) -> Result<f64, RustyQLibError> {
+        self.require_single_reset("float_leg_pv_with_fixing")?;
         Ok(self.notional
             * float_leg_pv_with_fixing(
                 &self.float_periods()?,
@@ -185,8 +266,44 @@ impl VanillaSwap {
         forecast: &YieldCurve,
         realized_rate: f64,
     ) -> Result<f64, RustyQLibError> {
+        self.require_single_reset("pv_with_fixing")?;
         Ok(self.payer_receiver.sign()
             * (self.float_leg_pv_with_fixing(discount, forecast, realized_rate)?
+                - self.fixed_leg_pv(discount)?))
+    }
+
+    /// PV of the floating leg for a seasoned swap with a fixing
+    /// history: every reset that started before the forecast curve's
+    /// reference date takes its published rate from `fixings`, keyed by
+    /// the reset's accrual start. Works for single- and multi-reset legs.
+    pub fn float_leg_pv_with_fixings(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        fixings: &RateFixings,
+    ) -> Result<f64, RustyQLibError> {
+        Ok(self.notional
+            * float_leg_pv_compounded(
+                &self.float_reset_periods()?,
+                0.0,
+                self.float_day_count,
+                self.float_compounding,
+                discount,
+                forecast,
+                Some(fixings),
+            )?)
+    }
+
+    /// [`pv_with`](Self::pv_with) for a seasoned swap with a fixing
+    /// history (see [`float_leg_pv_with_fixings`](Self::float_leg_pv_with_fixings)).
+    pub fn pv_with_fixings(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        fixings: &RateFixings,
+    ) -> Result<f64, RustyQLibError> {
+        Ok(self.payer_receiver.sign()
+            * (self.float_leg_pv_with_fixings(discount, forecast, fixings)?
                 - self.fixed_leg_pv(discount)?))
     }
 
@@ -207,13 +324,7 @@ impl VanillaSwap {
                 "non-positive fixed-leg annuity {annuity}"
             )));
         }
-        let float_pv = float_leg_pv(
-            &self.float_periods()?,
-            0.0,
-            self.float_day_count,
-            discount,
-            forecast,
-        )?;
+        let float_pv = self.float_leg_pv(discount, forecast)? / self.notional;
         Ok(float_pv / annuity)
     }
 
@@ -247,6 +358,130 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn conventions_change_the_schedule_and_compounding_the_leg() {
+        let reference = d(2026, 8, 6);
+        let curve = flat(0.045, reference);
+        // 14 months: a stub somewhere
+        let base = VanillaSwap::usd_standard(
+            1_000_000.0,
+            0.045,
+            PayerReceiver::Payer,
+            d(2026, 8, 20),
+            d(2027, 10, 20),
+        )
+        .unwrap();
+        let short_front = base.fixed_periods().unwrap();
+        let long_front = base
+            .clone()
+            .with_stub(StubConvention::LongFront)
+            .fixed_periods()
+            .unwrap();
+        let short_back = base
+            .clone()
+            .with_stub(StubConvention::ShortBack)
+            .fixed_periods()
+            .unwrap();
+        assert_eq!(short_front.len(), 3);
+        assert_eq!(long_front.len(), 2);
+        assert_eq!(short_back.len(), 3);
+        assert_eq!(short_front[0].end, d(2026, 10, 20));
+        assert_eq!(short_back[0].end, d(2027, 2, 22)); // Feb 20 2027 is a Saturday
+                                                       // IMM roll on an IMM-dated swap
+        let imm = VanillaSwap::usd_standard(
+            1_000_000.0,
+            0.045,
+            PayerReceiver::Payer,
+            d(2026, 9, 16),
+            d(2027, 9, 15),
+        )
+        .unwrap()
+        .with_roll(RollConvention::Imm);
+        let periods = imm.float_periods().unwrap();
+        assert_eq!(periods[0].end, d(2026, 12, 16));
+        assert_eq!(periods[1].end, d(2027, 3, 17));
+        // monthly resets, straight compounding, zero spread: same value
+        // as the plain quarterly leg (the df ratios telescope)
+        let plain = base.float_leg_pv(&curve, &curve).unwrap();
+        let compounded = base
+            .clone()
+            .with_float_reset(Frequency::Monthly, CompoundingMethod::Straight)
+            .float_leg_pv(&curve, &curve)
+            .unwrap();
+        assert!((plain - compounded).abs() < 1e-6, "{plain} vs {compounded}");
+        // no compounding on monthly resets undervalues it by the lost
+        // intra-quarter compounding, well under a percent of the leg
+        let simple = base
+            .clone()
+            .with_float_reset(Frequency::Monthly, CompoundingMethod::None)
+            .float_leg_pv(&curve, &curve)
+            .unwrap();
+        assert!(
+            simple < plain && plain - simple < 1e-2 * plain,
+            "{simple} vs {plain}"
+        );
+        // the par rate follows the leg it prices
+        let par = base
+            .clone()
+            .with_float_reset(Frequency::Monthly, CompoundingMethod::None)
+            .par_rate(&curve, &curve)
+            .unwrap();
+        assert!(par < base.par_rate(&curve, &curve).unwrap());
+        // the single-rate fixing path refuses a compounding leg
+        assert!(base
+            .clone()
+            .with_float_reset(Frequency::Monthly, CompoundingMethod::Straight)
+            .pv_with_fixing(&curve, &curve, 0.04)
+            .is_err());
+    }
+
+    #[test]
+    fn seasoned_swap_prices_off_its_fixing_history() {
+        // a 2y quarterly swap valued five weeks in: the first quarter has
+        // fixed; with a fixing equal to the curve forward the history
+        // path matches the single-rate path
+        let effective = d(2026, 8, 6);
+        let valuation = d(2026, 9, 10);
+        let curve = flat(0.045, valuation);
+        let swap = VanillaSwap::new(
+            1_000_000.0,
+            0.045,
+            PayerReceiver::Payer,
+            effective,
+            d(2028, 8, 6),
+            Frequency::Quarterly,
+            DayCountConvention::Act360,
+            Frequency::Quarterly,
+            DayCountConvention::Act360,
+            Calendar::WeekendsOnly,
+            BusinessDayConvention::Unadjusted,
+        )
+        .unwrap();
+        assert!(swap
+            .pv_with_fixings(&curve, &curve, &RateFixings::new())
+            .is_err());
+        let mut fixings = RateFixings::new();
+        fixings.insert(effective, 0.05);
+        let history = swap.pv_with_fixings(&curve, &curve, &fixings).unwrap();
+        let single = swap.pv_with_fixing(&curve, &curve, 0.05).unwrap();
+        // the two seasoned conventions differ in how the fixed rate
+        // carries to the period end: an IBOR fixing applies for the
+        // whole period, while the single-rate path grows the realized
+        // stub at the curve from the valuation date on
+        let p = swap.float_periods().unwrap()[0];
+        let dc = DayCountConvention::Act360;
+        let ibor = 0.05 * dc.year_fraction(p.start, p.end);
+        let stub = (1.0 + 0.05 * dc.year_fraction(p.start, valuation)) / curve.df_date(p.end) - 1.0;
+        let expected_gap = 1_000_000.0 * (ibor - stub) * curve.df_date(p.payment);
+        assert!(
+            (history - single - expected_gap).abs() < 1e-6,
+            "{history} vs {single}: gap {expected_gap}"
+        );
+        // a higher fixing is worth more to the payer (receives floating)
+        fixings.insert(effective, 0.06);
+        assert!(swap.pv_with_fixings(&curve, &curve, &fixings).unwrap() > history);
     }
 
     fn flat(rate: f64, reference: NaiveDate) -> YieldCurve {

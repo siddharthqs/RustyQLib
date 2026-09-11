@@ -60,6 +60,7 @@ Each has its own guide:
 |---|---|
 | **[`src/equity`](src/equity/README.md)** | Equity derivatives — 10 pricing engines, 20+ payoffs, and the volatility model zoo (local vol, Heston, Bates, SABR, SLV, rough Bergomi, SVI/SSVI/eSSVI) |
 | **[`src/bonds`](src/bonds/README.md)** | Fixed income — Treasury and corporate bonds, bills, FRNs, futures basis, convertibles, credit, and curve bootstrapping |
+| **[`src/rates`](src/rates/README.md)** | Interest rates — swaps, OIS, basis swaps, fed funds and SOFR futures with full leg conventions; multi-curve calibration with market-quote PV01; swaptions and caps/floors under Vasicek / Hull-White with normal and Black vols |
 | **[`src/cmdty`](src/cmdty/README.md)** | Commodities — swaps, APOs, spread options, swaptions; Bachelier and shifted-lognormal models for underlyings that print negative |
 | **[`src/validation`](src/validation/README.md)** | Model validation — runtime checks that measure model quality on *today's* data, reported in z-scores |
 
@@ -85,7 +86,7 @@ feeds).
   implied vol, day counts, and holiday calendars with business-day conventions
   and schedule generation.
 - **Free market data** — US Treasury par yields, NY Fed SOFR/EFFR, the DTCC
-  GCF Repo Index, and Cboe delayed option chains.
+  GCF Repo Index, DTCC public CDS prints, and Cboe delayed option chains.
 
 ## Feature flags
 
@@ -111,6 +112,7 @@ cat contracts.json | rustyqlib price -i - | jq '.[].output.pv'
 rustyqlib fetch ust -o ust.json                       # Treasury par yields
 rustyqlib fetch sofr                                  # NY Fed reference rates
 rustyqlib fetch gcf --date 2026-08-05                 # DTCC GCF Repo Index
+rustyqlib fetch cds --symbol CDX.NA.IG                # DTCC public CDS prints
 rustyqlib fetch chain --symbol AAPL --normalize       # Cboe option chain
 
 # chain -> implied vol surface -> Dupire local vol (documents + 3D plots)

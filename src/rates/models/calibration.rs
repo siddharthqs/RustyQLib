@@ -15,15 +15,18 @@
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;
 use crate::core::optimization::{minimize, Method, OptimConfig, Problem};
-use crate::rates::models::pricers::european_swaption;
+use crate::rates::engines::jamshidian::european_swaption_settled;
 use crate::rates::models::HullWhite;
 use crate::rates::PayerReceiver;
 
 /// One European swaption quote, on unit notional.
 #[derive(Debug, Clone)]
 pub struct SwaptionQuote {
-    /// Option expiry (= swap start), in years from the curve anchor.
+    /// Option expiry, in years from the curve anchor.
     pub expiry: f64,
+    /// Start of the underlying swap: the expiry itself, or a settlement
+    /// lag after it.
+    pub swap_start: f64,
     /// Fixed leg `(payment_time, accrual)` pairs.
     pub fixed_leg: Vec<(f64, f64)>,
     /// Fixed rate of the underlying swap.
@@ -33,11 +36,11 @@ pub struct SwaptionQuote {
     pub payer_receiver: PayerReceiver,
 }
 
-/// The forward par rate of the swap underlying a quote — the natural
-/// ATM strike.
+/// The forward par rate of the swap starting at `swap_start` with this
+/// fixed leg — the natural ATM strike of a quote.
 pub fn atm_swap_rate(
     curve: &YieldCurve,
-    expiry: f64,
+    swap_start: f64,
     fixed_leg: &[(f64, f64)],
 ) -> Result<f64, RustyQLibError> {
     let last = fixed_leg.last().ok_or_else(|| {
@@ -52,7 +55,7 @@ pub fn atm_swap_rate(
             "non-positive annuity {annuity}"
         )));
     }
-    Ok((curve.df(expiry) - curve.df(last.0)) / annuity)
+    Ok((curve.df(swap_start) - curve.df(last.0)) / annuity)
 }
 
 /// The result of a calibration.
@@ -96,9 +99,10 @@ fn objective(curve: &YieldCurve, quotes: &[SwaptionQuote], a: f64, sigma: f64) -
     };
     let mut sum = 0.0;
     for quote in quotes {
-        let price = european_swaption(
+        let price = european_swaption_settled(
             &model,
             quote.expiry,
+            quote.swap_start,
             &quote.fixed_leg,
             quote.strike_rate,
             1.0,
@@ -202,6 +206,7 @@ mod tests {
     use super::*;
     use crate::core::curves::{Compounding, InterpolationMethod, Tenor};
     use crate::core::daycount::DayCountConvention;
+    use crate::rates::engines::jamshidian::european_swaption;
     use chrono::NaiveDate;
 
     fn market_curve() -> YieldCurve {
@@ -240,6 +245,7 @@ mod tests {
                         .unwrap();
                 SwaptionQuote {
                     expiry,
+                    swap_start: expiry,
                     fixed_leg,
                     strike_rate: strike,
                     market_price: price,
@@ -306,6 +312,7 @@ mod tests {
         assert!(calibrate_hull_white(&curve, &[], 0.05, 0.01).is_err());
         let bad = SwaptionQuote {
             expiry: 1.0,
+            swap_start: 1.0,
             fixed_leg: leg(1.0, 5),
             strike_rate: 0.04,
             market_price: -1.0,

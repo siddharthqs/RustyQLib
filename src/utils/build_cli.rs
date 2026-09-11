@@ -3,6 +3,7 @@ use crate::core::trade::PutOrCall;
 use crate::data::cboe;
 use crate::data::dtcc;
 use crate::data::nyfed;
+use crate::data::ppd;
 use crate::data::treasury;
 use crate::equity::blackscholes::implied_vol_from_price;
 use crate::risk::{delta_gamma_var, full_revaluation_var, stress_mtm, RiskConfig, StressConfig};
@@ -200,6 +201,10 @@ pub enum FetchSource {
     /// Listed option chain, 15-minute delayed (cdn.cboe.com); needs --symbol
     #[value(name = "chain")]
     Chain,
+    /// Credit derivative prints: index and single-name CDS from DTCC's public
+    /// price dissemination (pddata.dtcc.com); --symbol filters by index or name
+    #[value(name = "cds")]
+    Cds,
 }
 
 #[derive(Args)]
@@ -207,10 +212,12 @@ pub struct FetchArgs {
     /// Data source
     #[arg(value_enum)]
     pub source: FetchSource,
-    /// Curve date, YYYY-MM-DD (default: the latest published business day)
+    /// Date, YYYY-MM-DD (default: the latest published business day; for
+    /// `cds`, the report day)
     #[arg(long, value_name = "DATE")]
     pub date: Option<String>,
-    /// Underlying ticker for the `chain` source (e.g. AAPL, _SPX)
+    /// Underlying ticker for `chain` (e.g. AAPL, _SPX); for `cds`, an index,
+    /// entity name or reference-id filter (e.g. CDX.NA.IG)
     #[arg(long, value_name = "SYMBOL")]
     pub symbol: Option<String>,
     /// For `chain`: emit the normalized OptionChain document instead of
@@ -489,18 +496,15 @@ pub fn handle_fetch(args: &FetchArgs) -> Result<()> {
                 .with_context(|| format!("--date must be YYYY-MM-DD, got '{s}'"))
         })
         .transpose()?;
-    // --symbol and --normalize only mean anything for the chain source;
-    // silently ignoring them would hand back a document the user did not
-    // ask for (same contract as the chain source's own --date check)
-    if !matches!(args.source, FetchSource::Chain) {
-        for (flag, given) in [
-            ("--symbol", args.symbol.is_some()),
-            ("--normalize", args.normalize),
-        ] {
-            if given {
-                bail!("{flag} only applies to the chain source; omit it");
-            }
-        }
+    // --symbol and --normalize only mean anything for the sources that
+    // read them; silently ignoring them would hand back a document the
+    // user did not ask for (same contract as the chain source's own
+    // --date check)
+    if args.symbol.is_some() && !matches!(args.source, FetchSource::Chain | FetchSource::Cds) {
+        bail!("--symbol only applies to the chain and cds sources; omit it");
+    }
+    if args.normalize && !matches!(args.source, FetchSource::Chain) {
+        bail!("--normalize only applies to the chain source; omit it");
     }
     measure_time("fetch", || match args.source {
         FetchSource::UstParYields => fetch_ust_par_yields(args, date),
@@ -508,6 +512,7 @@ pub fn handle_fetch(args: &FetchArgs) -> Result<()> {
         FetchSource::Effr => fetch_nyfed_rate(args, date, nyfed::ReferenceRate::Effr),
         FetchSource::Gcf => fetch_gcf_repo_index(args, date),
         FetchSource::Chain => fetch_cboe_chain(args, date),
+        FetchSource::Cds => fetch_cds_prints(args, date),
     })
 }
 
@@ -667,6 +672,116 @@ fn fetch_gcf_repo_index(args: &FetchArgs, date: Option<NaiveDate>) -> Result<()>
         rate(row.mbs)
     );
     emit_document(args, dtcc::to_document(row), origin, "gcf_repo_index")
+}
+
+/// How many days back from the requested (or current) day `fetch cds`
+/// looks for a complete daily report: the current day's file appears
+/// only after the close, and weekends and holidays have none.
+const PPD_LOOKBACK_DAYS: u64 = 7;
+
+fn fetch_cds_prints(args: &FetchArgs, date: Option<NaiveDate>) -> Result<()> {
+    let (mut prints, report_date, origin) = match &args.from_file {
+        Some(path) => {
+            // a downloaded zip or the CSV inside it; the file name, when
+            // it is DTCC's, says which repository and day it is
+            let is_zip = path != "-"
+                && Path::new(path)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+            let text = if is_zip {
+                let bytes =
+                    std::fs::read(path).with_context(|| format!("failed to read {path}"))?;
+                ppd::unzip_csv(&bytes).with_context(|| format!("failed to open {path}"))?
+            } else {
+                read_input(path)?
+            };
+            let prints = ppd::parse_csv(&text, ppd::Jurisdiction::from_file_name(path))
+                .with_context(|| format!("failed to parse {}", input_label(path)))?;
+            let report_date = date
+                .or_else(|| ppd::date_from_file_name(path))
+                .or_else(|| {
+                    prints
+                        .iter()
+                        .filter_map(|p| p.event_timestamp.get(..10)?.parse::<NaiveDate>().ok())
+                        .max()
+                })
+                .context("cannot tell which day this report covers; pass --date")?;
+            (
+                prints,
+                report_date,
+                serde_json::json!({ "file": input_label(path) }),
+            )
+        }
+        None => {
+            let start = date.unwrap_or_else(|| Local::now().date_naive());
+            let mut candidate = start;
+            let (report_date, files) = loop {
+                let mut files = Vec::with_capacity(ppd::Jurisdiction::ALL.len());
+                let mut failure = None;
+                for jurisdiction in ppd::Jurisdiction::ALL {
+                    match ppd::fetch_cumulative(jurisdiction, candidate) {
+                        Ok(bytes) => files.push((jurisdiction, bytes)),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                match failure {
+                    None => break (candidate, files),
+                    Some(e) if date.is_some() => {
+                        return Err(e).with_context(|| {
+                            format!("no complete PPD CREDITS report for {candidate}")
+                        });
+                    }
+                    Some(e) if candidate <= start - chrono::Days::new(PPD_LOOKBACK_DAYS) => {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "no complete PPD CREDITS report in the {PPD_LOOKBACK_DAYS} days \
+                                 up to {start}"
+                            )
+                        });
+                    }
+                    Some(e) => {
+                        log::debug!("{candidate}: {e}; trying the day before");
+                        candidate = candidate - chrono::Days::new(1);
+                    }
+                }
+            };
+            let mut prints = Vec::new();
+            for (jurisdiction, bytes) in &files {
+                let text = ppd::unzip_csv(bytes).with_context(|| {
+                    format!("failed to open the {} report", jurisdiction.name())
+                })?;
+                prints.extend(ppd::parse_csv(&text, Some(*jurisdiction))?);
+            }
+            let urls: Vec<String> = files
+                .iter()
+                .map(|(j, _)| ppd::cumulative_url(*j, report_date))
+                .collect();
+            let origin = serde_json::json!({
+                "urls": urls,
+                "fetched_at": Local::now().to_rfc3339(),
+            });
+            (prints, report_date, origin)
+        }
+    };
+    if let Some(needle) = &args.symbol {
+        prints = ppd::filter_underlier(prints, needle);
+    }
+    log::info!(
+        "PPD credit prints for {report_date}: {} rows{}",
+        prints.len(),
+        args.symbol
+            .as_deref()
+            .map_or(String::new(), |s| format!(" matching {s}"))
+    );
+    emit_document(
+        args,
+        ppd::to_document(&prints, report_date, args.symbol.as_deref()),
+        origin,
+        "cds_prints",
+    )
 }
 
 /// Merge fetch provenance into the document's `metadata` block and write

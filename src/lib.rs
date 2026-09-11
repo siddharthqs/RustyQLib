@@ -25,7 +25,8 @@
 //!   passed through as published with provenance metadata: the US
 //!   Treasury daily par yield curve (with a bootstrap into a discount
 //!   curve), the NY Fed SOFR and EFFR reference rates, the DTCC GCF Repo
-//!   Index (overnight Treasury and MBS GC repo), and Cboe delayed
+//!   Index (overnight Treasury and MBS GC repo), DTCC's public CDS
+//!   dissemination log (index and single-name prints), and Cboe delayed
 //!   listed option chains normalized into an
 //!   [`OptionChain`](equity::option_chain::OptionChain)
 //! - [`validation`] — runtime model-validation checks (martingale
@@ -55,11 +56,10 @@ pub mod utils;
 pub mod validation;
 
 pub use crate::bonds::{
-    bootstrap_credit_curve, bootstrap_curve, conversion_factor, g_spread, BillQuote, BondFuture, BondOptionality, BondQuote, CallOption, CurveInstrument, DeliverableBond, Deposit, FactorRounding, FixedRateBond, FloatingRateNote, Fra, Frequency, MakeWholeCall, PutOption, RepoCurve, RepoSide, RepurchaseAgreement, TermRepoQuote, TreasuryBill,
-};
-pub use crate::credit::{bootstrap_cds_curve, CdsQuote, CreditCurve, CreditDefaultSwap, ProtectionSide};
-pub use crate::hybrid::{
-    dejump_implied_vol, dejump_surface, CashDividend, ContingentConversion, ConvertibleBond, ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, ConvertibleInstrument, ConvertibleMarket, ConvertiblePreferred, ConvertiblePricing, CouponMakeWhole, CreditModel, DividendProtection, EquityLinkedHazardMarket, FdVolModel, FundamentalChangeMakeWhole, HazardLevel, JumpToDefaultMarket, MandatoryConversion,
+    bootstrap_credit_curve, bootstrap_curve, conversion_factor, g_spread, BillQuote, BondFuture,
+    BondOptionality, BondQuote, CallOption, CurveInstrument, DeliverableBond, Deposit,
+    FactorRounding, FixedRateBond, FloatingRateNote, Fra, Frequency, MakeWholeCall, PutOption,
+    RepoCurve, RepoSide, RepurchaseAgreement, TermRepoQuote, TreasuryBill,
 };
 pub use crate::cmdty::{
     AveragePriceOption, ClewlowStrickland, ClewlowStricklandFit, CommodityBasisSwap,
@@ -82,6 +82,9 @@ pub use crate::core::quotes::Quote;
 pub use crate::core::results::{Greeks, PricingResult};
 pub use crate::core::traits::Instrument;
 pub use crate::core::vols::{SmileCoordinate, VolInput, VolSurface, VolSurfaceDocument};
+pub use crate::credit::{
+    bootstrap_cds_curve, CdsQuote, CreditCurve, CreditDefaultSwap, ProtectionSide,
+};
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;
 pub use crate::equity::multi_asset::{
@@ -91,9 +94,18 @@ pub use crate::equity::option_chain::{
     implied_vol_surface_from_chain, FilterConfig, OptionChain, OptionQuote, SurfaceBuildReport,
 };
 pub use crate::equity::surface_repair::{repair_arbitrage, RepairReport};
+pub use crate::hybrid::{
+    dejump_implied_vol, dejump_surface, CashDividend, ContingentConversion, ConvertibleBond,
+    ConvertibleFdGreeks, ConvertibleFdGrid, ConvertibleFdValuation, ConvertibleInstrument,
+    ConvertibleMarket, ConvertiblePreferred, ConvertiblePricing, CouponMakeWhole, CreditModel,
+    DividendProtection, EquityLinkedHazardMarket, FdVolModel, FundamentalChangeMakeWhole,
+    HazardLevel, JumpToDefaultMarket, MandatoryConversion,
+};
 pub use crate::rates::{
-    BasisSwap, BasisSwapLeg, CoxIngersollRoss, FedFundsFuture, HullWhite, OneFactorAffine,
-    OvernightIndexSwap, PayerReceiver, RateFixings, ShortRateModel, SofrContract, SofrFuture,
-    VanillaSwap, Vasicek,
+    BasisSwap, BasisSwapLeg, CapFloor, CapOrFloor, CompoundingMethod, CoxIngersollRoss,
+    FedFundsFuture, HullWhite, LegSchedule, MultiCurve, MultiCurveBuilder, OneFactorAffine,
+    OvernightConvention, OvernightIndexSwap, PayerReceiver, QuoteSensitivity, RateFixings,
+    RateInstrument, RateVol, RollConvention, ShortRateModel, SofrContract, SofrFuture,
+    StubConvention, Swaption, VanillaSwap, Vasicek,
 };
 pub use crate::validation::martingale::{martingale_report, MartingaleConfig, MartingaleReport};

@@ -1,14 +1,22 @@
 //! Shared leg machinery for swaps: schedule construction and the fixed
 //! and floating leg present values.
+//!
+//! A floating leg may **reset more often than it pays** — a 1M index on
+//! a quarterly leg — in which case the sub-period accruals are combined
+//! by a [`CompoundingMethod`] (ISDA 2006 straight, flat and
+//! spread-exclusive compounding, or none). [`float_leg_pv_compounded`]
+//! prices such a leg from [`FloatPeriod`]s, taking past resets from a
+//! fixing history keyed by the reset period's accrual start.
 
 use chrono::NaiveDate;
 
-use crate::bonds::schedule::coupon_dates;
 use crate::core::calendar::{BusinessDayConvention, Calendar, Frequency};
 use crate::core::curves::YieldCurve;
 use crate::core::daycount::DayCountConvention;
 use crate::core::errors::RustyQLibError;
 use crate::rates::checked_df;
+use crate::rates::overnight::RateFixings;
+use crate::rates::schedule::LegSchedule;
 
 /// One swap accrual period. Unlike bonds, swap accrual runs between
 /// business-day **adjusted** dates; payment can lag the accrual end.
@@ -19,11 +27,13 @@ pub struct AccrualPeriod {
     pub payment: NaiveDate,
 }
 
-/// Build the accrual periods of one leg: unadjusted anchors rolled
-/// backward from `maturity` (stub at the front), each anchor adjusted on
+/// Build the accrual periods of one leg under the default conventions:
+/// unadjusted anchors rolled backward from `maturity` (short stub at
+/// the front, the maturity's day of month), each anchor adjusted on
 /// `calendar` under `convention`, payments lagged `payment_lag` business
 /// days after the accrual end. Anchors that collapse after adjustment
-/// are dropped.
+/// are dropped. For other stub and roll conventions build a
+/// [`LegSchedule`].
 pub fn accrual_periods(
     effective: NaiveDate,
     maturity: NaiveDate,
@@ -32,34 +42,174 @@ pub fn accrual_periods(
     convention: BusinessDayConvention,
     payment_lag: i64,
 ) -> Result<Vec<AccrualPeriod>, RustyQLibError> {
-    if payment_lag < 0 {
-        return Err(RustyQLibError::invalid_input(
-            "payment_lag",
-            format!("must be non-negative, got {payment_lag}"),
-        ));
-    }
-    let schedule = coupon_dates(effective, maturity, frequency.months(), false)?;
-    let mut periods = Vec::with_capacity(schedule.dates.len());
-    let mut start = calendar.adjust(effective, convention);
-    for &anchor in &schedule.dates {
-        let end = calendar.adjust(anchor, convention);
-        if end <= start {
-            continue; // anchors collapsed by adjustment
+    LegSchedule::new(effective, maturity, frequency, calendar.clone(), convention)
+        .with_payment_lag(payment_lag)
+        .accrual_periods()
+}
+
+/// How the accruals of a floating leg's reset sub-periods combine into
+/// one payment (ISDA 2006 Definitions). Irrelevant when the leg resets
+/// once per payment period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompoundingMethod {
+    /// No compounding: the sub-period accruals `(r_i + s) tau_i` are
+    /// summed.
+    #[default]
+    None,
+    /// Straight: each sub-period's amount accrues on the notional plus
+    /// every earlier amount, at rate plus spread —
+    /// `prod(1 + (r_i + s) tau_i) - 1`.
+    Straight,
+    /// Flat: the spread accrues on the notional only; earlier amounts
+    /// (spread included) compound at the rate alone —
+    /// `A_i = (r_i + s) tau_i + (sum_{j<i} A_j) r_i tau_i`.
+    Flat,
+    /// Spread exclusive: the rate compounds, the spread never does —
+    /// `prod(1 + r_i tau_i) - 1 + s sum tau_i`.
+    SpreadExclusive,
+}
+
+impl CompoundingMethod {
+    /// Combine `(rate, tau)` sub-period pairs and the spread into the
+    /// payment period's accrual on unit notional.
+    pub fn accrual(self, resets: &[(f64, f64)], spread: f64) -> f64 {
+        match self {
+            CompoundingMethod::None => resets.iter().map(|&(r, tau)| (r + spread) * tau).sum(),
+            CompoundingMethod::Straight => {
+                resets
+                    .iter()
+                    .fold(1.0, |acc, &(r, tau)| acc * (1.0 + (r + spread) * tau))
+                    - 1.0
+            }
+            CompoundingMethod::Flat => {
+                let mut accrued = 0.0;
+                for &(r, tau) in resets {
+                    accrued += (r + spread) * tau + accrued * r * tau;
+                }
+                accrued
+            }
+            CompoundingMethod::SpreadExclusive => {
+                let compounded = resets
+                    .iter()
+                    .fold(1.0, |acc, &(r, tau)| acc * (1.0 + r * tau))
+                    - 1.0;
+                compounded + spread * resets.iter().map(|&(_, tau)| tau).sum::<f64>()
+            }
         }
-        periods.push(AccrualPeriod {
-            start,
-            end,
-            payment: calendar.add_business_days(end, payment_lag),
-        });
-        start = end;
     }
-    if periods.is_empty() {
+}
+
+/// One payment period of a floating leg with its reset sub-periods
+/// (accrual start and end of each reset; a single reset spanning the
+/// period when the leg resets as often as it pays).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatPeriod {
+    pub period: AccrualPeriod,
+    pub resets: Vec<(NaiveDate, NaiveDate)>,
+}
+
+/// The floating periods of `schedule`, each split into resets every
+/// `reset` (`None`: one reset per payment period). The reset schedule
+/// shares the payment schedule's stub, roll and adjustment terms, so
+/// the two nest when the payment frequency is a multiple of the reset
+/// frequency; anything else is an error.
+pub fn float_periods(
+    schedule: &LegSchedule,
+    reset: Option<Frequency>,
+) -> Result<Vec<FloatPeriod>, RustyQLibError> {
+    let payments = schedule.accrual_periods()?;
+    let Some(reset) = reset else {
+        return Ok(payments
+            .into_iter()
+            .map(|p| FloatPeriod {
+                resets: vec![(p.start, p.end)],
+                period: p,
+            })
+            .collect());
+    };
+    if reset.months() > schedule.frequency.months()
+        || !schedule.frequency.months().is_multiple_of(reset.months())
+    {
         return Err(RustyQLibError::invalid_input(
-            "swap schedule",
-            format!("no accrual periods between {effective} and {maturity}"),
+            "float leg",
+            format!(
+                "reset frequency {reset:?} must divide the payment frequency {:?}",
+                schedule.frequency
+            ),
         ));
     }
-    Ok(periods)
+    let fine = schedule.at_frequency(reset).accrual_periods()?;
+    let mut out = Vec::with_capacity(payments.len());
+    for p in payments {
+        let resets: Vec<(NaiveDate, NaiveDate)> = fine
+            .iter()
+            .filter(|f| f.start >= p.start && f.end <= p.end)
+            .map(|f| (f.start, f.end))
+            .collect();
+        let covers = resets.first().map(|r| r.0) == Some(p.start)
+            && resets.last().map(|r| r.1) == Some(p.end)
+            && resets.windows(2).all(|w| w[0].1 == w[1].0);
+        if !covers {
+            return Err(RustyQLibError::invalid_input(
+                "float leg",
+                format!(
+                    "the reset schedule does not tile the payment period {}..{}",
+                    p.start, p.end
+                ),
+            ));
+        }
+        out.push(FloatPeriod { period: p, resets });
+    }
+    Ok(out)
+}
+
+/// PV on unit notional of a floating leg with reset sub-periods. Each
+/// reset's simple rate is the forward off `forecast` — or, for a reset
+/// that started before the forecast curve's reference date, the
+/// published rate in `fixings` keyed by that reset's accrual start
+/// (an error if missing). Sub-periods combine by `compounding`, and
+/// each payment discounts on `discount`; settled periods contribute
+/// nothing.
+pub fn float_leg_pv_compounded(
+    periods: &[FloatPeriod],
+    spread: f64,
+    day_count: DayCountConvention,
+    compounding: CompoundingMethod,
+    discount: &YieldCurve,
+    forecast: &YieldCurve,
+    fixings: Option<&RateFixings>,
+) -> Result<f64, RustyQLibError> {
+    let valuation = discount.reference_date();
+    let fixing_horizon = forecast.reference_date();
+    let mut pv = 0.0;
+    for fp in periods {
+        if fp.period.payment <= valuation {
+            continue;
+        }
+        let mut resets = Vec::with_capacity(fp.resets.len());
+        for &(start, end) in &fp.resets {
+            let tau = day_count.year_fraction(start, end);
+            let rate = if start >= fixing_horizon {
+                (checked_df(forecast, start)? / checked_df(forecast, end)? - 1.0) / tau
+            } else {
+                fixings
+                    .and_then(|f| f.get(&start))
+                    .copied()
+                    .ok_or_else(|| {
+                        RustyQLibError::invalid_input(
+                            "swap leg",
+                            format!(
+                                "the reset starting {start} fixed before the forecast curve \
+                                 reference {fixing_horizon}: supply its fixing"
+                            ),
+                        )
+                    })?
+            };
+            resets.push((rate, tau));
+        }
+        pv += compounding.accrual(&resets, spread) * discount.df_date(fp.period.payment);
+    }
+    Ok(pv)
 }
 
 /// PV of a fixed leg: `sum rate * tau_i * df(pay_i)` on unit notional
@@ -196,6 +346,155 @@ mod tests {
             Compounding::Continuous,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn compounding_methods_match_the_isda_formulas_and_order() {
+        // two monthly resets at 4% and 5%, 25bp spread, tau = 1/12
+        let resets = [(0.04, 1.0 / 12.0), (0.05, 1.0 / 12.0)];
+        let s = 0.0025;
+        let none = CompoundingMethod::None.accrual(&resets, s);
+        let straight = CompoundingMethod::Straight.accrual(&resets, s);
+        let flat = CompoundingMethod::Flat.accrual(&resets, s);
+        let exclusive = CompoundingMethod::SpreadExclusive.accrual(&resets, s);
+        let tau = 1.0 / 12.0;
+        assert!((none - (0.0425 + 0.0525) * tau).abs() < 1e-15);
+        assert!((straight - ((1.0 + 0.0425 * tau) * (1.0 + 0.0525 * tau) - 1.0)).abs() < 1e-15);
+        let a1 = 0.0425 * tau;
+        assert!((flat - (a1 + 0.0525 * tau + a1 * 0.05 * tau)).abs() < 1e-15);
+        assert!(
+            (exclusive - ((1.0 + 0.04 * tau) * (1.0 + 0.05 * tau) - 1.0 + s * 2.0 * tau)).abs()
+                < 1e-15
+        );
+        // straight compounds the spread, flat compounds earlier spread
+        // amounts at the rate, exclusive never compounds the spread
+        assert!(straight > flat && flat > exclusive && exclusive > none);
+        // one reset: every method is the simple accrual
+        let one = [(0.04, 0.25)];
+        for m in [
+            CompoundingMethod::None,
+            CompoundingMethod::Straight,
+            CompoundingMethod::Flat,
+            CompoundingMethod::SpreadExclusive,
+        ] {
+            assert!((m.accrual(&one, s) - 0.0425 * 0.25).abs() < 1e-15, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn monthly_resets_on_a_quarterly_leg_telescope_under_straight_compounding() {
+        // zero spread, straight compounding: the product of the monthly
+        // df ratios is the quarterly df ratio, so the leg equals the
+        // single-reset leg exactly
+        let reference = d(2026, 8, 6);
+        let curve = flat(0.045, reference);
+        let schedule = LegSchedule::new(
+            reference,
+            d(2028, 8, 6),
+            Frequency::Quarterly,
+            Calendar::WeekendsOnly,
+            BusinessDayConvention::Unadjusted,
+        );
+        let monthly = float_periods(&schedule, Some(Frequency::Monthly)).unwrap();
+        assert_eq!(monthly.len(), 8);
+        assert!(monthly.iter().all(|p| p.resets.len() == 3));
+        let single = float_periods(&schedule, None).unwrap();
+        let dc = DayCountConvention::Act360;
+        let compounded = float_leg_pv_compounded(
+            &monthly,
+            0.0,
+            dc,
+            CompoundingMethod::Straight,
+            &curve,
+            &curve,
+            None,
+        )
+        .unwrap();
+        let plain = float_leg_pv_compounded(
+            &single,
+            0.0,
+            dc,
+            CompoundingMethod::None,
+            &curve,
+            &curve,
+            None,
+        )
+        .unwrap();
+        let legacy = float_leg_pv(
+            &schedule.accrual_periods().unwrap(),
+            0.0,
+            dc,
+            &curve,
+            &curve,
+        )
+        .unwrap();
+        assert!(
+            (compounded - plain).abs() < 1e-12,
+            "{compounded} vs {plain}"
+        );
+        assert!((plain - legacy).abs() < 1e-15);
+        // a reset frequency that does not divide the payment frequency is refused
+        assert!(float_periods(&schedule, Some(Frequency::Semiannual)).is_err());
+    }
+
+    #[test]
+    fn past_resets_come_from_the_fixing_history() {
+        // valued four weeks into the first quarter: the first monthly
+        // reset fixed in the past, the second has not started
+        let effective = d(2026, 8, 6);
+        let valuation = d(2026, 9, 3);
+        let curve = flat(0.045, valuation);
+        let schedule = LegSchedule::new(
+            effective,
+            d(2027, 8, 6),
+            Frequency::Quarterly,
+            Calendar::WeekendsOnly,
+            BusinessDayConvention::Unadjusted,
+        );
+        let periods = float_periods(&schedule, Some(Frequency::Monthly)).unwrap();
+        let dc = DayCountConvention::Act360;
+        // without the fixing: refused
+        assert!(float_leg_pv_compounded(
+            &periods,
+            0.0,
+            dc,
+            CompoundingMethod::None,
+            &curve,
+            &curve,
+            None
+        )
+        .is_err());
+        let mut fixings = RateFixings::new();
+        fixings.insert(effective, 0.05);
+        let with = float_leg_pv_compounded(
+            &periods,
+            0.0,
+            dc,
+            CompoundingMethod::None,
+            &curve,
+            &curve,
+            Some(&fixings),
+        )
+        .unwrap();
+        // the fixed month at 5% versus the curve's 4.5%: the leg is worth
+        // more than the same leg with a 4.5% fixing
+        fixings.insert(effective, 0.045);
+        let lower = float_leg_pv_compounded(
+            &periods,
+            0.0,
+            dc,
+            CompoundingMethod::None,
+            &curve,
+            &curve,
+            Some(&fixings),
+        )
+        .unwrap();
+        let tau = dc.year_fraction(effective, d(2026, 9, 6));
+        let expected_gap = 0.005 * tau * curve.df_date(d(2026, 11, 6));
+        assert!(
+            (with - lower - expected_gap).abs() < 1e-12,
+            "{with} vs {lower}"
+        );
     }
 
     #[test]

@@ -149,12 +149,24 @@ impl OneFactorAffine for HullWhite {
         strike: f64,
         put_or_call: PutOrCall,
     ) -> Result<f64, RustyQLibError> {
-        validate_bond_option_terms(expiry, bond_maturity, strike)?;
-        let p_expiry = self.curve.df(expiry);
+        self.zero_bond_exchange_option(expiry, expiry, bond_maturity, strike, put_or_call)
+    }
+
+    fn zero_bond_exchange_option(
+        &self,
+        expiry: f64,
+        settlement: f64,
+        bond_maturity: f64,
+        strike: f64,
+        put_or_call: PutOrCall,
+    ) -> Result<f64, RustyQLibError> {
+        validate_bond_option_terms(expiry, settlement, bond_maturity, strike)?;
+        let p_settlement = self.curve.df(settlement);
         let p_bond = self.curve.df(bond_maturity);
-        let sigma_p = gaussian_bond_price_vol(self.a, self.sigma, expiry, bond_maturity);
+        let sigma_p =
+            gaussian_bond_price_vol(self.a, self.sigma, expiry, settlement, bond_maturity);
         Ok(gaussian_zero_bond_option(
-            p_expiry,
+            p_settlement,
             p_bond,
             strike,
             sigma_p,

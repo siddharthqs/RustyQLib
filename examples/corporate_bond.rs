@@ -146,6 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap();
             SwaptionQuote {
                 expiry,
+                swap_start: expiry,
                 fixed_leg,
                 strike_rate: strike,
                 market_price: price,

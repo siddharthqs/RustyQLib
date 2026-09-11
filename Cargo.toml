@@ -40,7 +40,7 @@ xml = ["dep:quick-xml"]
 # TOML stress-scenario configuration files
 stress-config = ["dep:toml"]
 # fetch free official end-of-day market data (US Treasury par yields)
-fetch = ["dep:ureq", "dep:csv"]
+fetch = ["dep:ureq", "dep:csv", "dep:zip"]
 # the `rustyqlib` command-line binary and its file plumbing
 cli = [
     "dep:clap",
@@ -83,6 +83,7 @@ anstyle = { version = "1", optional = true }
 env_logger = { version = "0.11", optional = true }
 csv = { version = "1.1", optional = true }
 ureq = { version = "2", optional = true }
+zip = { version = "8", optional = true, default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.41.0", default-features = false, optional = true }
 toml = { version = "0.8", optional = true }
 

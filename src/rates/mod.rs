@@ -1,22 +1,22 @@
-//! Linear interest-rate products: swaps and money-market futures.
+//! Interest rates: contracts, pricing engines, short-rate models, and
+//! the shared leg machinery that binds them — the same layout as
+//! [`equity`](crate::equity).
 //!
-//! - [`VanillaSwap`] — fixed-for-floating interest rate swap (IRS)
-//! - [`OvernightIndexSwap`] — fixed versus daily-compounded overnight
-//!   (SOFR-style OIS), with an optional payment lag
-//! - [`BasisSwap`] — floating-for-floating with a spread on one leg
-//! - [`FedFundsFuture`] — CME 30-day fed funds futures (ZQ): the
-//!   arithmetic average of daily EFFR over the contract month, with
-//!   realized-fixings blending and FOMC step analytics
-//! - [`SofrFuture`] — CME SOFR futures: 1-month (SR1, arithmetic average
-//!   over the calendar month) and 3-month (SR3, daily compounding over
-//!   an IMM quarter), with a convexity helper for the futures/forward
-//!   bias
-//! - [`models`] — stochastic short-rate models (Vasicek, Hull-White,
-//!   CIR) with exact simulation transitions and analytic zero-bond
-//!   options, plus Jamshidian coupon-bond options, European swaptions
-//!   and caps/floors built on them
+//! - [`contracts`] — what you can trade: swaps ([`VanillaSwap`],
+//!   [`OvernightIndexSwap`], [`BasisSwap`]), money-market futures
+//!   ([`FedFundsFuture`], [`SofrFuture`]), and the options on rates —
+//!   [`Swaption`] and [`CapFloor`]
+//! - [`engines`] — how the options get priced: Jamshidian's analytic
+//!   engine on one-factor affine models
+//! - [`models`] — stochastic short-rate dynamics (Vasicek, Hull-White,
+//!   CIR) with exact simulation transitions, plus Hull-White
+//!   calibration to swaptions
+//! - top level — the spine: [`schedule`] (stub and roll conventions),
+//!   [`leg`] (leg PVs, reset compounding), [`overnight`] (fixings,
+//!   overnight forwards and compounded-in-arrears conventions),
+//!   [`PayerReceiver`]
 //!
-//! All pricing is linear discounting off [`YieldCurve`]s: each product
+//! Linear pricing is discounting off [`YieldCurve`]s: each product
 //! takes an explicit **discount** curve and one **forecast** curve per
 //! floating leg, so single-curve (pass the same curve) and dual-curve
 //! setups both work. With no fixings modelled, a floating accrual over
@@ -25,26 +25,39 @@
 //! rate for an OIS leg alike.
 //!
 //! Swap accrual dates are business-day adjusted (unlike bond accrual,
-//! which runs on scheduled dates); schedules roll backward from
-//! maturity, so a stub lands at the front.
+//! which runs on scheduled dates). By default schedules roll backward
+//! from maturity, so a stub lands at the front; [`StubConvention`] and
+//! [`RollConvention`] select the other market conventions.
+//!
+//! Every submodule is also re-exported at this level, so the historical
+//! flat paths (`rates::vanilla_swap`, `rates::models::pricers`, …) keep
+//! working unchanged.
 
-pub mod basis_swap;
-pub mod fed_funds_future;
 pub mod leg;
-pub mod models;
-pub mod ois;
 pub mod overnight;
-pub mod sofr_future;
-pub mod vanilla_swap;
+pub mod schedule;
 
-pub use basis_swap::{BasisSwap, BasisSwapLeg};
-pub use fed_funds_future::FedFundsFuture;
-pub use leg::AccrualPeriod;
+pub mod contracts;
+pub mod engines;
+pub mod models;
+pub mod multicurve;
+
+// Flat-path compatibility re-exports.
+pub use contracts::{
+    basis_swap, cap_floor, fed_funds_future, ois, sofr_future, swaption, vanilla_swap,
+};
+pub use engines::RateVol;
+pub use engines::{black, jamshidian};
+
+pub use contracts::{
+    hull_convexity_adjustment, BasisSwap, BasisSwapLeg, CapFloor, CapOrFloor, CapletValue,
+    FedFundsFuture, OvernightIndexSwap, SofrContract, SofrFuture, Swaption, VanillaSwap,
+};
+pub use leg::{AccrualPeriod, CompoundingMethod, FloatPeriod};
 pub use models::{CoxIngersollRoss, HullWhite, OneFactorAffine, ShortRateModel, Vasicek};
-pub use ois::OvernightIndexSwap;
-pub use overnight::{overnight_forward, simple_forward, RateFixings};
-pub use sofr_future::{hull_convexity_adjustment, SofrContract, SofrFuture};
-pub use vanilla_swap::VanillaSwap;
+pub use multicurve::{MultiCurve, MultiCurveBuilder, Pillar, QuoteSensitivity, RateInstrument};
+pub use overnight::{overnight_forward, simple_forward, OvernightConvention, RateFixings};
+pub use schedule::{LegSchedule, RollConvention, StubConvention};
 
 use crate::core::curves::YieldCurve;
 use crate::core::errors::RustyQLibError;

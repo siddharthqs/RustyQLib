@@ -8,8 +8,10 @@ use chrono::NaiveDate;
 use rand::{Rng, SeedableRng};
 use rustyqlib::core::curves::{Compounding, InterpolationMethod, Tenor, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
-use rustyqlib::rates::models::pricers::{caplet, european_swaption, floorlet};
-use rustyqlib::{HullWhite, PayerReceiver, ShortRateModel};
+use rustyqlib::rates::engines::jamshidian::european_swaption;
+use rustyqlib::{
+    CapFloor, CapOrFloor, HullWhite, PayerReceiver, RateVol, ShortRateModel, Swaption, VanillaSwap,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let asof = NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
@@ -78,11 +80,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Cap/floor on a quarterly period 2y out
-    let cap = caplet(&model, 2.0, 2.25, 0.25, 0.045, 10_000_000.0)?;
-    let floor = floorlet(&model, 2.0, 2.25, 0.25, 0.045, 10_000_000.0)?;
-    println!("\nquarterly caplet/floorlet 2y out, K = 4.5%, 10mm:");
-    println!("  caplet {cap:.2}   floorlet {floor:.2}");
+    // The dated products: schedules, day counts and calendars live on
+    // the product; the model stays in year fractions. A 1y-into-5y USD
+    // swaption exercised two business days before the swap starts...
+    let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+    let probe = VanillaSwap::usd_standard(
+        10_000_000.0,
+        0.04,
+        PayerReceiver::Payer,
+        d(2027, 8, 16),
+        d(2032, 8, 16),
+    )?;
+    let atm_dated = probe.par_rate(&curve, &curve)?;
+    let underlying = VanillaSwap::usd_standard(
+        10_000_000.0,
+        atm_dated,
+        PayerReceiver::Payer,
+        d(2027, 8, 16),
+        d(2032, 8, 16),
+    )?;
+    let swaption = Swaption::new(underlying, d(2027, 8, 12))?;
+    println!(
+        "\n1y5y USD payer swaption on 10mm, expiry 12-Aug-2027, struck ATM ({:.4}%):",
+        atm_dated * 100.0
+    );
+    let hw_price = swaption.npv_hull_white(&model)?;
+    println!(
+        "  Hull-White {:.2}  = {:.1} bp normal vol  ({:.2}% Black vol)",
+        hw_price,
+        swaption.implied_normal_vol_hull_white(&model)? * 10_000.0,
+        swaption.implied_black_vol(&curve, &curve, hw_price, 0.0)? * 100.0
+    );
+    // ...and the other way: a screen quote of 85bp normal into a price
+    println!(
+        "  at 85bp normal vol: {:.2}",
+        swaption.npv_black(&curve, &curve, RateVol::Normal(0.0085))?
+    );
+
+    // ...and a 3y quarterly cap and floor starting a year forward
+    let cap = CapFloor::usd_standard(
+        10_000_000.0,
+        0.045,
+        CapOrFloor::Cap,
+        d(2027, 8, 16),
+        d(2030, 8, 16),
+    )?;
+    let floor = CapFloor::usd_standard(
+        10_000_000.0,
+        0.045,
+        CapOrFloor::Floor,
+        d(2027, 8, 16),
+        d(2030, 8, 16),
+    )?;
+    println!(
+        "\n3y quarterly cap/floor from 16-Aug-2027, K = 4.5%, 10mm (ATM {:.4}%):",
+        cap.atm_strike(&curve)? * 100.0
+    );
+    println!(
+        "  cap {:.2}   floor {:.2}",
+        cap.npv_hull_white(&model)?,
+        floor.npv_hull_white(&model)?
+    );
+    for c in cap.caplet_values(&model, &curve, None)?.iter().take(3) {
+        println!(
+            "  caplet {} -> {}  forward {:.4}%  value {:.2}",
+            c.start,
+            c.end,
+            c.forward_rate * 100.0,
+            c.value
+        );
+    }
 
     // The cross-asset simulation contract: evolve the short rate with
     // the exact transition and discount along paths — a hybrid equity

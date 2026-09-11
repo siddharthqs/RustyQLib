@@ -10,6 +10,7 @@
 pub mod cboe;
 pub mod dtcc;
 pub mod nyfed;
+pub mod ppd;
 pub mod treasury;
 
 use std::io::Read;
@@ -33,6 +34,16 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// library's entire network surface. The body is read up to
 /// [`MAX_BODY_BYTES`] and must be valid UTF-8.
 pub(crate) fn http_get(url: &str) -> Result<String, RustyQLibError> {
+    String::from_utf8(http_get_bytes(url)?).map_err(|e| {
+        RustyQLibError::ParseError(format!(
+            "the response body of {url} is not valid UTF-8: {e}"
+        ))
+    })
+}
+
+/// [`http_get`] for binary bodies (zip archives): same timeout, agent
+/// and size limit, no UTF-8 requirement.
+pub(crate) fn http_get_bytes(url: &str) -> Result<Vec<u8>, RustyQLibError> {
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(concat!(
@@ -60,11 +71,7 @@ pub(crate) fn http_get(url: &str) -> Result<String, RustyQLibError> {
              (MAX_BODY_BYTES); refusing to buffer it"
         )));
     }
-    String::from_utf8(body).map_err(|e| {
-        RustyQLibError::ParseError(format!(
-            "the response body of {url} is not valid UTF-8: {e}"
-        ))
-    })
+    Ok(body)
 }
 
 /// Pick the item dated `date`, or the latest one when `date` is `None`.

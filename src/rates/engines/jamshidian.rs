@@ -1,4 +1,7 @@
-//! Generic pricers on top of [`OneFactorAffine`] models.
+//! Jamshidian's engine: generic pricers on top of [`OneFactorAffine`]
+//! models, on year-fraction inputs. The date-aware products in
+//! [`contracts`](crate::rates::contracts) — [`Swaption`] and
+//! [`CapFloor`] — build their schedules and call down into here.
 //!
 //! Everything here reduces to European options on zero-coupon bonds:
 //!
@@ -6,16 +9,26 @@
 //!   model where bond prices move monotonically in the short rate, an
 //!   option on a coupon bond decomposes exactly into a portfolio of
 //!   zero-bond options struck at the critical rate `r*` at which the
-//!   coupon bond is worth the strike.
+//!   coupon bond is worth the strike. The strike may be paid at a
+//!   `settlement` after the `expiry` (the `_settled` variants): then
+//!   `r*` equates the bond to `strike` settlement bonds and each piece
+//!   is an exchange option between two zero bonds — still closed form
+//!   in the Gaussian models.
 //! - **European swaptions** via the bond-option equivalence: a payer
 //!   swaption is a put on the fixed leg (coupons plus redemption)
-//!   struck at the notional; a receiver swaption is the call.
+//!   struck at the notional; a receiver swaption is the call. The
+//!   notional is exchanged at the swap start, which is the settlement
+//!   of the bond option — exactly the exercise date, or a settlement
+//!   lag after it.
 //! - **Caplets / floorlets**: a caplet paying `N tau (L - K)^+` equals
 //!   `N (1 + K tau)` zero-bond puts struck at `1/(1 + K tau)`.
 //!
 //! Times are year fractions from the model's anchor; the caller
-//! converts dates (see the `short_rate_models` example, which builds a
-//! swaption schedule from swap accrual periods).
+//! converts dates; the products in `contracts` do that from swap
+//! accrual periods.
+//!
+//! [`Swaption`]: crate::rates::contracts::swaption::Swaption
+//! [`CapFloor`]: crate::rates::contracts::cap_floor::CapFloor
 
 use crate::core::errors::RustyQLibError;
 use crate::core::solvers::Solver1d;
@@ -26,18 +39,18 @@ use crate::rates::PayerReceiver;
 /// Bracket for the Jamshidian critical-rate solve.
 const RATE_BRACKET: (f64, f64) = (-2.0, 10.0);
 
-fn validate_flows(expiry: f64, flows: &[(f64, f64)]) -> Result<(), RustyQLibError> {
+fn validate_flows(settlement: f64, flows: &[(f64, f64)]) -> Result<(), RustyQLibError> {
     if flows.is_empty() {
         return Err(RustyQLibError::invalid_input(
             "coupon bond option",
-            "no cash flows after the expiry",
+            "no cash flows after the settlement",
         ));
     }
     for &(time, amount) in flows {
-        if !(time > expiry && time.is_finite()) {
+        if !(time > settlement && time.is_finite()) {
             return Err(RustyQLibError::invalid_input(
                 "coupon bond option",
-                format!("flow time {time} must lie strictly after the expiry {expiry}"),
+                format!("flow time {time} must lie strictly after the settlement {settlement}"),
             ));
         }
         if !(amount > 0.0 && amount.is_finite()) {
@@ -60,10 +73,33 @@ pub fn coupon_bond_option(
     strike: f64,
     put_or_call: PutOrCall,
 ) -> Result<f64, RustyQLibError> {
+    coupon_bond_option_settled(model, expiry, expiry, flows, strike, put_or_call)
+}
+
+/// [`coupon_bond_option`] with the strike paid at `settlement >= expiry`
+/// rather than at exercise: the payoff at `expiry` is
+/// `(bond - strike * P(expiry, settlement))^+` for a call. Jamshidian's
+/// decomposition still applies — the bond measured in settlement bonds
+/// is monotone in the rate — and each piece is a zero-bond exchange
+/// option. `flows` must lie strictly after the settlement.
+pub fn coupon_bond_option_settled(
+    model: &impl OneFactorAffine,
+    expiry: f64,
+    settlement: f64,
+    flows: &[(f64, f64)],
+    strike: f64,
+    put_or_call: PutOrCall,
+) -> Result<f64, RustyQLibError> {
     if !(expiry > 0.0 && expiry.is_finite()) {
         return Err(RustyQLibError::invalid_input(
             "coupon bond option",
             format!("expiry must be positive, got {expiry}"),
+        ));
+    }
+    if !(settlement >= expiry && settlement.is_finite()) {
+        return Err(RustyQLibError::invalid_input(
+            "coupon bond option",
+            format!("settlement {settlement} must not precede the expiry {expiry}"),
         ));
     }
     if !(strike > 0.0 && strike.is_finite()) {
@@ -72,11 +108,16 @@ pub fn coupon_bond_option(
             format!("strike must be positive, got {strike}"),
         ));
     }
-    validate_flows(expiry, flows)?;
+    validate_flows(settlement, flows)?;
 
-    // the critical short rate r* at which the coupon bond is worth the
-    // strike at expiry; bond value is strictly decreasing in the rate,
-    // so bisection on a wide bracket is safe
+    // the critical short rate r* at which the coupon bond is worth
+    // `strike` settlement bonds at expiry; that ratio is strictly
+    // decreasing in the rate, so bisection on a wide bracket is safe
+    let settlement_bond = |rate: f64| -> f64 {
+        model
+            .zero_bond(expiry, settlement, rate)
+            .expect("settlement was validated against the expiry")
+    };
     let bond_value = |rate: f64| -> f64 {
         flows
             .iter()
@@ -84,13 +125,13 @@ pub fn coupon_bond_option(
                 amount
                     * model
                         .zero_bond(expiry, time, rate)
-                        .expect("flow times were validated against the expiry")
+                        .expect("flow times were validated against the settlement")
             })
             .sum()
     };
     // normalized by the strike so the tolerance is scale-free (a
     // million-notional leg solves as precisely as a unit one)
-    let objective = |rate: f64| 1.0 - bond_value(rate) / strike;
+    let objective = |rate: f64| 1.0 - bond_value(rate) / (strike * settlement_bond(rate));
     let root = Solver1d::new(1e-12, 200).bisection(objective, RATE_BRACKET.0, RATE_BRACKET.1)?;
     if !root.converged {
         return Err(RustyQLibError::CalibrationFailed {
@@ -101,11 +142,20 @@ pub fn coupon_bond_option(
     }
     let critical_rate = root.x;
 
-    // decompose: each flow's strike is its zero-bond price at r*
+    // decompose: each flow's strike is its zero-bond price at r*, in
+    // units of the settlement bond
+    let settlement_at_critical = settlement_bond(critical_rate);
     let mut value = 0.0;
     for &(time, amount) in flows {
-        let flow_strike = model.zero_bond(expiry, time, critical_rate)?;
-        value += amount * model.zero_bond_option(expiry, time, flow_strike, put_or_call)?;
+        let flow_strike = model.zero_bond(expiry, time, critical_rate)? / settlement_at_critical;
+        value += amount
+            * model.zero_bond_exchange_option(
+                expiry,
+                settlement,
+                time,
+                flow_strike,
+                put_or_call,
+            )?;
     }
     Ok(value)
 }
@@ -117,6 +167,31 @@ pub fn coupon_bond_option(
 pub fn european_swaption(
     model: &impl OneFactorAffine,
     expiry: f64,
+    fixed_leg: &[(f64, f64)],
+    strike_rate: f64,
+    notional: f64,
+    payer_receiver: PayerReceiver,
+) -> Result<f64, RustyQLibError> {
+    european_swaption_settled(
+        model,
+        expiry,
+        expiry,
+        fixed_leg,
+        strike_rate,
+        notional,
+        payer_receiver,
+    )
+}
+
+/// [`european_swaption`] on a swap starting at `swap_start >= expiry`
+/// (exercise a settlement lag before the swap's effective date): the
+/// notional is exchanged at the swap start, so the fixed leg is struck
+/// at `notional` settlement bonds.
+#[allow(clippy::too_many_arguments)]
+pub fn european_swaption_settled(
+    model: &impl OneFactorAffine,
+    expiry: f64,
+    swap_start: f64,
     fixed_leg: &[(f64, f64)],
     strike_rate: f64,
     notional: f64,
@@ -148,7 +223,7 @@ pub fn european_swaption(
         PayerReceiver::Payer => PutOrCall::Put,
         PayerReceiver::Receiver => PutOrCall::Call,
     };
-    coupon_bond_option(model, expiry, &flows, notional, put_or_call)
+    coupon_bond_option_settled(model, expiry, swap_start, &flows, notional, put_or_call)
 }
 
 /// Caplet on the simple rate over `[start, end]` with accrual `tau`
@@ -324,6 +399,74 @@ mod tests {
             .sum();
         let parity = bond_pv - strike * m.zero_bond(0.0, 1.0, m.r0).unwrap();
         assert!((call - put - parity).abs() < 1e-9, "{call} - {put}");
+    }
+
+    #[test]
+    fn settlement_lag_keeps_parity_against_the_lagged_forward_swap() {
+        let m = hull_white();
+        let curve = m.curve();
+        let leg = fixed_leg();
+        let (expiry, strike, notional) = (1.0, 0.045, 1_000_000.0);
+        let start = expiry + 2.0 / 365.0;
+        // no lag: the settled variant is the plain one, bit for bit
+        let plain =
+            european_swaption(&m, expiry, &leg, strike, notional, PayerReceiver::Payer).unwrap();
+        let same = european_swaption_settled(
+            &m,
+            expiry,
+            expiry,
+            &leg,
+            strike,
+            notional,
+            PayerReceiver::Payer,
+        )
+        .unwrap();
+        assert_eq!(plain, same);
+        // with a lag: payer - receiver is the forward swap that starts
+        // at the swap start, not at the exercise
+        let payer = european_swaption_settled(
+            &m,
+            expiry,
+            start,
+            &leg,
+            strike,
+            notional,
+            PayerReceiver::Payer,
+        )
+        .unwrap();
+        let receiver = european_swaption_settled(
+            &m,
+            expiry,
+            start,
+            &leg,
+            strike,
+            notional,
+            PayerReceiver::Receiver,
+        )
+        .unwrap();
+        let fixed_leg_pv: f64 = leg
+            .iter()
+            .map(|&(t, tau)| strike * tau * curve.df(t))
+            .sum::<f64>()
+            + curve.df(6.0);
+        let forward_swap = notional * (curve.df(start) - fixed_leg_pv);
+        assert!(
+            (payer - receiver - forward_swap).abs() < 1e-6 * notional,
+            "{payer} - {receiver} vs {forward_swap}"
+        );
+        // the lag is a small, non-zero correction
+        assert!(payer != plain && (payer - plain).abs() < 0.05 * plain);
+        // a settlement before the exercise is refused
+        assert!(european_swaption_settled(
+            &m,
+            expiry,
+            0.9,
+            &leg,
+            strike,
+            notional,
+            PayerReceiver::Payer
+        )
+        .is_err());
     }
 
     #[test]

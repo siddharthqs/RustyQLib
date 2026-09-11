@@ -11,11 +11,14 @@
 //!   hybrid simulates the equity and the short rate together and
 //!   reconstitutes bonds from the rate state at every node).
 //! - [`OneFactorAffine`] adds the **analytic layer** of affine models:
-//!   closed-form European options on zero-coupon bonds. Everything else
-//!   in [`pricers`] is generic on top of it — coupon-bond options by
-//!   Jamshidian's decomposition, European swaptions via the
-//!   bond-option equivalence, caplets and floorlets via zero-bond puts
-//!   and calls.
+//!   closed-form European options on zero-coupon bonds. Everything in
+//!   [`jamshidian`](crate::rates::engines::jamshidian) is generic on
+//!   top of it — coupon-bond options by Jamshidian's decomposition,
+//!   European swaptions via the bond-option equivalence, caplets and
+//!   floorlets via zero-bond puts and calls — and the date-aware
+//!   [`Swaption`](crate::rates::contracts::swaption::Swaption) and
+//!   [`CapFloor`](crate::rates::contracts::cap_floor::CapFloor)
+//!   products sit on that.
 //!
 //! Models:
 //!
@@ -38,8 +41,12 @@
 pub mod calibration;
 pub mod cir;
 pub mod hull_white;
-pub mod pricers;
 pub mod vasicek;
+
+/// Flat-path compatibility: the Jamshidian pricers used to live at
+/// `rates::models::pricers`; they are now
+/// [`rates::engines::jamshidian`](crate::rates::engines::jamshidian).
+pub use crate::rates::engines::jamshidian as pricers;
 
 pub use calibration::{
     atm_swap_rate, calibrate_hull_white, calibrate_hull_white_sigma, HullWhiteFit, SwaptionQuote,
@@ -70,8 +77,8 @@ pub trait ShortRateModel {
 
 /// The analytic layer of affine one-factor models: closed-form European
 /// options on zero-coupon bonds, valued at the anchor time `t = 0`.
-/// [`pricers`] builds coupon-bond options, swaptions and caps from this
-/// single primitive.
+/// [`jamshidian`](crate::rates::engines::jamshidian) builds coupon-bond
+/// options, swaptions and caps from this single primitive.
 pub trait OneFactorAffine: ShortRateModel {
     /// Value today of a European option, expiring at `expiry`, on the
     /// zero-coupon bond maturing at `bond_maturity`, struck at `strike`
@@ -83,11 +90,40 @@ pub trait OneFactorAffine: ShortRateModel {
         strike: f64,
         put_or_call: PutOrCall,
     ) -> Result<f64, RustyQLibError>;
+
+    /// Value today of a European option, expiring at `expiry`, to
+    /// exchange `strike` units of the zero-coupon bond maturing at
+    /// `settlement` for the bond maturing at `bond_maturity`: a call
+    /// pays `(P(expiry, bond_maturity) - strike * P(expiry, settlement))^+`
+    /// (reversed for a put). With `settlement == expiry` this is
+    /// [`zero_bond_option`](Self::zero_bond_option); the general case
+    /// is what a swaption needs when the swap starts a settlement lag
+    /// after exercise. The default falls back to the plain option when
+    /// the two dates coincide and refuses otherwise; the Gaussian
+    /// models supply the closed form.
+    fn zero_bond_exchange_option(
+        &self,
+        expiry: f64,
+        settlement: f64,
+        bond_maturity: f64,
+        strike: f64,
+        put_or_call: PutOrCall,
+    ) -> Result<f64, RustyQLibError> {
+        if settlement == expiry {
+            return self.zero_bond_option(expiry, bond_maturity, strike, put_or_call);
+        }
+        Err(RustyQLibError::invalid_input(
+            "bond exchange option",
+            "this model has no exchange-option formula for a settlement after the expiry",
+        ))
+    }
 }
 
-/// Shared validation for `(expiry, bond_maturity, strike)` option terms.
+/// Shared validation for `(expiry, settlement, bond_maturity, strike)`
+/// exchange-option terms: `0 < expiry <= settlement < bond_maturity`.
 pub(crate) fn validate_bond_option_terms(
     expiry: f64,
+    settlement: f64,
     bond_maturity: f64,
     strike: f64,
 ) -> Result<(), RustyQLibError> {
@@ -97,10 +133,16 @@ pub(crate) fn validate_bond_option_terms(
             format!("expiry must be positive, got {expiry}"),
         ));
     }
-    if !(bond_maturity > expiry && bond_maturity.is_finite()) {
+    if !(settlement >= expiry && settlement.is_finite()) {
         return Err(RustyQLibError::invalid_input(
             "bond option",
-            format!("bond maturity {bond_maturity} must exceed the expiry {expiry}"),
+            format!("settlement {settlement} must not precede the expiry {expiry}"),
+        ));
+    }
+    if !(bond_maturity > settlement && bond_maturity.is_finite()) {
+        return Err(RustyQLibError::invalid_input(
+            "bond option",
+            format!("bond maturity {bond_maturity} must exceed the settlement {settlement}"),
         ));
     }
     if !(strike > 0.0 && strike.is_finite()) {
@@ -126,18 +168,28 @@ pub(crate) fn gaussian_short_rate_std(a: f64, sigma: f64, dt: f64) -> f64 {
     (sigma * sigma * (1.0 - (-2.0 * a * dt).exp()) / (2.0 * a)).sqrt()
 }
 
-/// Price volatility of the `bond_maturity` bond at `expiry` — the
-/// `sigma_p` in [`gaussian_zero_bond_option`].
-pub(crate) fn gaussian_bond_price_vol(a: f64, sigma: f64, expiry: f64, bond_maturity: f64) -> f64 {
-    gaussian_short_rate_std(a, sigma, expiry) * b_factor(a, expiry, bond_maturity)
+/// Volatility at `expiry` of the price ratio
+/// `P(expiry, bond_maturity) / P(expiry, settlement)` — the `sigma_p`
+/// in [`gaussian_zero_bond_option`]. With `settlement == expiry` it is
+/// the plain bond price volatility `std(r) * B(expiry, bond_maturity)`.
+pub(crate) fn gaussian_bond_price_vol(
+    a: f64,
+    sigma: f64,
+    expiry: f64,
+    settlement: f64,
+    bond_maturity: f64,
+) -> f64 {
+    gaussian_short_rate_std(a, sigma, expiry)
+        * (b_factor(a, expiry, bond_maturity) - b_factor(a, expiry, settlement))
 }
 
-/// The Gaussian zero-bond option formula shared by Vasicek and
-/// Hull-White (Jamshidian 1989): a Black-style exchange option between
-/// the `bond_maturity` bond and `strike` units of the `expiry` bond,
-/// with price volatility `sigma_p`.
+/// The Gaussian zero-bond (exchange) option formula shared by Vasicek
+/// and Hull-White (Jamshidian 1989): a Black-style exchange option
+/// between the `bond_maturity` bond and `strike` units of the
+/// settlement bond (`p_settlement`, the `expiry` bond itself for a
+/// plain option), with price-ratio volatility `sigma_p`.
 pub(crate) fn gaussian_zero_bond_option(
-    p_expiry: f64,
+    p_settlement: f64,
     p_bond: f64,
     strike: f64,
     sigma_p: f64,
@@ -147,14 +199,14 @@ pub(crate) fn gaussian_zero_bond_option(
     if sigma_p <= 0.0 {
         // deterministic limit: discounted intrinsic
         let forward_intrinsic = match put_or_call {
-            PutOrCall::Call => (p_bond - strike * p_expiry).max(0.0),
-            PutOrCall::Put => (strike * p_expiry - p_bond).max(0.0),
+            PutOrCall::Call => (p_bond - strike * p_settlement).max(0.0),
+            PutOrCall::Put => (strike * p_settlement - p_bond).max(0.0),
         };
         return forward_intrinsic;
     }
-    let h = (p_bond / (p_expiry * strike)).ln() / sigma_p + 0.5 * sigma_p;
+    let h = (p_bond / (p_settlement * strike)).ln() / sigma_p + 0.5 * sigma_p;
     match put_or_call {
-        PutOrCall::Call => p_bond * norm_cdf(h) - strike * p_expiry * norm_cdf(h - sigma_p),
-        PutOrCall::Put => strike * p_expiry * norm_cdf(sigma_p - h) - p_bond * norm_cdf(-h),
+        PutOrCall::Call => p_bond * norm_cdf(h) - strike * p_settlement * norm_cdf(h - sigma_p),
+        PutOrCall::Put => strike * p_settlement * norm_cdf(sigma_p - h) - p_bond * norm_cdf(-h),
     }
 }

@@ -845,6 +845,112 @@ fn fetch_gcf_rejects_a_truncated_download() {
 }
 
 #[test]
+fn fetch_cds_emits_the_dissemination_log_as_published() {
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "cds", "--from-file"])
+            .arg(fixture("ppd_cds_sample.csv")),
+    );
+    let meta = &doc["metadata"];
+    assert!(meta["source"].as_str().unwrap().contains("DTCC"));
+    // no date in the fixture name: the latest event timestamp's day
+    assert_eq!(meta["report_date"], "2026-09-09");
+    assert_eq!(meta["prints"], 8);
+    assert_eq!(meta["actions"]["NEWT"], 6);
+    assert_eq!(meta["actions"]["CORR"], 1);
+    assert_eq!(meta["columns"]["spread"], "Spread-Leg 1");
+    assert!(meta["file"].as_str().unwrap().contains("ppd_cds_sample"));
+    let prints = doc["prints"].as_array().unwrap();
+    assert_eq!(prints.len(), 8);
+    let ig = &prints[0];
+    assert_eq!(ig["underlier"], "CDX.NA.IG");
+    assert_eq!(ig["spread"], 0.00504);
+    assert_eq!(ig["fixed_rate"], 0.01);
+    assert_eq!(ig["upfront_amount"], 586206.73);
+    assert_eq!(ig["expiration_date"], "2031-06-20");
+    assert_eq!(ig["notional_capped"], false);
+    // the fixture's name says nothing about the repository
+    assert!(ig.get("jurisdiction").is_none());
+    assert_eq!(prints[1]["notional_capped"], true);
+    assert_eq!(
+        prints[3]["original_dissemination_id"],
+        "5200000000000000103"
+    );
+    assert_eq!(prints[5]["entity_name"], "Example Semiconductor Inc.");
+    // a trade with two other payments: the UFRO one is the upfront
+    assert_eq!(prints[7]["upfront_amount"], 78410107.0);
+    assert_eq!(prints[7]["other_payments"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn fetch_cds_symbol_filters_and_date_overrides() {
+    let doc = stdout_json(
+        cli()
+            .args([
+                "fetch",
+                "cds",
+                "--symbol",
+                "cdx.na.hy",
+                "--date",
+                "2026-09-08",
+                "--from-file",
+            ])
+            .arg(fixture("ppd_cds_sample.csv")),
+    );
+    assert_eq!(doc["metadata"]["report_date"], "2026-09-08");
+    assert_eq!(doc["metadata"]["underlier_filter"], "cdx.na.hy");
+    assert_eq!(doc["metadata"]["prints"], 2);
+    let prints = doc["prints"].as_array().unwrap();
+    assert!(prints.iter().all(|p| p["underlier"] == "CDX.NA.HY"));
+    // an entity-name match works the same way
+    let doc = stdout_json(
+        cli()
+            .args(["fetch", "cds", "--symbol", "energy", "--from-file"])
+            .arg(fixture("ppd_cds_sample.csv")),
+    );
+    assert_eq!(doc["metadata"]["prints"], 1);
+    assert_eq!(doc["prints"][0]["action"], "TERM");
+}
+
+#[test]
+fn fetch_cds_reads_dtcc_file_names_for_repository_and_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("SEC_CUMULATIVE_CREDITS_2026_09_09.csv");
+    std::fs::copy(fixture("ppd_cds_sample.csv"), &path).unwrap();
+    let doc = stdout_json(cli().args(["fetch", "cds", "--from-file"]).arg(&path));
+    assert_eq!(doc["metadata"]["report_date"], "2026-09-09");
+    assert_eq!(doc["metadata"]["jurisdictions"], serde_json::json!(["SEC"]));
+    assert_eq!(doc["prints"][0]["jurisdiction"], "SEC");
+}
+
+#[test]
+fn fetch_cds_xml_output_works() {
+    cli()
+        .args(["fetch", "cds", "--format", "xml", "--from-file"])
+        .arg(fixture("ppd_cds_sample.csv"))
+        .assert()
+        .success()
+        .stdout(contains("<?xml"))
+        .stdout(contains("<cds_prints>"))
+        .stdout(contains("<spread>0.00504</spread>"));
+}
+
+#[test]
+fn fetch_cds_rejects_a_non_credit_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rates.csv");
+    let text = std::fs::read_to_string(fixture("ppd_cds_sample.csv")).unwrap();
+    std::fs::write(&path, text.replacen(",CR,", ",IR,", 1)).unwrap();
+    cli()
+        .args(["fetch", "cds", "--from-file"])
+        .arg(&path)
+        .assert()
+        .code(1)
+        .stdout(predicates::str::is_empty())
+        .stderr(contains("not credit"));
+}
+
+#[test]
 fn fetch_chain_emits_the_verbatim_feed_response() {
     let doc = stdout_json(
         cli()
@@ -925,7 +1031,9 @@ fn fetch_rejects_chain_only_flags_on_other_sources() {
             .assert()
             .code(1)
             .stdout(predicates::str::is_empty())
-            .stderr(contains("--symbol only applies to the chain source"));
+            .stderr(contains(
+                "--symbol only applies to the chain and cds sources",
+            ));
         cli()
             .args(["fetch", source, "--normalize", "--from-file"])
             .arg(&file)

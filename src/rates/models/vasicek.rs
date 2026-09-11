@@ -106,12 +106,24 @@ impl OneFactorAffine for Vasicek {
         strike: f64,
         put_or_call: PutOrCall,
     ) -> Result<f64, RustyQLibError> {
-        validate_bond_option_terms(expiry, bond_maturity, strike)?;
-        let p_expiry = self.zero_bond(0.0, expiry, self.r0)?;
+        self.zero_bond_exchange_option(expiry, expiry, bond_maturity, strike, put_or_call)
+    }
+
+    fn zero_bond_exchange_option(
+        &self,
+        expiry: f64,
+        settlement: f64,
+        bond_maturity: f64,
+        strike: f64,
+        put_or_call: PutOrCall,
+    ) -> Result<f64, RustyQLibError> {
+        validate_bond_option_terms(expiry, settlement, bond_maturity, strike)?;
+        let p_settlement = self.zero_bond(0.0, settlement, self.r0)?;
         let p_bond = self.zero_bond(0.0, bond_maturity, self.r0)?;
-        let sigma_p = gaussian_bond_price_vol(self.a, self.sigma, expiry, bond_maturity);
+        let sigma_p =
+            gaussian_bond_price_vol(self.a, self.sigma, expiry, settlement, bond_maturity);
         Ok(gaussian_zero_bond_option(
-            p_expiry,
+            p_settlement,
             p_bond,
             strike,
             sigma_p,
