@@ -171,6 +171,98 @@ impl Swaption {
         self.npv(model, model.curve())
     }
 
+    /// Value under any [`Gaussian1dModel`] (Hull-White in Gaussian1d
+    /// form, the Markov functional model) through the deflated
+    /// quadrature engine, with dates mapped against `anchor`.
+    ///
+    /// [`Gaussian1dModel`]: crate::rates::models::gaussian1d::Gaussian1dModel
+    pub fn npv_gaussian1d(
+        &self,
+        model: &impl crate::rates::models::gaussian1d::Gaussian1dModel,
+        anchor: &YieldCurve,
+    ) -> Result<f64, RustyQLibError> {
+        crate::rates::engines::gaussian1d::european_swaption(
+            model,
+            self.expiry(anchor)?,
+            self.swap_start(anchor)?,
+            &self.fixed_leg_times(anchor)?,
+            self.swap.fixed_rate,
+            self.swap.notional,
+            self.swap.payer_receiver,
+        )
+    }
+
+    /// Value under Hull-White by finite differences on the state PDE.
+    pub fn npv_fd_hull_white(
+        &self,
+        model: &HullWhite,
+        config: &crate::rates::engines::fd_hull_white::FdConfig,
+    ) -> Result<f64, RustyQLibError> {
+        let anchor = model.curve();
+        crate::rates::engines::fd_hull_white::european_swaption(
+            model,
+            self.expiry(anchor)?,
+            self.swap_start(anchor)?,
+            &self.fixed_leg_times(anchor)?,
+            self.swap.fixed_rate,
+            self.swap.notional,
+            self.swap.payer_receiver,
+            config,
+        )
+    }
+
+    /// Value under G2++ by ADI finite differences on the two-factor PDE.
+    pub fn npv_fd_g2pp(
+        &self,
+        model: &crate::rates::models::g2pp::G2pp,
+        config: &crate::rates::engines::fd_g2pp::FdG2Config,
+    ) -> Result<f64, RustyQLibError> {
+        let anchor = model.curve();
+        crate::rates::engines::fd_g2pp::european_swaption(
+            model,
+            self.expiry(anchor)?,
+            self.swap_start(anchor)?,
+            &self.fixed_leg_times(anchor)?,
+            self.swap.fixed_rate,
+            self.swap.notional,
+            self.swap.payer_receiver,
+            config,
+        )
+    }
+
+    /// Value under Black-Karasinski on its fitted tree, anchored on the
+    /// model's curve.
+    pub fn npv_black_karasinski(
+        &self,
+        model: &crate::rates::models::black_karasinski::BlackKarasinski,
+    ) -> Result<f64, RustyQLibError> {
+        let anchor = model.curve();
+        model.european_swaption(
+            self.expiry(anchor)?,
+            self.swap_start(anchor)?,
+            &self.fixed_leg_times(anchor)?,
+            self.swap.fixed_rate,
+            self.swap.notional,
+            self.swap.payer_receiver,
+        )
+    }
+
+    /// Value under the two-factor G2++ model, anchored on its curve.
+    pub fn npv_g2pp(
+        &self,
+        model: &crate::rates::models::g2pp::G2pp,
+    ) -> Result<f64, RustyQLibError> {
+        let anchor = model.curve();
+        model.european_swaption(
+            self.expiry(anchor)?,
+            self.swap_start(anchor)?,
+            &self.fixed_leg_times(anchor)?,
+            self.swap.fixed_rate,
+            self.swap.notional,
+            self.swap.payer_receiver,
+        )
+    }
+
     /// The calibration quote for this swaption at `market_price` (on
     /// the swap's notional; the quote is stored per unit notional).
     pub fn to_quote(
@@ -208,6 +300,24 @@ impl Swaption {
             vol,
             self.swap.payer_receiver,
         )
+    }
+
+    /// Value off a SABR cube: the smile at this swaption's expiry and
+    /// tenor (the swap's length in years) read at its strike and
+    /// forward, priced through the market formula.
+    pub fn npv_sabr(
+        &self,
+        cube: &crate::rates::models::sabr::SabrSwaptionCube,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+    ) -> Result<f64, RustyQLibError> {
+        let expiry = self.expiry(discount)?;
+        let periods = self.swap.fixed_periods()?;
+        let tenor = year_fraction_from(discount, periods[periods.len() - 1].end)
+            - year_fraction_from(discount, periods[0].start);
+        let forward = self.forward_swap_rate(discount, forecast)?;
+        let vol = cube.vol(expiry, tenor, forward, self.swap.fixed_rate)?;
+        self.npv_black(discount, forecast, vol)
     }
 
     /// The Bachelier (normal) vol, in absolute rate units per √year,
@@ -412,9 +522,9 @@ mod tests {
             .collect();
         let fit = calibrate_hull_white_sigma(curve, &quotes, 0.05, 0.02).unwrap();
         assert!(
-            (fit.model.sigma - 0.009).abs() < 1e-5,
+            (fit.model.sigma() - 0.009).abs() < 1e-5,
             "sigma {}",
-            fit.model.sigma
+            fit.model.sigma()
         );
     }
 
@@ -487,15 +597,59 @@ mod tests {
         let fit = calibrate_hull_white_sigma(&curve, &quotes, 0.05, 0.02).unwrap();
         assert!(fit.price_rmse < 0.02, "rmse {}", fit.price_rmse);
         assert!(
-            fit.model.sigma > 0.008 && fit.model.sigma < 0.012,
+            fit.model.sigma() > 0.008 && fit.model.sigma() < 0.012,
             "sigma {}",
-            fit.model.sigma
+            fit.model.sigma()
         );
         // the fitted model's implied vols sit near the screen
         for (s, &(_, _, _, vol)) in swaptions.iter().zip(grid.iter()) {
             let implied = s.implied_normal_vol_hull_white(&fit.model).unwrap();
             assert!((implied - vol).abs() < 0.0005, "{implied} vs screen {vol}");
         }
+    }
+
+    #[test]
+    fn a_sabr_cube_prices_by_strike() {
+        use crate::rates::engines::black::RateVolKind;
+        use crate::rates::models::sabr::{RateSabr, SabrSwaptionCube};
+        let curve = market_curve();
+        let mk = |alpha: f64| RateSabr::new(alpha, 0.0, -0.3, 0.4, 0.0).unwrap();
+        let cube = SabrSwaptionCube::new(
+            vec![1.0, 2.0],
+            vec![5.0],
+            vec![vec![mk(0.0090)], vec![mk(0.0085)]],
+            RateVolKind::Normal,
+        )
+        .unwrap();
+        let probe = swap(0.04, PayerReceiver::Payer);
+        let atm = Swaption::new(probe, d(2027, 8, 12))
+            .unwrap()
+            .forward_swap_rate(&curve, &curve)
+            .unwrap();
+        // at the money the cube quote is the node smile's ATM vol
+        let at = Swaption::new(swap(atm, PayerReceiver::Payer), d(2027, 8, 12)).unwrap();
+        let expiry = at.expiry(&curve).unwrap();
+        let smile = cube.smile(expiry, 5.0);
+        let expected = at
+            .npv_black(
+                &curve,
+                &curve,
+                RateVol::Normal(smile.normal_vol(atm, atm, expiry).unwrap()),
+            )
+            .unwrap();
+        let priced = at.npv_sabr(&cube, &curve, &curve).unwrap();
+        assert!((priced - expected).abs() < 1e-6, "{priced} vs {expected}");
+        // a low-strike receiver picks up the skew: dearer than at the ATM vol
+        let low = Swaption::new(swap(atm - 0.01, PayerReceiver::Receiver), d(2027, 8, 12)).unwrap();
+        let skewed = low.npv_sabr(&cube, &curve, &curve).unwrap();
+        let flat = low
+            .npv_black(
+                &curve,
+                &curve,
+                RateVol::Normal(smile.normal_vol(atm, atm, expiry).unwrap()),
+            )
+            .unwrap();
+        assert!(skewed > flat, "{skewed} vs {flat}");
     }
 
     #[test]

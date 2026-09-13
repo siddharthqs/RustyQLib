@@ -876,6 +876,12 @@ impl TrinomialLattice {
         (self.j_min[i], self.j_max[i])
     }
 
+    /// The branching out of node `(i, j)` — for engines that walk the
+    /// tree themselves (a layer-by-layer curve fit, say).
+    pub fn branch(&self, i: usize, j: i32) -> TrinomialBranch {
+        self.branches[i][(j - self.j_min[i]) as usize]
+    }
+
     /// Backward induction. `node_df(i, j)` is the one-step discount at
     /// the node (state-dependent: `e^{-r(i,j) dt}` on a short-rate
     /// tree); `terminal(j)` values the final layer; `exercise` (when

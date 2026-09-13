@@ -102,10 +102,12 @@ pub use crate::hybrid::{
     HazardLevel, JumpToDefaultMarket, MandatoryConversion,
 };
 pub use crate::rates::{
-    BasisSwap, BasisSwapLeg, CapFloor, CapOrFloor, CompoundingMethod, CoxIngersollRoss,
-    FedFundsFuture, HullWhite, LegSchedule, MultiCurve, MultiCurveBuilder, OneFactorAffine,
-    OvernightConvention, OvernightIndexSwap, PayerReceiver, QuoteSensitivity, RateFixings,
-    RateInstrument, RateVol, RollConvention, ShortRateModel, SofrContract, SofrFuture,
-    StubConvention, Swaption, VanillaSwap, Vasicek,
+    BasisSwap, BasisSwapLeg, BermudanSwaption, BlackKarasinski, CapFloor, CapOrFloor,
+    CapletVolCurve, CompoundingMethod, CoxIngersollRoss, ExtendedCir, FedFundsFuture, G2pp,
+    Gaussian1dModel, GridConfig, HullWhite, LegSchedule, MarkovFunctional, MultiCurve,
+    MultiCurveBuilder, OneFactorAffine, OvernightConvention, OvernightIndexSwap, PayerReceiver,
+    QuoteSensitivity, RateFixings, RateInstrument, RateSabr, RateVol, RateVolKind, RollConvention,
+    SabrSwaptionCube, ShortRateModel, SofrContract, SofrFuture, StubConvention, Swaption,
+    SwaptionVolSurface, VanillaSwap, Vasicek,
 };
 pub use crate::validation::martingale::{martingale_report, MartingaleConfig, MartingaleReport};

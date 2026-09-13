@@ -24,13 +24,28 @@
 //!
 //! - [`Vasicek`] — `dr = a(b - r)dt + sigma dW`. The pedagogical
 //!   Gaussian model with its own endogenous term structure.
-//! - [`HullWhite`] — `dr = (theta(t) - a r)dt + sigma dW`, the extended
-//!   Vasicek fitted **exactly** to an input [`YieldCurve`]
+//! - [`HullWhite`] — `dr = (theta(t) - a(t) r)dt + sigma(t) dW`, the
+//!   extended Vasicek fitted **exactly** to an input [`YieldCurve`]
 //!   (term-structure consistent: `P(0,T)` reproduces the curve's
-//!   discount factors by construction).
+//!   discount factors by construction), with constant or piecewise
+//!   coefficients — QuantLib's Hull-White, GSR ([`Gsr`]) and
+//!   GeneralizedHullWhite ([`GeneralizedHullWhite`]) in one type.
 //! - [`CoxIngersollRoss`] — `dr = a(b - r)dt + sigma sqrt(r) dW`,
 //!   square-root dynamics keeping rates non-negative under the Feller
-//!   condition.
+//!   condition, with noncentral chi-square bond options; and
+//!   [`ExtendedCir`] (CIR++), the same fitted to the curve by a shift.
+//! - [`BlackKarasinski`] — the lognormal short rate on a curve-fitted
+//!   trinomial tree.
+//! - [`G2pp`] — the two-additive-factor Gaussian model, its own
+//!   two-state API (bonds, options, an integral swaption formula and an
+//!   exact bivariate transition).
+//! - [`MarkovFunctional`] — the Hunt-Kennedy-Pelsser model with a
+//!   terminal-bond numeraire, calibrated backward to a coterminal
+//!   column so every calibrating swaption reprices at every strike.
+//! - [`Gaussian1dModel`] — the framework the last one and Hull-White
+//!   share: a Gaussian Markov driver under the numeraire measure, with
+//!   the [`gaussian1d`](crate::rates::engines::gaussian1d) engines
+//!   pricing Europeans and Bermudans on any implementation.
 //!
 //! Time is measured in year fractions from the model's anchor (for
 //! Hull-White, the curve's reference date and day count), which keeps
@@ -38,23 +53,47 @@
 //!
 //! [`YieldCurve`]: crate::core::curves::YieldCurve
 
+pub mod black_karasinski;
 pub mod calibration;
+pub mod caplet_vol;
 pub mod cir;
+pub mod g2pp;
+pub mod gaussian1d;
 pub mod hull_white;
+pub mod markov_functional;
+pub mod sabr;
 pub mod vasicek;
+pub mod vol_surface;
+pub mod zabr;
 
 /// Flat-path compatibility: the Jamshidian pricers used to live at
 /// `rates::models::pricers`; they are now
 /// [`rates::engines::jamshidian`](crate::rates::engines::jamshidian).
 pub use crate::rates::engines::jamshidian as pricers;
 
+pub use black_karasinski::{BlackKarasinski, TailSwap};
 pub use calibration::{
-    atm_swap_rate, calibrate_hull_white, calibrate_hull_white_sigma, HullWhiteFit, SwaptionQuote,
+    atm_swap_rate, calibrate_hull_white, calibrate_hull_white_piecewise,
+    calibrate_hull_white_sigma, HullWhiteFit, SwaptionQuote,
 };
-pub use cir::CoxIngersollRoss;
+pub use caplet_vol::{strip_caplet_vols, CapQuote, CapletVolCurve};
+pub use cir::{CoxIngersollRoss, ExtendedCir};
+pub use g2pp::{calibrate_g2pp, calibrate_g2pp_vols, G2pp, G2ppFit};
+pub use gaussian1d::{Gaussian1dModel, HullWhite1d};
 pub use hull_white::HullWhite;
+pub use markov_functional::MarkovFunctional;
 pub use pricers::{caplet, coupon_bond_option, european_swaption, floorlet};
+pub use sabr::{RateSabr, RateSabrFit, SabrSwaptionCube};
 pub use vasicek::Vasicek;
+pub use vol_surface::SwaptionVolSurface;
+pub use zabr::{ZabrConfig, ZabrFit, ZabrParams, ZabrSmile};
+
+/// QuantLib's name for Hull-White with a piecewise-constant sigma —
+/// [`HullWhite::with_piecewise_sigma`]; the same type.
+pub type Gsr = HullWhite;
+/// QuantLib's name for Hull-White with piecewise-constant mean
+/// reversion and sigma — [`HullWhite::generalized`]; the same type.
+pub type GeneralizedHullWhite = HullWhite;
 
 use crate::core::errors::RustyQLibError;
 use crate::core::trade::PutOrCall;
@@ -73,6 +112,13 @@ pub trait ShortRateModel {
     /// normal draw `z`. Exact for the Gaussian models; a full-truncation
     /// Euler step for CIR.
     fn evolve(&self, t: f64, short_rate: f64, dt: f64, z: f64) -> Result<f64, RustyQLibError>;
+
+    /// The lowest short rate the model admits at `t` — unbounded for
+    /// the Gaussian models, zero for square-root dynamics (and the
+    /// shift for CIR++). Root searches over the rate stay above it.
+    fn short_rate_floor(&self, _t: f64) -> f64 {
+        f64::NEG_INFINITY
+    }
 }
 
 /// The analytic layer of affine one-factor models: closed-form European

@@ -29,6 +29,26 @@ use crate::rates::PayerReceiver;
 
 const FIELD: &str = "rate option";
 
+/// The quoting convention of a [`RateVol`] without its number — what a
+/// vol surface or a caplet term structure is expressed in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RateVolKind {
+    Normal,
+    Lognormal,
+    ShiftedLognormal { shift: f64 },
+}
+
+impl RateVolKind {
+    /// A quote of this kind at `vol`.
+    pub fn with_vol(self, vol: f64) -> RateVol {
+        match self {
+            RateVolKind::Normal => RateVol::Normal(vol),
+            RateVolKind::Lognormal => RateVol::Lognormal(vol),
+            RateVolKind::ShiftedLognormal { shift } => RateVol::ShiftedLognormal { vol, shift },
+        }
+    }
+}
+
 /// How a rate option's volatility is quoted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RateVol {
@@ -49,6 +69,17 @@ impl RateVol {
         match self {
             RateVol::Normal(v) | RateVol::Lognormal(v) => *v,
             RateVol::ShiftedLognormal { vol, .. } => *vol,
+        }
+    }
+
+    /// The quoting convention without the number.
+    pub fn kind(&self) -> RateVolKind {
+        match self {
+            RateVol::Normal(_) => RateVolKind::Normal,
+            RateVol::Lognormal(_) => RateVolKind::Lognormal,
+            RateVol::ShiftedLognormal { shift, .. } => {
+                RateVolKind::ShiftedLognormal { shift: *shift }
+            }
         }
     }
 

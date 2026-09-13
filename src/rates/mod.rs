@@ -46,15 +46,21 @@ pub mod multicurve;
 pub use contracts::{
     basis_swap, cap_floor, fed_funds_future, ois, sofr_future, swaption, vanilla_swap,
 };
-pub use engines::RateVol;
-pub use engines::{black, jamshidian};
+pub use engines::{black, fd_g2pp, fd_hull_white, gaussian1d, hw_grid, jamshidian, mc_hull_white};
+pub use engines::{FdConfig, FdG2Config, GridConfig, McConfig, McResult};
+pub use engines::{RateVol, RateVolKind};
 
 pub use contracts::{
-    hull_convexity_adjustment, BasisSwap, BasisSwapLeg, CapFloor, CapOrFloor, CapletValue,
-    FedFundsFuture, OvernightIndexSwap, SofrContract, SofrFuture, Swaption, VanillaSwap,
+    hull_convexity_adjustment, BasisSwap, BasisSwapLeg, BermudanSwaption, CapFloor, CapOrFloor,
+    CapletValue, FedFundsFuture, OvernightIndexSwap, SofrContract, SofrFuture, Swaption,
+    VanillaSwap,
 };
 pub use leg::{AccrualPeriod, CompoundingMethod, FloatPeriod};
-pub use models::{CoxIngersollRoss, HullWhite, OneFactorAffine, ShortRateModel, Vasicek};
+pub use models::{
+    strip_caplet_vols, BlackKarasinski, CapQuote, CapletVolCurve, CoxIngersollRoss, ExtendedCir,
+    G2pp, Gaussian1dModel, HullWhite, MarkovFunctional, OneFactorAffine, RateSabr,
+    SabrSwaptionCube, ShortRateModel, SwaptionVolSurface, Vasicek,
+};
 pub use multicurve::{MultiCurve, MultiCurveBuilder, Pillar, QuoteSensitivity, RateInstrument};
 pub use overnight::{overnight_forward, simple_forward, OvernightConvention, RateFixings};
 pub use schedule::{LegSchedule, RollConvention, StubConvention};

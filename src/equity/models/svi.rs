@@ -890,6 +890,33 @@ impl SmoothedSurface for SviSurfaceFit {
 /// sufficient for this curvature family only on `(0, 1/2]`, so fitting
 /// inside that interval keeps every fitted surface certifiable.
 pub const SSVI_GAMMA_MAX: f64 = 0.5;
+
+/// Bound imposed on `eta (1 + |rho|)` during calibration: with the
+/// exponent inside `(0, 1/2]` this is the convenient sufficient form of
+/// the Gatheral--Jacquier butterfly conditions for the power-law
+/// curvature, and the form `Ssvi::validate` checks.
+pub const SSVI_ETA_BOUND: f64 = 2.0;
+
+/// Amplitude of the correlation transform: `rho = SSVI_RHO_MAX * sin(u)`
+/// keeps `rho` strictly inside `(-1, 1)`, where the validator requires it
+/// and where the SSVI slice is a smooth smile. `tanh` would reach `-1.0`
+/// exactly in floating point and freeze there, the same absorbing bound
+/// the sine map avoids for the other two parameters.
+pub const SSVI_RHO_MAX: f64 = 0.999;
+
+/// Map the real line onto `(0, 1)` with the periodic sine transform of
+/// lmfit, rather than a logistic. A logistic saturates: one overshooting
+/// Levenberg-Marquardt step in the transformed variable parks the
+/// parameter on its bound with an exactly-zero derivative, and no later
+/// step can bring it back. The sine map has no such absorbing state; an
+/// overshoot lands on the far side of the bound with a healthy gradient.
+fn bounded(u: f64) -> f64 {
+    0.5 * (1.0 + u.sin())
+}
+
+fn bounded_inv(g: f64) -> f64 {
+    (2.0 * g - 1.0).asin()
+}
 /// SSVI surface: ATM total-variance pillars plus global `(rho, eta,
 /// gamma)` with the power-law curvature.
 #[derive(Debug, Clone)]
@@ -1109,6 +1136,96 @@ impl Ssvi {
         theta_pillars: &[(f64, f64)],
         start: (f64, f64, f64),
     ) -> Result<SsviFit, RustyQLibError> {
+        Self::check_calibration_inputs(quotes, theta_pillars)?;
+        // The Gatheral-Jacquier butterfly conditions (Theorem 4.2) reduce,
+        // for the power-law curvature, to gamma <= 1/2 together with
+        // eta (1 + |rho|) <= 2: sup_theta theta*phi(theta)^2 equals eta^2
+        // at gamma = 1/2 and is unbounded above it. Both are imposed
+        // through the parameter transform, so every calibrated surface
+        // satisfies the sufficient set by construction rather than by
+        // inspection. This is a constrained optimum; the unconstrained
+        // one is available from `calibrate_unconstrained`.
+        let make = |u: &[f64]| {
+            let rho = SSVI_RHO_MAX * u[0].sin();
+            Ssvi {
+                rho,
+                eta: SSVI_ETA_BOUND / (1.0 + rho.abs()) * bounded(u[1]),
+                gamma: SSVI_GAMMA_MAX * bounded(u[2]),
+                theta_pillars: theta_pillars.to_vec(),
+            }
+        };
+        let (rho0, eta0, gamma0) = start;
+        let rho0 = rho0.clamp(-0.98 * SSVI_RHO_MAX, 0.98 * SSVI_RHO_MAX);
+        // start strictly inside each interval: on a bound the gradient in
+        // the transformed variable is zero
+        let x0 = vec![
+            (rho0 / SSVI_RHO_MAX).asin(),
+            bounded_inv((eta0 * (1.0 + rho0.abs()) / SSVI_ETA_BOUND).clamp(0.02, 0.98)),
+            bounded_inv((gamma0 / SSVI_GAMMA_MAX).clamp(0.02, 0.98)),
+        ];
+        // a short first stage: an interior optimum is found quickly, and a
+        // boundary optimum is finished exactly by the polish below
+        let mut fit = Self::run_calibration(quotes, &x0, &make, 300);
+        // The constrained optimum generically sits on the exponent bound
+        // (the data usually asks for a slower decay than the guarantee
+        // permits). The sine transform reaches a bound only asymptotically,
+        // so once the fit is within reach of it, re-solve the two remaining
+        // parameters with the exponent pinned exactly on the bound, and keep
+        // that solution if it is at least as good.
+        if fit.surface.gamma > SSVI_GAMMA_MAX * (1.0 - 1e-3) {
+            let pinned = |u: &[f64]| {
+                let rho = SSVI_RHO_MAX * u[0].sin();
+                Ssvi {
+                    rho,
+                    eta: SSVI_ETA_BOUND / (1.0 + rho.abs()) * bounded(u[1]),
+                    gamma: SSVI_GAMMA_MAX,
+                    theta_pillars: theta_pillars.to_vec(),
+                }
+            };
+            let r = fit.surface.rho.clamp(-0.98 * SSVI_RHO_MAX, 0.98 * SSVI_RHO_MAX);
+            let y0 = vec![
+                (r / SSVI_RHO_MAX).asin(),
+                bounded_inv((fit.surface.eta * (1.0 + r.abs()) / SSVI_ETA_BOUND).clamp(0.02, 0.98)),
+            ];
+            let polished = Self::run_calibration(quotes, &y0, &pinned, 1000);
+            if polished.rmse <= fit.rmse {
+                fit = polished;
+            }
+        }
+        Ok(fit)
+    }
+
+    /// The same fit with the exponent free on `(0, 1)` and `eta` free on
+    /// `(0, inf)`: the unconstrained optimum, which need not satisfy the
+    /// sufficient no-arbitrage set. A diagnostic of where the data would
+    /// take the exponent if the guarantee were not imposed. Warm-start it
+    /// from a constrained fit, so that the comparison is between optima
+    /// and not between starting points.
+    pub fn calibrate_unconstrained(
+        quotes: &[(f64, f64, f64)],
+        theta_pillars: &[(f64, f64)],
+        start: (f64, f64, f64),
+    ) -> Result<SsviFit, RustyQLibError> {
+        Self::check_calibration_inputs(quotes, theta_pillars)?;
+        let make = |u: &[f64]| Ssvi {
+            rho: SSVI_RHO_MAX * u[0].sin(),
+            eta: u[1].exp(),
+            gamma: bounded(u[2]),
+            theta_pillars: theta_pillars.to_vec(),
+        };
+        let (rho0, eta0, gamma0) = start;
+        let x0 = vec![
+            (rho0.clamp(-0.98 * SSVI_RHO_MAX, 0.98 * SSVI_RHO_MAX) / SSVI_RHO_MAX).asin(),
+            eta0.max(1e-6).ln(),
+            bounded_inv(gamma0.clamp(0.02, 0.98)),
+        ];
+        Ok(Self::run_calibration(quotes, &x0, &make, 1000))
+    }
+
+    fn check_calibration_inputs(
+        quotes: &[(f64, f64, f64)],
+        theta_pillars: &[(f64, f64)],
+    ) -> Result<(), RustyQLibError> {
         if quotes.len() < 3 {
             return Err(RustyQLibError::invalid_input(
                 "ssvi calibration",
@@ -1142,24 +1259,15 @@ impl Ssvi {
                 "theta pillars must have positive finite times and finite variances",
             ));
         }
-        // The Gatheral-Jacquier butterfly conditions are sufficient for the
-        // power-law curvature only while gamma <= 1/2: sup_theta
-        // theta*phi(theta)^2 equals eta^2 at gamma = 1/2 and is unbounded
-        // above it. Calibrating gamma inside (0, 1/2] therefore keeps the
-        // surface certifiable by construction rather than by inspection.
-        let make = |u: &[f64]| Ssvi {
-            rho: u[0].tanh(),
-            eta: u[1].exp(),
-            gamma: SSVI_GAMMA_MAX / (1.0 + (-u[2]).exp()),
-            theta_pillars: theta_pillars.to_vec(),
-        };
-        let (rho0, eta0, gamma0) = start;
-        let x0 = vec![rho0.clamp(-0.999, 0.999).atanh(), eta0.ln(), {
-            // Stay off the saturated tails of the logistic: a start at
-            // the cap has gradient ~0 in u and would freeze gamma there.
-            let g = (gamma0 / SSVI_GAMMA_MAX).clamp(0.02, 0.98);
-            (g / (1.0 - g)).ln()
-        }];
+        Ok(())
+    }
+
+    fn run_calibration(
+        quotes: &[(f64, f64, f64)],
+        x0: &[f64],
+        make: &dyn Fn(&[f64]) -> Ssvi,
+        max_iter: usize,
+    ) -> SsviFit {
         let residuals = |u: &[f64]| -> Vec<f64> {
             let s = make(u);
             quotes
@@ -1167,7 +1275,7 @@ impl Ssvi {
                 .map(|&(t, k, v)| s.total_variance(k, t) - v * v * t)
                 .collect()
         };
-        let fit = levenberg_marquardt(&OptimConfig::new(1e-14, 200), &residuals, None, &x0);
+        let fit = levenberg_marquardt(&OptimConfig::new(1e-14, max_iter), &residuals, None, x0);
         let surface = make(&fit.x);
         let rmse = (quotes
             .iter()
@@ -1175,12 +1283,12 @@ impl Ssvi {
             .sum::<f64>()
             / quotes.len() as f64)
             .sqrt();
-        Ok(SsviFit {
+        SsviFit {
             surface,
             rmse,
             iterations: fit.iterations,
             converged: fit.converged,
-        })
+        }
     }
 
     /// Sample the SSVI surface into the canonical pricing
@@ -1247,8 +1355,18 @@ pub struct SsviSurfaceFit {
     pub skipped_slices: usize,
 }
 
+/// The inputs one SSVI surface calibration is built from.
+struct SsviQuotes {
+    pillars: Vec<(f64, f64)>,
+    forwards: Vec<(f64, f64)>,
+    k_ranges: Vec<(f64, f64)>,
+    quotes: Vec<(f64, f64, f64)>,
+    skipped: usize,
+}
+
 impl SsviSurfaceFit {
-    /// Calibrate one global SSVI surface to every quote on `surface`.
+    /// Assemble the quotes, ATM pillars, forwards and quoted spans that
+    /// every SSVI fit on `surface` shares.
     ///
     /// ATM total variance pillars `theta_t` are read off the surface at
     /// each expiry's forward (not fitted), leaving the three shape
@@ -1256,10 +1374,10 @@ impl SsviSurfaceFit {
     /// split, and the one that keeps the ATM term structure exact by
     /// construction. Pillars are floored to be non-decreasing so the
     /// calendar condition holds even if the input surface grazes.
-    pub fn fit(
+    fn assemble(
         surface: &VolSurface,
         forward: impl Fn(f64) -> f64,
-    ) -> Result<SsviSurfaceFit, RustyQLibError> {
+    ) -> Result<SsviQuotes, RustyQLibError> {
         use crate::core::vols::{SmileCoordinate, VolInput};
         let VolInput::StrikeSmiles {
             expiries,
@@ -1321,17 +1439,60 @@ impl SsviSurfaceFit {
                 pillars[i].1 = pillars[i - 1].1;
             }
         }
-        let fit = Ssvi::calibrate(&quotes, &pillars, (-0.5, 0.5, 0.5))?;
-        Ok(SsviSurfaceFit {
+        Ok(SsviQuotes {
+            pillars,
+            forwards,
+            k_ranges,
+            quotes,
+            skipped,
+        })
+    }
+
+    /// Calibrate one global SSVI surface to every quote on `surface`.
+    ///
+    /// ATM total variance pillars `theta_t` are read off the surface at
+    /// each expiry's forward (not fitted), leaving the three shape
+    /// parameters `(rho, eta, gamma)` to the optimizer. The calibration
+    /// imposes the Gatheral--Jacquier sufficient set (`gamma <= 1/2`,
+    /// `eta (1 + |rho|) <= 2`) through its parameter transform, so the
+    /// fitted surface is free of static arbitrage at its pillars by
+    /// construction; see [`Ssvi::calibrate`].
+    pub fn fit(
+        surface: &VolSurface,
+        forward: impl Fn(f64) -> f64,
+    ) -> Result<SsviSurfaceFit, RustyQLibError> {
+        let q = Self::assemble(surface, forward)?;
+        // start in the interior of each bounded interval, never on a bound
+        let fit = Ssvi::calibrate(&q.quotes, &q.pillars, (-0.5, 0.5, 0.5 * SSVI_GAMMA_MAX))?;
+        Ok(Self::from_parts(surface, q, fit))
+    }
+
+    /// The unconstrained counterpart of [`Self::fit`]: exponent free on
+    /// `(0, 1)` and `eta` free, warm-started from `start` (normally the
+    /// constrained fit's own parameters). A diagnostic of where the data
+    /// would take the exponent without the guarantee; the surface need
+    /// not be arbitrage-free.
+    pub fn fit_unconstrained_from(
+        surface: &VolSurface,
+        forward: impl Fn(f64) -> f64,
+        start: (f64, f64, f64),
+    ) -> Result<SsviSurfaceFit, RustyQLibError> {
+        let q = Self::assemble(surface, forward)?;
+        let fit = Ssvi::calibrate_unconstrained(&q.quotes, &q.pillars, start)?;
+        Ok(Self::from_parts(surface, q, fit))
+    }
+
+    fn from_parts(surface: &VolSurface, q: SsviQuotes, fit: SsviFit) -> SsviSurfaceFit {
+        SsviSurfaceFit {
             reference_date: surface.reference_date(),
             day_count: surface.day_count(),
             ssvi: fit.surface,
-            forwards,
-            k_ranges,
+            forwards: q.forwards,
+            k_ranges: q.k_ranges,
             rmse: fit.rmse,
             converged: fit.converged,
-            skipped_slices: skipped,
-        })
+            skipped_slices: q.skipped,
+        }
     }
 
     /// Dupire local vol at underlying `level` and time `t`, from the
@@ -1857,7 +2018,11 @@ mod tests {
             }
         }
         let fit = Ssvi::calibrate(&quotes, &truth.theta_pillars, (-0.2, 0.5, 0.5)).unwrap();
-        assert!(fit.rmse < 1e-8, "vol rmse {}", fit.rmse);
+        assert!(
+            fit.rmse < 1e-8,
+            "vol rmse {} after {} iterations (converged {}): rho {} eta {} gamma {}",
+            fit.rmse, fit.iterations, fit.converged, fit.surface.rho, fit.surface.eta, fit.surface.gamma
+        );
         assert!(
             (fit.surface.rho - truth.rho).abs() < 1e-4,
             "rho {}",

@@ -128,8 +128,10 @@ impl AxisOperator {
         assert_eq!(rhs.len(), grid.len());
         let mut x = rhs.to_vec();
         if n == 1 {
-            for (xi, &r) in x.iter_mut().zip(rhs) {
-                *xi = r / (1.0 - c * self.diag[0]);
+            // a one-node axis is a per-node scalar solve: each node has
+            // its own diagonal (a state-dependent discount, say)
+            for (i, (xi, &r)) in x.iter_mut().zip(rhs).enumerate() {
+                *xi = r / (1.0 - c * self.diag[i]);
             }
             return x;
         }

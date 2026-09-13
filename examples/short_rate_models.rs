@@ -9,8 +9,10 @@ use rand::{Rng, SeedableRng};
 use rustyqlib::core::curves::{Compounding, InterpolationMethod, Tenor, YieldCurve};
 use rustyqlib::core::daycount::DayCountConvention;
 use rustyqlib::rates::engines::jamshidian::european_swaption;
+use rustyqlib::rates::models::calibration::calibrate_hull_white_piecewise;
 use rustyqlib::{
-    CapFloor, CapOrFloor, HullWhite, PayerReceiver, RateVol, ShortRateModel, Swaption, VanillaSwap,
+    BermudanSwaption, CapFloor, CapOrFloor, GridConfig, HullWhite, PayerReceiver, RateVol,
+    RateVolKind, ShortRateModel, Swaption, SwaptionVolSurface, VanillaSwap,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -150,6 +152,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             c.value
         );
     }
+
+    // A screen of ATM normal vols -> a piecewise-sigma Hull-White fitted
+    // expiry by expiry -> a Bermudan priced on the grid
+    let surface = SwaptionVolSurface::new(
+        vec![1.0, 2.0, 3.0, 5.0],
+        vec![5.0],
+        vec![vec![0.0095], vec![0.0092], vec![0.0090], vec![0.0086]],
+        RateVolKind::Normal,
+    )?;
+    let quotes = surface.usd_standard_quotes(&curve)?;
+    let fit = calibrate_hull_white_piecewise(&curve, &quotes, 0.05)?;
+    println!("\npiecewise Hull-White bootstrapped to a 5y-tenor column (a = 5%):");
+    for (i, sigma) in fit.model.sigmas().iter().enumerate() {
+        let from = if i == 0 {
+            0.0
+        } else {
+            fit.model.sigma_times()[i - 1]
+        };
+        let to = fit
+            .model
+            .sigma_times()
+            .get(i)
+            .map(|t| format!("{t:.2}"))
+            .unwrap_or_else(|| "inf".into());
+        println!("  sigma on [{from:.2}, {to}) = {:.1} bp", sigma * 10_000.0);
+    }
+    let bermudan = BermudanSwaption::on_fixed_period_starts(
+        VanillaSwap::usd_standard(
+            10_000_000.0,
+            atm_dated,
+            PayerReceiver::Payer,
+            d(2026, 8, 17),
+            d(2032, 8, 17),
+        )?,
+        d(2027, 8, 1),
+    )?;
+    let europeans = bermudan.european_values_hull_white(&fit.model)?;
+    println!(
+        "\n6nc1 Bermudan payer swaption on 10mm at {:.4}%: {:.2}  (best European {:.2}, {} exercise dates)",
+        atm_dated * 100.0,
+        bermudan.npv_hull_white(&fit.model, &GridConfig::default())?,
+        europeans.iter().cloned().fold(f64::MIN, f64::max),
+        bermudan.exercise_dates.len()
+    );
 
     // The cross-asset simulation contract: evolve the short rate with
     // the exact transition and discount along paths — a hybrid equity

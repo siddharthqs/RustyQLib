@@ -31,7 +31,7 @@ use crate::bonds::{CallOption, FixedRateBond, PutOption};
 use crate::core::curves::RateShift;
 use crate::core::errors::RustyQLibError;
 use crate::core::solvers::Solver1d;
-use crate::core::utils::norm_pdf;
+use crate::rates::engines::hw_grid::{self, GridConfig};
 use crate::rates::models::{HullWhite, ShortRateModel};
 
 /// A make-whole call: from `start` the issuer may redeem at
@@ -89,14 +89,6 @@ impl BondOptionality {
     }
 }
 
-/// State-grid nodes (odd, so `x = 0` is a node).
-const GRID_NODES: usize = 201;
-/// Grid half-width in terminal standard deviations of the state.
-const GRID_STDS: f64 = 7.0;
-/// Quadrature nodes over the standard normal (odd, Simpson).
-const QUAD_NODES: usize = 101;
-/// Quadrature span in standard deviations.
-const QUAD_SPAN: f64 = 8.0;
 /// OAS search bracket.
 const OAS_BRACKET: (f64, f64) = (-0.5, 3.0);
 
@@ -423,7 +415,7 @@ impl FixedRateBond {
         let base = self.option_adjusted_dirty_price_hw(model, optionality, spread, settlement)?;
         let bumped_price = |shift: f64| -> Result<f64, RustyQLibError> {
             let curve = model.curve().bumped(&RateShift::ParallelAbsolute(shift))?;
-            let refit = HullWhite::new(model.a, model.sigma, curve)?;
+            let refit = model.refit(curve)?;
             self.option_adjusted_dirty_price_hw(&refit, optionality, spread, settlement)
         };
         let up = bumped_price(bump)?;
@@ -448,63 +440,22 @@ fn backward_induction(
     if events.is_empty() {
         return Ok(0.0);
     }
-    let a = model.a;
-    let horizon = events.last().expect("events is non-empty").time;
-
-    // state grid: symmetric, wide enough for the terminal distribution
-    let terminal_std = model.short_rate_std(horizon.max(t_settlement).max(1e-8));
-    let half_width = (GRID_STDS * terminal_std).max(1e-4);
-    let dx = 2.0 * half_width / (GRID_NODES - 1) as f64;
-    let grid: Vec<f64> = (0..GRID_NODES)
-        .map(|j| -half_width + j as f64 * dx)
-        .collect();
-
-    // Simpson quadrature over the standard normal, weights normalized
-    // to sum to exactly one
-    let dz = 2.0 * QUAD_SPAN / (QUAD_NODES - 1) as f64;
-    let mut quad: Vec<(f64, f64)> = (0..QUAD_NODES)
-        .map(|k| {
-            let z = -QUAD_SPAN + k as f64 * dz;
-            let simpson = if k == 0 || k == QUAD_NODES - 1 {
-                1.0
-            } else if k % 2 == 1 {
-                4.0
-            } else {
-                2.0
-            };
-            (z, simpson * norm_pdf(z) * dz / 3.0)
-        })
-        .collect();
-    let total: f64 = quad.iter().map(|&(_, w)| w).sum();
-    for (_, w) in quad.iter_mut() {
-        *w /= total;
-    }
-
-    // linear interpolation with flat extrapolation on the grid
-    let interpolate = |values: &[f64], x: f64| -> f64 {
-        if x <= grid[0] {
-            return values[0];
-        }
-        if x >= grid[GRID_NODES - 1] {
-            return values[GRID_NODES - 1];
-        }
-        let position = (x - grid[0]) / dx;
-        let j = (position.floor() as usize).min(GRID_NODES - 2);
-        let weight = position - j as f64;
-        values[j] * (1.0 - weight) + values[j + 1] * weight
+    let times: Vec<f64> = events.iter().map(|e| e.time).collect();
+    let config = GridConfig {
+        min_horizon: t_settlement,
+        ..GridConfig::default()
     };
-
-    // backward through the events
-    let mut values = vec![0.0_f64; GRID_NODES];
-    for (index, event) in events.iter().enumerate().rev() {
-        // exercise decisions compare continuation only; the payment at
-        // this date is received regardless. Order: make-whole call,
-        // fixed-price call (issuer minimizes), then put (holder
-        // maximizes).
-        if let Some((mw_spread, mw_outstanding, mw_accrued)) = event.make_whole {
-            let alpha_here = model.alpha(event.time);
-            for (j, value) in values.iter_mut().enumerate() {
-                let rate = grid[j] + alpha_here;
+    // exercise decisions compare continuation only; the payment at
+    // this date is received regardless. Order: make-whole call,
+    // fixed-price call (issuer minimizes), then put (holder maximizes).
+    hw_grid::backward_induction(
+        model,
+        &times,
+        spread,
+        |index, rate, continuation| {
+            let event = &events[index];
+            let mut value = continuation;
+            if let Some((mw_spread, mw_outstanding, mw_accrued)) = event.make_whole {
                 // strike: max(par, remaining flows at the node's own
                 // curve plus the make-whole spread) plus accrued
                 let mut pv_remaining = 0.0;
@@ -516,61 +467,18 @@ fn backward_induction(
                     }
                 }
                 let strike = pv_remaining.max(mw_outstanding) + mw_accrued;
-                *value = value.min(strike);
+                value = value.min(strike);
             }
-        }
-        if let Some(strike) = event.call_strike {
-            for value in values.iter_mut() {
-                *value = value.min(strike);
+            if let Some(strike) = event.call_strike {
+                value = value.min(strike);
             }
-        }
-        if let Some(strike) = event.put_strike {
-            for value in values.iter_mut() {
-                *value = value.max(strike);
+            if let Some(strike) = event.put_strike {
+                value = value.max(strike);
             }
-        }
-        for value in values.iter_mut() {
-            *value += event.payment;
-        }
-
-        // diffuse back to the previous event (or the anchor)
-        let t_previous = if index == 0 {
-            0.0
-        } else {
-            events[index - 1].time
-        };
-        let dt = event.time - t_previous;
-        if dt <= 0.0 {
-            continue; // coincident events collapse into one node set
-        }
-        let decay = (-a * dt).exp();
-        // forward-measure mean shift of x over the step:
-        // M = sigma^2/a^2 [(1 - e^{-a dt}) - (1 - e^{-2a dt})/2]
-        let sigma2 = model.sigma * model.sigma;
-        let mean_shift = sigma2 / (a * a) * ((1.0 - decay) - 0.5 * (1.0 - (-2.0 * a * dt).exp()));
-        let step_std = model.short_rate_std(dt);
-        let alpha_previous = model.alpha(t_previous);
-        let spread_df = (-spread * dt).exp();
-
-        let mut next = vec![0.0_f64; GRID_NODES];
-        for (j, &x) in grid.iter().enumerate() {
-            let rate = x + alpha_previous;
-            let step_df = model.zero_bond(t_previous, event.time, rate)? * spread_df;
-            let mean = x * decay - mean_shift;
-            let expectation: f64 = if step_std > 0.0 {
-                quad.iter()
-                    .map(|&(z, w)| w * interpolate(&values, mean + step_std * z))
-                    .sum()
-            } else {
-                interpolate(&values, mean)
-            };
-            next[j] = step_df * expectation;
-        }
-        values = next;
-    }
-
-    // x = 0 is the center node of the odd grid
-    Ok(values[GRID_NODES / 2])
+            Ok(value + event.payment)
+        },
+        &config,
+    )
 }
 
 #[cfg(test)]

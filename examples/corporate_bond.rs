@@ -158,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nHull-White calibrated to {} ATM swaptions:", quotes.len());
     println!(
         "  sigma {:.2} bp (a fixed at 5%), price RMSE {:.2e}",
-        fit.model.sigma * 10_000.0,
+        fit.model.sigma() * 10_000.0,
         fit.price_rmse
     );
 

@@ -320,6 +320,16 @@ impl CapFloor {
         self.npv(model, model.curve())
     }
 
+    /// Value under Hull-White by Monte Carlo with exact steps between
+    /// fixings; returns the estimate with its standard error.
+    pub fn npv_mc_hull_white(
+        &self,
+        model: &HullWhite,
+        config: &crate::rates::engines::mc_hull_white::McConfig,
+    ) -> Result<crate::rates::engines::mc_hull_white::McResult, RustyQLibError> {
+        crate::rates::engines::mc_hull_white::cap_floor(model, self, config)
+    }
+
     // ── market vol: Black / Bachelier caplets at one flat vol ──────────
 
     /// The market formula: each unfixed caplet (floorlet) is
@@ -333,12 +343,44 @@ impl CapFloor {
         forecast: &YieldCurve,
         vol: RateVol,
     ) -> Result<f64, RustyQLibError> {
+        Ok(self
+            .caplet_black_values(discount, forecast, |_| vol)?
+            .iter()
+            .map(|&(_, value)| value)
+            .sum())
+    }
+
+    /// The market formula caplet by caplet, each unfixed period at the
+    /// vol `vol_at(fixing time)` — a term structure of caplet vols (see
+    /// [`CapletVolCurve`]) or one flat vol. Returns `(fixing time,
+    /// value)` per period in schedule order.
+    ///
+    /// [`CapletVolCurve`]: crate::rates::models::caplet_vol::CapletVolCurve
+    pub fn caplet_black_values(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        vol_at: impl Fn(f64) -> RateVol,
+    ) -> Result<Vec<(f64, f64)>, RustyQLibError> {
+        self.caplet_values_with(discount, forecast, &|fixing, _| Ok(vol_at(fixing)))
+    }
+
+    /// The market formula caplet by caplet with a vol chosen from each
+    /// caplet's fixing time **and forward** — a smile: `vol_at(fixing,
+    /// forward)` returns the quote at the cap's strike, see
+    /// [`RateSabr::quote`](crate::rates::models::sabr::RateSabr::quote).
+    pub fn caplet_values_with(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        vol_at: &dyn Fn(f64, f64) -> Result<RateVol, RustyQLibError>,
+    ) -> Result<Vec<(f64, f64)>, RustyQLibError> {
         let valuation = discount.reference_date();
         let side = match self.cap_or_floor {
             CapOrFloor::Cap => PutOrCall::Call,
             CapOrFloor::Floor => PutOrCall::Put,
         };
-        let mut value = 0.0;
+        let mut values = Vec::new();
         for p in self.periods()? {
             if p.start <= valuation {
                 continue;
@@ -347,12 +389,46 @@ impl CapFloor {
             let forward =
                 (checked_df(forecast, p.start)? / checked_df(forecast, p.end)? - 1.0) / tau;
             let fixing = year_fraction_from(discount, p.start);
-            value += self.notional
+            let value = self.notional
                 * tau
                 * discount.df_date(p.payment)
-                * rate_option_kernel(forward, self.strike, fixing, vol, side)?;
+                * rate_option_kernel(forward, self.strike, fixing, vol_at(fixing, forward)?, side)?;
+            values.push((fixing, value));
         }
-        Ok(value)
+        Ok(values)
+    }
+
+    /// Value each caplet against a smile: `smile_at(fixing time)` is
+    /// the caplet's [`RateSabr`](crate::rates::models::sabr::RateSabr),
+    /// read at the cap's strike and the caplet's forward in `kind`.
+    pub fn npv_with_smile(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        kind: crate::rates::engines::black::RateVolKind,
+        smile_at: impl Fn(f64) -> crate::rates::models::sabr::RateSabr,
+    ) -> Result<f64, RustyQLibError> {
+        Ok(self
+            .caplet_values_with(discount, forecast, &|fixing, forward| {
+                smile_at(fixing).quote(kind, forward, self.strike, fixing)
+            })?
+            .iter()
+            .map(|&(_, value)| value)
+            .sum())
+    }
+
+    /// Value each caplet at its own vol from a stripped term structure.
+    pub fn npv_with_caplet_vols(
+        &self,
+        discount: &YieldCurve,
+        forecast: &YieldCurve,
+        caplet_vols: &crate::rates::models::caplet_vol::CapletVolCurve,
+    ) -> Result<f64, RustyQLibError> {
+        Ok(self
+            .caplet_black_values(discount, forecast, |t| caplet_vols.quote(t))?
+            .iter()
+            .map(|&(_, value)| value)
+            .sum())
     }
 
     /// The flat Bachelier (normal) vol, in absolute rate units per
@@ -579,6 +655,54 @@ mod tests {
         assert!(floor
             .implied_flat_normal_vol(curve, curve, 0.5 * floor_intrinsic)
             .is_err());
+    }
+
+    #[test]
+    fn a_smile_prices_each_caplet_at_its_own_strike_vol() {
+        use crate::rates::engines::black::RateVolKind;
+        use crate::rates::models::sabr::RateSabr;
+        let m = model(0.011);
+        let curve = m.curve();
+        let cap = strip(0.045, CapOrFloor::Cap);
+        // a flat smile (nu = 0, beta = 0) is the flat normal vol
+        let flat = RateSabr::new(0.0080, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let via_smile = cap
+            .npv_with_smile(curve, curve, RateVolKind::Normal, |_| flat)
+            .unwrap();
+        let via_flat = cap
+            .npv_black(curve, curve, RateVol::Normal(0.0080))
+            .unwrap();
+        assert!(
+            (via_smile - via_flat).abs() < 1e-9,
+            "{via_smile} vs {via_flat}"
+        );
+        // an out-of-the-money cap under a downward skew is cheaper than
+        // at each caplet's own ATM vol; a term structure of smiles is
+        // one closure
+        let skewed = RateSabr::new(0.0080, 0.0, -0.4, 0.5, 0.0).unwrap();
+        let otm = strip(0.06, CapOrFloor::Cap);
+        let with_skew = otm
+            .npv_with_smile(curve, curve, RateVolKind::Normal, |_| skewed)
+            .unwrap();
+        let at_the_money: f64 = otm
+            .caplet_values_with(curve, curve, &|fixing, forward| {
+                Ok(RateVol::Normal(
+                    skewed.normal_vol(forward, forward, fixing)?,
+                ))
+            })
+            .unwrap()
+            .iter()
+            .map(|&(_, v)| v)
+            .sum();
+        assert!(with_skew < at_the_money, "{with_skew} vs {at_the_money}");
+        let term = |t: f64| {
+            RateSabr::new(if t < 1.5 { 0.009 } else { 0.007 }, 0.0, 0.0, 0.0, 0.0).unwrap()
+        };
+        assert!(
+            cap.npv_with_smile(curve, curve, RateVolKind::Normal, term)
+                .unwrap()
+                > 0.0
+        );
     }
 
     #[test]

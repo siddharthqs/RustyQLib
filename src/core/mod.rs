@@ -20,6 +20,7 @@ pub mod quotes;
 pub mod results;
 pub mod serialization;
 pub mod solvers;
+pub mod special;
 pub mod trade;
 pub mod traits;
 pub mod utils;

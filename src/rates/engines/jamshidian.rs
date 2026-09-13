@@ -132,7 +132,9 @@ pub fn coupon_bond_option_settled(
     // normalized by the strike so the tolerance is scale-free (a
     // million-notional leg solves as precisely as a unit one)
     let objective = |rate: f64| 1.0 - bond_value(rate) / (strike * settlement_bond(rate));
-    let root = Solver1d::new(1e-12, 200).bisection(objective, RATE_BRACKET.0, RATE_BRACKET.1)?;
+    // square-root models admit no rate below their floor at expiry
+    let lo = RATE_BRACKET.0.max(model.short_rate_floor(expiry) + 1e-12);
+    let root = Solver1d::new(1e-12, 200).bisection(objective, lo, RATE_BRACKET.1)?;
     if !root.converged {
         return Err(RustyQLibError::CalibrationFailed {
             iterations: root.iterations,
