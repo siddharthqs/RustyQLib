@@ -83,7 +83,7 @@ pub use crate::core::results::{Greeks, PricingResult};
 pub use crate::core::traits::Instrument;
 pub use crate::core::vols::{SmileCoordinate, VolInput, VolSurface, VolSurfaceDocument};
 pub use crate::credit::{
-    bootstrap_cds_curve, CdsQuote, CreditCurve, CreditDefaultSwap, ProtectionSide,
+    bootstrap_cds_curve, CdsOption, CdsQuote, CreditCurve, CreditDefaultSwap, ProtectionSide,
 };
 pub use crate::equity::black76::FuturesSettlement;
 pub use crate::equity::builder::EquityOptionBuilder;

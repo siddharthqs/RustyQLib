@@ -29,7 +29,9 @@
 //! Conventions: quarterly periods rolled back from the maturity (the
 //! IMM dates when the maturity is one), a front stub from the effective
 //! date, Act/360 accrual, coupons paid on the unadjusted period end.
-//! The valuation date is the protection start; the ISDA one-day
+//! The valuation date is normally the protection start; a valuation
+//! before the effective date prices the contract forward-starting, the
+//! forward legs [`cds_option`](super::cds_option) needs. The ISDA one-day
 //! extension of the final period and the business-day adjustment of
 //! payment dates are not applied. The par spread is the coupon that
 //! zeroes the value; the points upfront of a contract with a fixed
@@ -164,18 +166,24 @@ impl CreditDefaultSwap {
 
     /// The two legs per unit notional on the curves, as
     /// `(risky annuity per unit coupon, protection)`.
+    ///
+    /// A valuation date before the effective date values the contract
+    /// **forward**: the periods still run from the effective date, so
+    /// the legs cover `[effective, maturity]` only, while the discount
+    /// factors and survival probabilities are taken from the valuation
+    /// date. That is what [`cds_option`](super::cds_option) prices off.
     fn legs(
         &self,
         curve: &YieldCurve,
         credit: &CreditCurve,
         valuation: NaiveDate,
     ) -> Result<(f64, f64), RustyQLibError> {
-        if valuation < self.effective_date || valuation >= self.maturity {
+        if valuation >= self.maturity {
             return Err(RustyQLibError::invalid_input(
                 "cds",
                 format!(
-                    "valuation {valuation} must lie in the protection period {} to {}",
-                    self.effective_date, self.maturity
+                    "valuation {valuation} must precede the maturity {}",
+                    self.maturity
                 ),
             ));
         }

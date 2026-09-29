@@ -409,9 +409,14 @@ pub fn implied_vol_surface_from_chain(
 /// Configuration for [`de_americanize_chain`].
 #[derive(Clone, Debug)]
 pub struct DeAmericanizeConfig {
-    /// CRR binomial steps for the early-exercise premium. The EEP is a
-    /// *difference* of two prices with identical discretization error to
-    /// leading order, so it converges much faster than either price.
+    /// CRR binomial steps for the early-exercise premium. The European
+    /// leg is closed-form Black-Scholes, so the EEP inherits the tree's
+    /// own discretization error: a few tenths of a basis point of spot
+    /// at 201 steps, falling as 1/N. That is well inside the put premia
+    /// it measures; for out-of-the-money calls with small carry, whose
+    /// true premium is near zero, the floored EEP is mostly this error.
+    /// (The control-variate form, tree-American minus tree-European on
+    /// the same lattice, would cancel it to leading order.)
     pub tree_steps: usize,
     /// Correction rounds (forward → implied carry → EEP → forward).
     /// Two suffice: the EEP barely depends on the residual carry error.
@@ -689,9 +694,10 @@ pub fn de_americanize_chain(
 
 /// American option price on a Cox–Ross–Rubinstein lattice with flat
 /// continuous rate and carry — deliberately minimal: it exists only to
-/// measure the early-exercise premium in [`de_americanize_chain`],
-/// where its discretization error cancels against the matching European
-/// limit to leading order.
+/// measure the early-exercise premium in [`de_americanize_chain`]. Its
+/// O(1/N) discretization error passes into that premium unreduced,
+/// because the European leg there is closed form rather than the same
+/// lattice; see [`DeAmericanizeConfig::tree_steps`] for its size.
 fn crr_american(
     spot: f64,
     strike: f64,

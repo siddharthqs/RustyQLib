@@ -1,6 +1,7 @@
 //! Market dynamics and volatility structure: stochastic models, their
 //! path-simulation processes, and implied-vol parameterizations.
 
+pub mod american_lv;
 pub mod bates;
 pub mod calibration;
 pub mod essvi;
